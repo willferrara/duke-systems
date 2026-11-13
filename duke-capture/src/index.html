@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Duke Capture</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body data-theme="dark">
+  <!-- Zero-RAM 1.5px Vector Icon Sprite -->
+  <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+    <symbol id="icon-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></symbol>
+    <symbol id="icon-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></symbol>
+    <symbol id="icon-folder-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4l2 2h9a2 2 0 0 1 2 2v2"/><path d="M5 19h14a2 2 0 0 0 1.9-1.4l2-6.5A1 1 0 0 0 22 10H9a1 1 0 0 0-.95.68L5 19Z"/></symbol>
+    <symbol id="icon-shield-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="icon-trash-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></symbol>
+    <symbol id="icon-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/></symbol>
+    <symbol id="icon-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="2" y1="14" x2="6" y2="14"/><line x1="10" y1="8" x2="14" y2="8"/><line x1="18" y1="16" x2="22" y2="16"/></symbol>
+    <symbol id="icon-cpu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></symbol>
+    <symbol id="icon-activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+    <symbol id="icon-video" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></symbol>
+    <symbol id="icon-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></symbol>
+    <symbol id="icon-gamepad-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="11" x2="10" y2="11"/><line x1="8" y1="9" x2="8" y2="13"/><line x1="15" y1="12" x2="15.01" y2="12"/><line x1="18" y1="10" x2="18.01" y2="10"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/></symbol>
+    <symbol id="icon-mouse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="3" width="12" height="18" rx="6"/><path d="M12 7v4"/></symbol>
+    <symbol id="icon-radio" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+    <symbol id="icon-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+    <symbol id="icon-arrow-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></symbol>
+    <symbol id="icon-refresh-cw" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol>
+    <symbol id="icon-sparkles" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/></symbol>
+    <symbol id="icon-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></symbol>
+    <symbol id="icon-zap" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></symbol>
+    <symbol id="icon-scissors" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><path d="M8.12 8.12 12 12"/><path d="M20 4 8.12 15.88"/><circle cx="6" cy="18" r="3"/><path d="M14.8 14.8 20 20"/></symbol>
+    <symbol id="icon-win-min" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3"><line x1="2" y1="6" x2="10" y2="6"/></symbol>
+    <symbol id="icon-win-max" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.25"><rect x="2.2" y="2.2" width="7.6" height="7.6" rx="1"/></symbol>
+    <symbol id="icon-win-close" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"><line x1="2.5" y1="2.5" x2="9.5" y2="9.5"/><line x1="9.5" y1="2.5" x2="2.5" y2="9.5"/></symbol>
+  </svg>
+
+  <div class="window-shell">
+    <!-- Custom 36px Native Windows 11 Titlebar -->
+    <header id="app-titlebar" class="app-titlebar">
+      <div class="titlebar-left" data-tauri-drag-region>
+        <img src="dukecapture.png" alt="Duke Capture" class="titlebar-emblem" />
+        <span class="titlebar-app-name" data-tauri-drag-region>Duke Capture</span>
+        <span class="titlebar-version">v0.2</span>
+      </div>
+
+      <div class="titlebar-drag-filler" data-tauri-drag-region>
+        <div class="titlebar-search-wrap">
+          <svg class="icon titlebar-search-icon"><use href="#icon-search"/></svg>
+          <input
+            type="text"
+            id="titleClipSearch"
+            class="titlebar-search-input"
+            placeholder="Search saved clips or filter by game..."
+            autocomplete="off"
+          />
+          <kbd class="titlebar-kbd">Ctrl+K</kbd>
+        </div>
+      </div>
+
+      <div class="titlebar-controls">
+        <button id="win-btn-min" class="win-btn" type="button" title="Minimize">
+          <svg class="win-icon"><use href="#icon-win-min"/></svg>
+        </button>
+        <button id="win-btn-max" class="win-btn" type="button" title="Maximize">
+          <svg class="win-icon"><use href="#icon-win-max"/></svg>
+        </button>
+        <button id="win-btn-close" class="win-btn win-btn-close" type="button" title="Close to Tray">
+          <svg class="win-icon"><use href="#icon-win-close"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="app-body">
+      <aside class="sidebar">
+        <nav class="nav-list">
+          <button type="button" class="nav-btn active" data-tab="replay">
+            <svg class="icon"><use href="#icon-video"/></svg>
+            <span>Replay Buffer</span>
+          </button>
+          <button type="button" class="nav-btn" data-tab="clips">
+            <svg class="icon"><use href="#icon-layers"/></svg>
+            <span>Clip Studio</span>
+          </button>
+          <button type="button" class="nav-btn" data-tab="audio">
+            <svg class="icon"><use href="#icon-mic"/></svg>
+            <span>Audio &amp; Hotkeys</span>
+          </button>
+          <button type="button" class="nav-btn" data-tab="settings">
+            <svg class="icon"><use href="#icon-sliders"/></svg>
+            <span>Settings</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="telemetry-panel">
+            <div class="telemetry-row">
+              <span>Process RAM</span>
+              <strong id="sidebarOwnRam" class="mono">0.0 MB</strong>
+            </div>
+            <div class="telemetry-row">
+              <span>DoH Shield</span>
+              <strong id="sidebarDohShield" class="status-ok">Active</strong>
+            </div>
+            <div class="telemetry-row">
+              <span>Eco Scheduler</span>
+              <strong id="sidebarEcoStatus" class="status-accent">Ready</strong>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <!-- Studio Status Strip -->
+        <header class="studio-strip">
+          <div class="studio-strip-left">
+            <h1 id="topbarTitle" class="topbar-title">Instant Replay Buffer</h1>
+            <span id="topReplayStatusBadge" class="status-badge">Standby</span>
+            <span id="stripEncoderBadge" class="spec-chip mono">NVENC / MF</span>
+            <span id="stripBufferWindow" class="spec-chip mono">60s Ring</span>
+            <span id="topHotkeyBadge" class="spec-chip hotkey-chip mono">F8</span>
+          </div>
+          <div class="studio-strip-actions">
+            <button id="topSaveClipBtn" type="button" class="btn btn-emerald">
+              <svg class="icon"><use href="#icon-download"/></svg>
+              <span>Save Clip Now</span>
+            </button>
+            <button id="topToggleReplayBtn" type="button" class="btn btn-primary">
+              <svg class="icon"><use href="#icon-play"/></svg>
+              <span>Start Buffer</span>
+            </button>
+          </div>
+        </header>
+
+        <section class="content-view">
+          <!-- REPLAY BUFFER WORKSTATION -->
+          <div id="view-replay" class="tab-panel active">
+            <section class="card hero-card">
+              <div class="hero-row">
+                <div class="hero-copy">
+                  <h2 id="heroStatusHeadline" class="hero-title">Instant Replay Standby</h2>
+                  <div class="hero-meta-row">
+                    <span id="encoderBadge" class="pill pill-accent mono">DXGI + Media Foundation HW</span>
+                    <span id="activeGameBadge" class="pill">Active Game: Desktop</span>
+                    <span id="bufferedRamBadge" class="pill mono">0.0s / 0.0 MB</span>
+                  </div>
+                </div>
+                <div class="hero-controls">
+                  <button id="mainToggleReplayBtn" type="button" class="btn btn-primary btn-lg">
+                    <svg class="icon"><use href="#icon-play"/></svg>
+                    <span>Arm Replay Buffer</span>
+                  </button>
+                  <button id="mainSaveClipBtn" type="button" class="btn btn-emerald btn-lg">
+                    <svg class="icon"><use href="#icon-download"/></svg>
+                    <span>Save Last <span id="saveDurationLabel" class="mono">60s</span></span>
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            <div class="replay-grid">
+              <section class="card">
+                <div class="card-header">
+                  <div>
+                    <h3 class="card-title">Video &amp; Ring Buffer Engine</h3>
+                    <p class="card-desc">Zero-disk circular segment cache locked inside working set RAM</p>
+                  </div>
+                  <svg class="icon icon-muted"><use href="#icon-cpu"/></svg>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">Ring Buffer Window</label>
+                  <div class="segmented-row" id="bufferDurationGroup">
+                    <button type="button" class="seg-btn mono" data-sec="15">15s</button>
+                    <button type="button" class="seg-btn mono" data-sec="30">30s</button>
+                    <button type="button" class="seg-btn active mono" data-sec="60">60s</button>
+                    <button type="button" class="seg-btn mono" data-sec="120">120s</button>
+                  </div>
+                </div>
+
+                <div class="two-col-row">
+                  <div class="form-group">
+                    <label class="form-label" for="resolutionSelect">Capture Resolution</label>
+                    <select id="resolutionSelect" class="select-control">
+                      <option value="1080p">1080p (Recommended)</option>
+                      <option value="1440p">1440p QHD</option>
+                      <option value="native">Native Display</option>
+                    </select>
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label" for="fpsSelect">Frame Rate</label>
+                    <select id="fpsSelect" class="select-control">
+                      <option value="60">60 FPS Smooth</option>
+                      <option value="30">30 FPS Ultra-Light</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <div class="slider-head">
+                    <label class="form-label" for="bitrateSlider">Hardware Encoder Bitrate</label>
+                    <span id="bitrateReadout" class="mono readout-val">12.0 Mbps</span>
+                  </div>
+                  <input id="bitrateSlider" type="range" min="4000" max="30000" step="1000" value="12000" class="range-input" />
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label" for="encoderSelect">Hardware Backend Preference</label>
+                  <select id="encoderSelect" class="select-control">
+                    <option value="auto">Auto Detect (NVENC / QSV / AMF / MF)</option>
+                    <option value="nvenc">NVIDIA NVENC Hardware</option>
+                    <option value="qsv">Intel QuickSync (QSV)</option>
+                    <option value="amf">AMD VCE / AMF Hardware</option>
+                    <option value="mf">Windows Media Foundation HW</option>
+                  </select>
+                </div>
+
+                <div class="ffmpeg-status-box">
+                  <div class="ffmpeg-copy">
+                    <div id="ffmpegStatusTitle" class="setting-title">Built-in Media Foundation Ready</div>
+                    <div id="ffmpegStatusDesc" class="sub-text">Zero-dependency encoder ready. Add FFmpeg for ultrafast stream-copy trims.</div>
+                  </div>
+                  <button id="installFfmpegBtn" type="button" class="btn btn-secondary btn-sm">
+                    <svg class="icon"><use href="#icon-download"/></svg>
+                    <span>Install FFmpeg</span>
+                  </button>
+                </div>
+                <div id="ffmpegProgressWrap" class="progress-track hidden">
+                  <div id="ffmpegProgressBar" class="progress-fill accent" style="width: 0%"></div>
+                </div>
+              </section>
+
+              <section class="card">
+                <div class="card-header">
+                  <div>
+                    <h3 class="card-title">Live WASAPI Audio Mix</h3>
+                    <p class="card-desc">Isolated loopback capture blended cleanly with microphone input</p>
+                  </div>
+                  <svg class="icon icon-muted"><use href="#icon-activity"/></svg>
+                </div>
+
+                <div class="meter-stack">
+                  <div class="meter-block">
+                    <div class="meter-head">
+                      <span>PC &amp; Discord Loopback</span>
+                      <span id="replaySysMeterPct" class="mono readout-val">0%</span>
+                    </div>
+                    <div class="meter-track">
+                      <div id="replaySysMeterBar" class="meter-fill accent" style="width: 0%"></div>
+                    </div>
+                  </div>
+
+                  <div class="meter-block">
+                    <div class="meter-head">
+                      <span>Microphone Input</span>
+                      <span id="replayMicMeterPct" class="mono readout-val">0%</span>
+                    </div>
+                    <div class="meter-track">
+                      <div id="replayMicMeterBar" class="meter-fill emerald" style="width: 0%"></div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="kv-grid">
+                  <div class="kv-box">
+                    <span class="kv-label">Clip Hotkey</span>
+                    <span id="replayHotkeyCardVal" class="kv-value mono">F8</span>
+                  </div>
+                  <div class="kv-box">
+                    <span class="kv-label">Microphone Status</span>
+                    <span id="replayMicStatusVal" class="kv-value status-ok">Live (Gate On)</span>
+                  </div>
+                  <div class="kv-box">
+                    <span class="kv-label">Save Folder</span>
+                    <span id="replayClipsDirShort" class="kv-value mono path-truncate">Videos\Duke Clips</span>
+                  </div>
+                  <div class="kv-box">
+                    <span class="kv-label">Chime Volume</span>
+                    <span id="replayChimeVolVal" class="kv-value mono">85%</span>
+                  </div>
+                </div>
+
+                <div class="toolbar-row">
+                  <button id="quickTestChimeBtn" type="button" class="btn btn-secondary">
+                    <svg class="icon"><use href="#icon-radio"/></svg>
+                    <span>Test Chime</span>
+                  </button>
+                  <button id="quickMuteMicBtn" type="button" class="btn btn-secondary">
+                    <svg class="icon"><use href="#icon-mic"/></svg>
+                    <span>Toggle Mic Mute</span>
+                  </button>
+                  <button id="quickOpenClipsBtn" type="button" class="btn btn-secondary">
+                    <svg class="icon"><use href="#icon-folder-open"/></svg>
+                    <span>Open Clips Folder</span>
+                  </button>
+                </div>
+              </section>
+            </div>
+          </div>
+
+          <!-- CLIP STUDIO & TRIMMER -->
+          <div id="view-clips" class="tab-panel">
+            <div class="panel-header-strip">
+              <div class="strip-meta">
+                <div class="inline-search">
+                  <svg class="icon inline-search-icon"><use href="#icon-search"/></svg>
+                  <input id="clipSearchInput" type="text" class="input-control has-leading-icon" placeholder="Search clips by filename or game..." />
+                </div>
+                <select id="clipGameFilter" class="select-control">
+                  <option value="all">All Games</option>
+                </select>
+                <span id="clipCountBadge" class="pill mono">0 clips</span>
+              </div>
+              <div class="strip-actions">
+                <button id="clipsOpenFolderBtn" type="button" class="btn btn-secondary">
+                  <svg class="icon"><use href="#icon-folder-open"/></svg>
+                  <span>Open Clips Folder</span>
+                </button>
+                <button id="clipsRefreshBtn" type="button" class="btn btn-primary">
+                  <svg class="icon"><use href="#icon-refresh-cw"/></svg>
+                  <span>Refresh</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="clips-studio-grid">
+              <section class="card clips-list-card">
+                <div class="card-header">
+                  <div>
+                    <h3 class="card-title">Clip Library</h3>
+                    <p class="card-desc">Grouped automatically by foreground game title</p>
+                  </div>
+                </div>
+                <div id="clipsListContainer" class="clips-list-scroll">
+                  <div class="empty-msg">Scanning clips directory...</div>
+                </div>
+              </section>
+
+              <section class="card clip-editor-card">
+                <div class="card-header">
+                  <div>
+                    <h3 id="selectedClipTitle" class="card-title">Select a clip to preview</h3>
+                    <p id="selectedClipGame" class="card-desc">Ready for instant keyframe trimming and Discord export</p>
+                  </div>
+                  <span id="selectedClipMeta" class="pill mono">-- MB • 00:00</span>
+                </div>
+
+                <div class="video-stage">
+                  <video id="clipPlayer" controls preload="metadata"></video>
+                </div>
+
+                <div class="trim-controls-box">
+                  <div class="trim-head">
+                    <span class="form-label">Inline Keyframe Trimmer</span>
+                    <span id="trimRangeSummary" class="mono readout-val">00:00 -> 00:30 (00:30)</span>
+                  </div>
+                  <div class="trim-row">
+                    <button id="setStartFromPlayheadBtn" type="button" class="btn btn-xs btn-secondary">
+                      <svg class="icon"><use href="#icon-pin"/></svg>
+                      <span>Mark In</span>
+                    </button>
+                    <input id="trimStartSlider" type="range" min="0" max="60" step="0.1" value="0" class="range-input" />
+                    <button id="setEndFromPlayheadBtn" type="button" class="btn btn-xs btn-secondary">
+                      <svg class="icon"><use href="#icon-pin"/></svg>
+                      <span>Mark Out</span>
+                    </button>
+                    <input id="trimEndSlider" type="range" min="0" max="60" step="0.1" value="30" class="range-input" />
+                  </div>
+                </div>
+
+                <div class="clip-action-bar">
+                  <button id="trimClipBtn" type="button" class="btn btn-primary" disabled>
+                    <svg class="icon"><use href="#icon-scissors"/></svg>
+                    <span>Trim Copy</span>
+                  </button>
+                  <button id="copyDiscordBtn" type="button" class="btn btn-emerald" disabled>
+                    <svg class="icon"><use href="#icon-layers"/></svg>
+                    <span>Copy for Discord</span>
+                  </button>
+                  <button id="compressDiscord10Btn" type="button" class="btn btn-amber" disabled>
+                    <svg class="icon"><use href="#icon-zap"/></svg>
+                    <span>Compress &lt;10 MB</span>
+                  </button>
+                  <button id="compressDiscord25Btn" type="button" class="btn btn-amber" disabled>
+                    <svg class="icon"><use href="#icon-zap"/></svg>
+                    <span>Compress &lt;25 MB</span>
+                  </button>
+                  <button id="openClipExplorerBtn" type="button" class="btn btn-secondary" disabled>
+                    <svg class="icon"><use href="#icon-folder-open"/></svg>
+                    <span>Reveal File</span>
+                  </button>
+                  <button id="deleteClipBtn" type="button" class="btn btn-danger" disabled>
+                    <svg class="icon"><use href="#icon-trash-2"/></svg>
+                    <span>Delete</span>
+                  </button>
+                </div>
+              </section>
+            </div>
+          </div>
+
+          <!-- AUDIO & GLOBAL HOTKEYS -->
+          <div id="view-audio" class="tab-panel">
+            <div class="replay-grid">
+              <section class="card">
+                <div class="card-header">
+                  <div>
+                    <h3 class="card-title">Global Instant Replay Hotkey</h3>
+                    <p class="card-desc">Triggers silently in DirectX, Vulkan, and borderless fullscreen games</p>
+                  </div>
+                  <svg class="icon icon-muted"><use href="#icon-zap"/></svg>
+                </div>
+
+                <button id="hotkeyBinderBox" type="button" class="hotkey-binder">
+                  <span id="hotkeyBinderDisplay" class="hotkey-badge mono">F8</span>
+                  <span id="hotkeyBinderHint" class="hotkey-hint">Click to bind any key, modifier combo (Alt+F10), or Mouse4/Mouse5</span>
+                </button>
+
+                <div class="form-group">
+                  <div class="slider-head">
+                    <label class="form-label" for="chimeVolumeSlider">Save Confirmation Chime Volume</label>
+                    <span id="chimeVolumeReadout" class="mono readout-val">85%</span>
+                  </div>
+                  <input id="chimeVolumeSlider" type="range" min="0" max="100" step="5" value="85" class="range-input" />
+                </div>
+
+                <div>
+                  <button id="audioTestChimeBtn" type="button" class="btn btn-secondary">
+                    <svg class="icon"><use href="#icon-radio"/></svg>
+                    <span>Play Chime Preview</span>
+                  </button>
+                </div>
+              </section>
+
+              <section class="card">
+                <div class="card-header">
+                  <div>
+                    <h3 class="card-title">WASAPI Dual Audio Capture</h3>
+                    <p class="card-desc">Balance system loopback and microphone gain levels independently</p>
+                  </div>
+                  <button id="refreshAudioDevsBtn" type="button" class="btn btn-xs btn-secondary">
+                    <svg class="icon"><use href="#icon-refresh-cw"/></svg>
+                    <span>Refresh Devices</span>
+                  </button>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label" for="micDeviceSelect">Microphone Input Device</label>
+                  <select id="micDeviceSelect" class="select-control">
+                    <option value="">Default Windows Microphone</option>
+                  </select>
+                </div>
+
+                <div class="form-group">
+                  <div class="slider-head">
+                    <label class="form-label" for="systemVolumeSlider">PC &amp; Discord Volume</label>
+                    <span id="systemVolumeReadout" class="mono readout-val">100%</span>
+                  </div>
+                  <input id="systemVolumeSlider" type="range" min="0" max="150" step="5" value="100" class="range-input" />
+                  <div class="meter-track"><div id="audioTabSysBar" class="meter-fill accent" style="width: 0%"></div></div>
+                </div>
+
+                <div class="form-group">
+                  <div class="slider-head">
+                    <label class="form-label" for="micGainSlider">Microphone Gain</label>
+                    <span id="micGainReadout" class="mono readout-val">100%</span>
+                  </div>
+                  <input id="micGainSlider" type="range" min="0" max="200" step="5" value="100" class="range-input" />
+                  <div class="meter-track"><div id="audioTabMicBar" class="meter-fill emerald" style="width: 0%"></div></div>
+                </div>
+
+                <div class="setting-row">
+                  <div>
+                    <div class="setting-title">Mute Microphone in Clips</div>
+                    <div class="setting-desc">Capture game and Discord audio only</div>
+                  </div>
+                  <label class="toggle-switch">
+                    <input id="micMuteToggle" type="checkbox" />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+
+                <div class="setting-row no-border">
+                  <div>
+                    <div class="setting-title">Microphone Noise Gate</div>
+                    <div class="setting-desc">Suppresses mechanical keyboard clicks &amp; fan floor under -42 dB</div>
+                  </div>
+                  <label class="toggle-switch">
+                    <input id="noiseGateToggle" type="checkbox" checked />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+              </section>
+            </div>
+          </div>
+
+          <!-- SETTINGS & ZERO-RAM SVG THEMES -->
+          <div id="view-settings" class="tab-panel">
+            <div class="settings-grid">
+              <section class="card">
+                <div class="card-header">
+                  <div>
+                    <h3 class="card-title">Clip Storage &amp; Memory Footprint</h3>
+                    <p class="card-desc">Output directory routing, working-set limits, and network protection</p>
+                  </div>
+                  <svg class="icon icon-muted"><use href="#icon-shield-check"/></svg>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label" for="clipsDirInput">Clips Output Folder</label>
+                  <div class="dir-picker-row">
+                    <input id="clipsDirInput" type="text" class="input-control mono" readonly />
+                    <button id="browseClipsDirBtn" type="button" class="btn btn-primary">
+                      <svg class="icon"><use href="#icon-folder-open"/></svg>
+                      <span>Browse</span>
+                    </button>
+                    <button id="settingsOpenClipsBtn" type="button" class="btn btn-secondary">Open</button>
+                  </div>
+                </div>
+
+                <div class="setting-row">
+                  <div>
+                    <div class="setting-title">Auto-Trim Idle WebView Working Set</div>
+                    <div class="setting-desc">Drops idle RAM down below 10 MB when minimized to the system tray</div>
+                  </div>
+                  <label class="toggle-switch">
+                    <input id="autoTrimToggle" type="checkbox" checked />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+
+                <div class="setting-row no-border">
+                  <div>
+                    <div class="setting-title">Flush Unused Memory Now</div>
+                    <div class="setting-desc">Calls K32EmptyWorkingSet cleanly without interrupting capture</div>
+                  </div>
+                  <button id="trimOwnRamBtn" type="button" class="btn btn-secondary">
+                    <svg class="icon"><use href="#icon-zap"/></svg>
+                    <span>Purge RAM</span>
+                  </button>
+                </div>
+
+                <div class="kv-grid compact">
+                  <div class="kv-box">
+                    <span class="kv-label">Storage Mode</span>
+                    <span id="settingsStorageMode" class="kv-value mono">AppData</span>
+                  </div>
+                  <div class="kv-box">
+                    <span class="kv-label">DoH Shield</span>
+                    <span id="settingsDohStatus" class="kv-value status-ok">Active</span>
+                  </div>
+                  <div class="kv-box">
+                    <span class="kv-label">Eco Scheduler</span>
+                    <span id="settingsEcoStatus" class="kv-value status-accent">Ready</span>
+                  </div>
+                </div>
+              </section>
+
+              <section class="card">
+                <div class="card-header">
+                  <div>
+                    <h3 class="card-title">Zero-RAM SVG Backdrop Themes</h3>
+                    <p class="card-desc">GPU-accelerated CSS &amp; inline SVG surfaces with zero image decoding</p>
+                  </div>
+                  <span id="activeThemeBadge" class="pill pill-accent">Obsidian Dark</span>
+                </div>
+                <div id="themeGrid" class="theme-grid"></div>
+              </section>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="toastContainer" class="toast-container"></div>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+# Node / Frontend Tooling
+node_modules/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Rust / Tauri Build Artifacts
+src-tauri/target/
+src-tauri/WixTools/
+**/*.rs.bk
+
+# Portable Mode & Runtime Data Directories
+data/
+covers/
+backups/
+portable.flag
+Duke_Save_Backups/
+*.part
+*.part.seg*
+
+# Environment & Local Secrets
+.env
+.env.*
+
+# OS & Editor Metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo

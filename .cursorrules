@@ -1,0 +1,35 @@
+# Cursor Rules — The Duke Suite (`duke-core` & `duke-launcher`)
+
+## Architecture & Zero-Bloat Mandates
+- Workspace crates: `duke-core`, `duke-launcher`, `duke-systems`, `duke-monitor`, `duke-capture`, `duke-input`.
+- Keep `duke-core` strictly feature-gated; never add `net-doh` to crates that do not need HTTP/TLS.
+- Keep `[profile.release]` intact (`opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = true`).
+- Never use `--renderer-process-limit=1` in WebView2 / `tauri.conf.json`.
+- Zero hardcoded personal usernames, local IPs, `C:\Users\<name>`, or hardcoded piracy URLs. Use dynamic OS paths (`%LOCALAPPDATA%\com.dukelauncher.desktop`) and Hydra JSON source imports (`sources.json`).
+
+## Frontend Rules (`duke-launcher/src/`)
+- Vanilla ES2022 JS (`main.js`, `api.js`), static HTML (`index.html`), Fluent/Radix dark/light variables (`styles.css`). No frameworks or build-step bundlers required.
+- Fonts: `"Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif` for UI; `"Cascadia Code", "Consolas", monospace` with `font-variant-numeric: tabular-nums` for telemetry numbers and filesystem paths.
+- Icons: inline 1.5px `#icon-...` `<symbol>` sprites only — never emojis or double-quoted SVGs inside `style=""`.
+- Preserve all 10 CSS themes (`[data-theme="..."]` / `[data-preview-theme="..."]`).
+- Gamepad Couch Mode polling (`poll_gamepad_state` at `16 ms`) MUST run strictly while `document.visibilityState === "visible"` and stop when hidden.
+
+## Backend Modules (`duke-launcher/src-tauri/src/`)
+- `main.rs`: `--mcp` early bypass at start of `fn main()`, Win32 Job Object (`ProcessTreeJob`) + EcoQoS + `tray_daemon` headless WebView2 teardown (`<8 MB` baseline tray RAM), `Local\duke-suite-shm-v1` SHM event publishing (`shm_bus.rs`), NVMe `PrefetchVirtualMemory` pre-launch warmer (`nvme_prefetch.rs`), hotkey monitor (`Pause` / configurable `Ctrl+Alt+P`), 8-worker AIMD (`4-64 MiB`) downloader + in-flight streaming extractor, zero-allocation PE `IMAGE_NT_HEADERS` + Shannon-entropy (`0.0-8.0`) binary auditor + `:Zone.Identifier` unblocker, `duke://download?url=...` URI handler, and Tauri command registry.
+- `snapshots.rs`: Copy-on-write `.duke-cas` store via parallel 64 KB `blake3` + Win32 `CreateHardLinkW` + orphan blob GC.
+- `catalog_mmap.rs`: Zero-copy `memmap2::Mmap` on `catalog.dkcat` (`DKCAT001`, packed `CatalogRecord`, UTF-8 string pool, trigram inverted index).
+- `stream_extract.rs`: Bounded `sync_channel` ring `.tar.zst` in-flight extraction + HTTP `Range` `.zip` EOCD/Zip64 parallel entry dispatch.
+- `delta_patch.rs`: `fastcdc::v2020::StreamCDC` (`16-64 KiB`) `.dkmanifest` + `zstd` block delta patcher & local block stitcher.
+- `swarm.rs`: UDP multicast (`239.255.77.88:47880`) + TCP (`47881`) + Tailscale peer game-beam & vector-clock mesh save sync on `GameStopped`.
+- `pe_inspect.rs`: `.duke-profile` portable sandbox env overrides & pure-Rust PE32/PE32+ import directory parser + redistributable auto-healer.
+- `sites.rs`: 6 DMCA-safe game directory defaults + user-customized directory CRUD persisted atomically in `search_sites.json`.
+- `sources.rs`: Hydra JSON schema (`{ name, downloads: [{ title, uris, uploadDate, fileSize }] }`) with atomic `sources.json` persistence.
+- `ludusavi.rs`: Ludusavi manifest YAML sync over `duke-core` DoH (`ludusavi_cache.json`, 7-day TTL), path macro expansion (`<winAppData>`, `<winLocalAppData>`, `<winDocuments>`, `<winPublic>`, `<winProgramData>`, `<base>`, `<storeUserId>`), pure-Rust STORE ZIP backup (5 rolling snapshots) & Zip-Slip-safe restore.
+- `importers.rs`: Steam VDF/ACF, Epic `.item`, GOG Registry, Xbox `XboxGames`/`.GamingRoot` auto-discovery and deduplication.
+- `artwork.rs`: SteamGridDB v2 search & download (`600x900` grids, heroes, `.ico` + PNG-to-ICO conversion) + Windows `.lnk` desktop shortcut creator.
+- `mcp.rs`: Zero-GUI JSON-RPC 2.0 stdio server (`initialize`, `notifications/initialized`, `tools/list`, `tools/call` for all 8 tools: `list_installed_games`, `search_catalog`, `launch_game`, `scan_binary`, `discover_saves`, `backup_saves`, `import_libraries`, `suspend_or_resume_game`).
+
+## Required Pre-Completion Verification
+Always verify after edits:
+1. `node --check duke-launcher/src/api.js` and `node --check duke-launcher/src/main.js`
+2. `cargo check` and `cargo test` in `duke-core` and `duke-launcher/src-tauri` with 0 errors and 0 warnings.

@@ -1,0 +1,49 @@
+[package]
+name = "duke-monitor"
+version = "0.1.0"
+description = "Duke Monitor - System, GPU, Process & Clean Driver Cockpit"
+authors = ["Duke Systems Contributors"]
+license = "MIT"
+repository = "https://github.com/duke-systems/duke-systems"
+edition = "2021"
+rust-version = "1.77.2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+duke-core = { path = "../../duke-core", version = "0.1.0", features = ["win32-trim", "eco-qos", "net-doh", "pipe-ipc", "tray-daemon", "shm-bus"] }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "fs", "io-util", "process", "sync", "time"] }
+reqwest = { version = "0.12", features = ["json"] }
+urlencoding = "2.1"
+sysinfo = "0.33"
+winreg = "0.56"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Performance",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

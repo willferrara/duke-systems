@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  verify-suite:
+    name: Verify Duke Suite (Windows x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            duke-core
+            duke-launcher/src-tauri
+
+      - name: Install frontend dependencies & validate JavaScript syntax
+        working-directory: duke-launcher
+        run: |
+          npm ci
+          node --check src/api.js
+          node --check src/main.js
+
+      - name: Check, lint, and test duke-core (--all-features)
+        run: |
+          cargo check --manifest-path duke-core/Cargo.toml --all-features
+          cargo clippy --manifest-path duke-core/Cargo.toml --all-features -- -D warnings
+          cargo test --manifest-path duke-core/Cargo.toml --all-features
+
+      - name: Check, lint, and test duke-launcher
+        run: |
+          cargo check --manifest-path duke-launcher/src-tauri/Cargo.toml --tests
+          cargo clippy --manifest-path duke-launcher/src-tauri/Cargo.toml -- -D warnings
+          cargo test --manifest-path duke-launcher/src-tauri/Cargo.toml
+
+      - name: Supply-chain audit (cargo-deny)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: duke-launcher/src-tauri/Cargo.toml
+          command: check advisories bans sources

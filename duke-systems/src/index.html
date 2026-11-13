@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Duke Systems</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body data-theme="dark">
+  <!-- Zero-RAM Inline 1.5px Lucide-Style Vector Icon Sprite -->
+  <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+    <symbol id="icon-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></symbol>
+    <symbol id="icon-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></symbol>
+    <symbol id="icon-folder-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></symbol>
+    <symbol id="icon-shield-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="icon-trash-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></symbol>
+    <symbol id="icon-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></symbol>
+    <symbol id="icon-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="2" y1="14" x2="6" y2="14"/><line x1="10" y1="8" x2="14" y2="8"/><line x1="18" y1="16" x2="22" y2="16"/></symbol>
+    <symbol id="icon-cpu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></symbol>
+    <symbol id="icon-activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></symbol>
+    <symbol id="icon-video" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></symbol>
+    <symbol id="icon-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></symbol>
+    <symbol id="icon-gamepad-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="11" x2="10" y2="11"/><line x1="8" y1="9" x2="8" y2="13"/><line x1="15" y1="12" x2="15.01" y2="12"/><line x1="18" y1="10" x2="18.01" y2="10"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/></symbol>
+    <symbol id="icon-mouse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="7"/><path d="M12 6v4"/></symbol>
+    <symbol id="icon-radio" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+    <symbol id="icon-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+    <symbol id="icon-arrow-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></symbol>
+    <symbol id="icon-refresh-cw" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol>
+    <symbol id="icon-sparkles" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/></symbol>
+    <symbol id="icon-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></symbol>
+    <symbol id="icon-zap" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></symbol>
+    <symbol id="icon-win-min" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25"><line x1="3" y1="8" x2="13" y2="8"/></symbol>
+    <symbol id="icon-win-max" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25"><rect x="3.5" y="3.5" width="9" height="9" rx="0.5"/></symbol>
+    <symbol id="icon-win-close" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25"><path d="M12 4 4 12"/><path d="m4 4 8 8"/></symbol>
+  </svg>
+
+  <div class="window-shell">
+    <!-- Unified 36px Native Frameless Titlebar -->
+    <header class="titlebar" id="app-titlebar">
+      <div class="titlebar-left" data-tauri-drag-region>
+        <img src="dukesystems.png" alt="Duke Systems" class="titlebar-emblem" />
+        <span class="titlebar-title">Duke Systems</span>
+        <span class="titlebar-version mono-num">v0.1</span>
+      </div>
+
+      <div class="titlebar-center">
+        <div class="titlebar-search-wrap">
+          <svg class="icon titlebar-search-icon" aria-hidden="true"><use href="#icon-search"/></svg>
+          <input
+            type="text"
+            id="titleSearchInput"
+            class="titlebar-search-input"
+            placeholder="Filter suite modules or pipe events..."
+            autocomplete="off"
+          />
+          <kbd class="titlebar-kbd mono-num">Ctrl+K</kbd>
+        </div>
+      </div>
+
+      <div class="titlebar-right">
+        <div class="titlebar-drag-filler" data-tauri-drag-region></div>
+        <div class="window-controls">
+          <button type="button" class="win-btn" id="win-btn-min" title="Minimize" aria-label="Minimize">
+            <svg class="icon-win" aria-hidden="true"><use href="#icon-win-min"/></svg>
+          </button>
+          <button type="button" class="win-btn" id="win-btn-max" title="Maximize" aria-label="Maximize">
+            <svg class="icon-win" aria-hidden="true"><use href="#icon-win-max"/></svg>
+          </button>
+          <button type="button" class="win-btn win-btn-close" id="win-btn-close" title="Close to tray" aria-label="Close">
+            <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <div class="app-shell">
+      <!-- Fixed Command Sidebar -->
+      <aside class="sidebar">
+        <div class="sidebar-group">
+          <nav class="nav-list" aria-label="Primary navigation">
+            <button type="button" class="nav-item active" data-tab="hub">
+              <svg class="icon" aria-hidden="true"><use href="#icon-layers"/></svg>
+              <span class="nav-label">Suite Hub</span>
+              <span class="nav-badge mono-num" id="navRunningBadge">0/4</span>
+            </button>
+            <button type="button" class="nav-item" data-tab="activity">
+              <svg class="icon" aria-hidden="true"><use href="#icon-activity"/></svg>
+              <span class="nav-label">Pipe &amp; Feed</span>
+              <span class="nav-badge mono-num" id="navFeedBadge">0</span>
+            </button>
+            <button type="button" class="nav-item" data-tab="settings">
+              <svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>
+              <span class="nav-label">Settings</span>
+            </button>
+          </nav>
+        </div>
+
+        <div class="sidebar-divider"></div>
+
+        <div class="sidebar-section">
+          <div class="sidebar-section-header">
+            <span class="sidebar-section-title">Auto-Launch Modules</span>
+          </div>
+          <div class="autolaunch-list" id="autoLaunchList">
+            <label class="mini-switch-row">
+              <span class="mini-switch-label">Duke Monitor</span>
+              <input type="checkbox" class="suite-checkbox" data-autolaunch="monitor" />
+            </label>
+            <label class="mini-switch-row">
+              <span class="mini-switch-label">Duke Capture</span>
+              <input type="checkbox" class="suite-checkbox" data-autolaunch="capture" />
+            </label>
+            <label class="mini-switch-row">
+              <span class="mini-switch-label">Duke Input</span>
+              <input type="checkbox" class="suite-checkbox" data-autolaunch="input" />
+            </label>
+            <label class="mini-switch-row">
+              <span class="mini-switch-label">Duke Launcher</span>
+              <input type="checkbox" class="suite-checkbox" data-autolaunch="launcher" />
+            </label>
+          </div>
+        </div>
+
+        <div class="sidebar-telemetry">
+          <div class="tele-row">
+            <span class="tele-label">Hub RAM</span>
+            <span class="tele-value mono-num" id="statOwnRam">-- MB</span>
+          </div>
+          <div class="tele-row">
+            <span class="tele-label">Suite RAM</span>
+            <span class="tele-value accent mono-num" id="statSuiteRam">-- MB</span>
+          </div>
+          <div class="tele-row">
+            <span class="tele-label">Pipe Bus</span>
+            <span class="tele-value ok mono-num" id="statPipeBus">Checking</span>
+          </div>
+          <div class="tele-row">
+            <span class="tele-label">SHM Ring</span>
+            <span class="tele-value ok mono-num" id="statShmBus">Standby</span>
+          </div>
+          <div class="tele-row">
+            <span class="tele-label">Storage</span>
+            <span class="tele-value mono-num" id="statPortableMode">AppData</span>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Main Workspace -->
+      <div class="workspace">
+        <header class="subbar">
+          <div class="subbar-left">
+            <h1 class="view-heading" id="viewTitle">Suite Hub</h1>
+            <span class="pill mono-num" id="suiteSummaryPill">0 active</span>
+          </div>
+          <div class="subbar-actions">
+            <button type="button" class="btn btn-secondary btn-sm" id="btnRefreshNow">
+              <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+              <span>Refresh</span>
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btnTrimOwnRam">
+              <svg class="icon" aria-hidden="true"><use href="#icon-zap"/></svg>
+              <span>Trim Hub RAM</span>
+            </button>
+          </div>
+        </header>
+
+        <main class="content-scroll">
+          <!-- TAB 1: Suite Hub -->
+          <section class="tab-view active" id="tab-hub">
+            <!-- Asymmetric Executive Suite Header -->
+            <div class="exec-header">
+              <div class="exec-identity">
+                <div class="exec-emblem-wrap">
+                  <img src="dukesystems.png" alt="Duke Systems" class="exec-emblem" />
+                </div>
+                <div class="exec-meta">
+                  <div class="exec-title-row">
+                    <h2>Duke Systems Command Hub</h2>
+                    <span class="pipe-chip">
+                      <span class="status-dot" id="heroPipeIndicator"></span>
+                      <span id="heroPipeText">Initializing Pipe Bus</span>
+                    </span>
+                    <span class="pipe-chip">
+                      <span class="status-dot" id="heroShmIndicator"></span>
+                      <span class="mono-num" id="heroShmStatusText">Local\duke-suite-shm-v1: STANDBY</span>
+                    </span>
+                  </div>
+                  <p class="exec-desc">Central desktop coordinator managing lifecycle, working-set RAM trims, lock-free shared memory telemetry, and Windows named pipe events.</p>
+                  <div class="exec-telemetry-strip">
+                    <div class="exec-metric">
+                      <span class="exec-metric-label">Suite RAM</span>
+                      <strong class="exec-metric-val mono-num" id="heroTotalRam">0.0 MB</strong>
+                    </div>
+                    <div class="exec-metric">
+                      <span class="exec-metric-label">Modules Running</span>
+                      <strong class="exec-metric-val mono-num" id="heroRunningCount">0 / 4</strong>
+                    </div>
+                    <div class="exec-metric">
+                      <span class="exec-metric-label">Hub Footprint</span>
+                      <strong class="exec-metric-val mono-num" id="heroOwnRam">0.0 MB</strong>
+                    </div>
+                    <div class="exec-metric">
+                      <span class="exec-metric-label">SHM Frames</span>
+                      <strong class="exec-metric-val mono-num" id="heroShmFrames">0</strong>
+                    </div>
+                    <div class="exec-metric">
+                      <span class="exec-metric-label">SHM Active Apps</span>
+                      <strong class="exec-metric-val mono-num" id="heroShmApps">0 (None)</strong>
+                    </div>
+                    <div class="exec-metric">
+                      <span class="exec-metric-label">SHM Monitor</span>
+                      <strong class="exec-metric-val mono-num" id="heroShmTelemetry">--</strong>
+                    </div>
+                    <div class="exec-metric exec-metric-pipe">
+                      <span class="exec-metric-label">Named Pipe</span>
+                      <code class="path-code mono-num" id="heroPipeName">\\.\pipe\duke-suite</code>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="exec-actions">
+                <button type="button" class="btn btn-steam-green btn-lg" id="btnLaunchFullSuite">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>
+                  <span>Launch Full Suite</span>
+                </button>
+                <button type="button" class="btn btn-elevated btn-lg" id="btnPurgeSuiteRam">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-zap"/></svg>
+                  <span>Purge Suite RAM</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- 2x2 Horizontal App Launcher Cards -->
+            <div class="section-row-head">
+              <h3>Suite Applications</h3>
+              <span class="section-hint">Click Focus/Launch to wake any tray module or inspect its working set.</span>
+            </div>
+            <section class="apps-grid" id="suiteAppsGrid">
+              <!-- Rendered cleanly via main.js -->
+            </section>
+          </section>
+
+          <!-- TAB 2: Pipe & Feed -->
+          <section class="tab-view" id="tab-activity">
+            <div class="bus-status-banner">
+              <div class="bus-status-grid">
+                <div class="bus-meta-item">
+                  <span class="bus-meta-label">Endpoint</span>
+                  <code class="path-code mono-num">\\.\pipe\duke-suite</code>
+                </div>
+                <div class="bus-meta-item">
+                  <span class="bus-meta-label">Coordinator Role</span>
+                  <span class="bus-meta-value" id="busRoleValue">Initializing</span>
+                </div>
+                <div class="bus-meta-item">
+                  <span class="bus-meta-label">Listener State</span>
+                  <span class="bus-meta-value ok" id="busStateValue">Listening</span>
+                </div>
+                <div class="bus-meta-item">
+                  <span class="bus-meta-label">Shared Memory Ring</span>
+                  <code class="path-code mono-num" id="busShmStatus">Local\duke-suite-shm-v1: STANDBY</code>
+                </div>
+                <div class="bus-meta-item">
+                  <span class="bus-meta-label">SHM Frames Published</span>
+                  <span class="bus-meta-value mono-num" id="busShmFrames">0 / 1024</span>
+                </div>
+                <div class="bus-meta-item">
+                  <span class="bus-meta-label">SHM Active Apps</span>
+                  <span class="bus-meta-value mono-num" id="busShmApps">None</span>
+                </div>
+              </div>
+              <div class="bus-status-actions">
+                <button type="button" class="btn btn-secondary btn-sm" id="btnBroadcastPurge">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-zap"/></svg>
+                  <span>Trim Suite RAM</span>
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm" id="btnClearFeed">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
+                  <span>Clear Log</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="panel-card">
+              <div class="panel-card-head">
+                <div>
+                  <h3>Live Inter-Process Activity</h3>
+                  <p class="panel-sub">Real-time events from Launcher, Monitor, Capture, and Input.</p>
+                </div>
+                <span class="pill mono-num" id="feedCountPill">0 events</span>
+              </div>
+              <div class="feed-list" id="activityFeedList">
+                <!-- Populated dynamically -->
+              </div>
+            </div>
+          </section>
+
+          <!-- TAB 3: Settings & Themes -->
+          <section class="tab-view" id="tab-settings">
+            <div class="settings-two-col">
+              <div class="panel-card">
+                <div class="panel-card-head">
+                  <div>
+                    <h3>System &amp; Tray Behavior</h3>
+                    <p class="panel-sub">Configure startup orchestration and idle WebView2 memory trimming.</p>
+                  </div>
+                </div>
+
+                <div class="setting-row">
+                  <div class="setting-info">
+                    <div class="setting-name">Run at Windows Startup</div>
+                    <div class="setting-desc">Registers Duke Systems in your Windows user startup Run key.</div>
+                  </div>
+                  <input type="checkbox" class="suite-checkbox" id="chkAutostartWindows" />
+                </div>
+
+                <div class="setting-row">
+                  <div class="setting-info">
+                    <div class="setting-name">Close Window to System Tray</div>
+                    <div class="setting-desc">Destroys the WebView2 UI on close while preserving the pipe broker.</div>
+                  </div>
+                  <input type="checkbox" class="suite-checkbox" id="chkCloseToTray" />
+                </div>
+
+                <div class="setting-row">
+                  <div class="setting-info">
+                    <div class="setting-name">Minimize to System Tray</div>
+                    <div class="setting-desc">Hides the window on minimize for a clutter-free taskbar.</div>
+                  </div>
+                  <input type="checkbox" class="suite-checkbox" id="chkMinimizeToTray" />
+                </div>
+
+                <div class="setting-row">
+                  <div class="setting-info">
+                    <div class="setting-name">Start Minimized in Tray</div>
+                    <div class="setting-desc">Boots silently into the Windows tray without stealing focus.</div>
+                  </div>
+                  <input type="checkbox" class="suite-checkbox" id="chkStartMinimized" />
+                </div>
+
+                <div class="setting-row">
+                  <div class="setting-info">
+                    <div class="setting-name">Idle RAM Auto-Trim (10s)</div>
+                    <div class="setting-desc">Runs K32EmptyWorkingSet cleanly when the UI is hidden in tray.</div>
+                  </div>
+                  <input type="checkbox" class="suite-checkbox" id="chkAutoTrimEnabled" />
+                </div>
+              </div>
+
+              <div class="panel-card">
+                <div class="panel-card-head">
+                  <div>
+                    <h3>Storage &amp; Memory Diagnostics</h3>
+                    <p class="panel-sub">Zero external dependencies, local JSON persistence.</p>
+                  </div>
+                </div>
+
+                <div class="setting-row">
+                  <div class="setting-info">
+                    <div class="setting-name">Storage Mode</div>
+                    <div class="setting-desc">Automatically detects portable.flag adjacent to executable.</div>
+                  </div>
+                  <span class="pill" id="settingsPortableBadge">AppData</span>
+                </div>
+
+                <div class="setting-row">
+                  <div class="setting-info">
+                    <div class="setting-name">Settings Config Path</div>
+                    <div class="setting-desc"><code class="path-code mono-num" id="settingsPathCode">--</code></div>
+                  </div>
+                </div>
+
+                <div class="setting-actions-bar">
+                  <button type="button" class="btn btn-secondary btn-sm" id="btnSettingsTrimNow">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-zap"/></svg>
+                    <span>Trim Own RAM Now</span>
+                  </button>
+                  <button type="button" class="btn btn-primary btn-sm" id="btnSettingsPurgeAll">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                    <span>Purge Entire Suite</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel-card">
+              <div class="panel-card-head">
+                <div>
+                  <h3>Appearance &amp; Vector Themes (10 Presets)</h3>
+                  <p class="panel-sub">Zero-RAM inline SVG themes saved locally with layered surface depth.</p>
+                </div>
+              </div>
+              <div class="theme-grid" id="themeGrid"></div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast-container" id="toastContainer"></div>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

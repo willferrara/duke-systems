@@ -1,0 +1,1647 @@
+use memmap2::Mmap;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
+use std::time::Instant;
+
+use crate::{get_app_data_file_standalone, CatalogCacheFile, CatalogGameEntry};
+
+pub const DKCAT_MAGIC: [u8; 8] = *b"DKCAT001";
+pub const DKCAT_VERSION: u32 = 1;
+const FLAG_IS_FREE: u32 = 1 << 0;
+const FLAG_SINGLEPLAYER: u32 = 1 << 1;
+const FLAG_COOP: u32 = 1 << 2;
+const FLAG_MULTIPLAYER: u32 = 1 << 3;
+const FLAG_ONLINE_ONLY_PVP: u32 = 1 << 4;
+const FLAG_DETAILS_ENRICHED: u32 = 1 << 5;
+const GENRE_MASK_POPULATED: u32 = 1 << 31;
+const STANDARD_GENRE_BITS: [(&str, u32); 10] = [
+    ("action", 1 << 0),
+    ("adventure", 1 << 1),
+    ("rpg", 1 << 2),
+    ("simulation", 1 << 3),
+    ("open world", 1 << 4),
+    ("horror", 1 << 5),
+    ("survival", 1 << 6),
+    ("indie", 1 << 7),
+    ("racing", 1 << 8),
+    ("strategy", 1 << 9),
+];
+const FIELD_SEP: char = '\x1f';
+const LIST_SEP: char = '\x1e';
+
+/// 72-byte zero-copy binary header for `catalog.dkcat` (`#[repr(C)]`, 8-byte aligned).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DkCatHeader {
+    pub magic: [u8; 8],
+    pub version: u32,
+    pub record_count: u32,
+    pub records_offset: u64,
+    pub strings_offset: u64,
+    pub trigram_offset: u64,
+    pub checksum_blake3: [u8; 32],
+}
+
+/// Packed fixed-stride `#[repr(C)]` catalog entry stored sequentially in `catalog.dkcat`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CatalogRecord {
+    pub ccu: u64,
+    pub owners_min: u64,
+    pub owners_max: u64,
+    pub positive: u64,
+    pub negative: u64,
+    pub value_score: f64,
+    pub updated_at: u64,
+    pub appid: u32,
+    pub price_cents: u32,
+    pub initial_price_cents: u32,
+    pub flags: u32,
+    pub name_off: u32,
+    pub name_len: u32,
+    pub tags_off: u32,
+    pub tags_len: u32,
+    pub meta_off: u32,
+    pub meta_len: u32,
+    pub _reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct TrigramIndexEntry {
+    pub trigram: [u8; 3],
+    pub _pad: u8,
+    pub list_off: u32,
+    pub list_len: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogMmapStats {
+    pub active: bool,
+    pub path: String,
+    pub file_size_bytes: u64,
+    pub record_count: u32,
+    pub trigram_count: u32,
+    pub fetched_at: u64,
+    pub checksum_hex: String,
+    pub map_time_us: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CatalogQueryParams {
+    pub query: String,
+    pub sort_by: String,
+    pub paid_only: bool,
+    pub singleplayer: bool,
+    pub coop: bool,
+    pub exclude_pvp: bool,
+    pub hide_installed: bool,
+    pub installed_app_ids: Vec<u32>,
+    pub installed_titles_norm: Vec<String>,
+    pub min_price_cents: u32,
+    pub min_ccu: u64,
+    pub genres: Vec<String>,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogQueryPage {
+    pub items: Vec<CatalogGameEntry>,
+    pub total_matches: usize,
+    pub total_indexed: usize,
+    pub fetched_at: u64,
+    pub offset: usize,
+    pub limit: usize,
+    pub query_time_us: u64,
+}
+
+pub struct MappedCatalog {
+    mmap: Mmap,
+    path: PathBuf,
+    header: DkCatHeader,
+    fetched_at: u64,
+    fetched_pages: Vec<u32>,
+    trigram_count: u32,
+    trigram_table_offset: usize,
+    postings_offset: usize,
+    map_time_us: u64,
+}
+
+static GLOBAL_MMAP_CATALOG: OnceLock<RwLock<Option<MappedCatalog>>> = OnceLock::new();
+
+fn global_catalog_slot() -> &'static RwLock<Option<MappedCatalog>> {
+    GLOBAL_MMAP_CATALOG.get_or_init(|| RwLock::new(None))
+}
+
+#[inline]
+unsafe fn read_struct_unaligned<T: Copy>(bytes: &[u8], offset: usize) -> Result<T, String> {
+    let size = core::mem::size_of::<T>();
+    let end = offset
+        .checked_add(size)
+        .ok_or_else(|| "Offset overflow reading binary catalog".to_string())?;
+    if end > bytes.len() {
+        return Err(format!(
+            "Truncated .dkcat archive (needed {end} bytes, have {})",
+            bytes.len()
+        ));
+    }
+    Ok(unsafe { core::ptr::read_unaligned(bytes.as_ptr().add(offset).cast::<T>()) })
+}
+
+#[inline]
+fn bytes_of_struct<T: Copy>(val: &T) -> &[u8] {
+    unsafe {
+        core::slice::from_raw_parts((val as *const T).cast::<u8>(), core::mem::size_of::<T>())
+    }
+}
+
+fn push_trigrams(text: &str, out: &mut HashSet<[u8; 3]>) {
+    let lower = text.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    if bytes.len() < 3 {
+        return;
+    }
+    for win in bytes.windows(3) {
+        out.insert([win[0], win[1], win[2]]);
+    }
+}
+
+fn pack_flags(entry: &CatalogGameEntry) -> u32 {
+    let mut flags = 0u32;
+    if entry.is_free {
+        flags |= FLAG_IS_FREE;
+    }
+    if entry.is_singleplayer {
+        flags |= FLAG_SINGLEPLAYER;
+    }
+    if entry.is_coop {
+        flags |= FLAG_COOP;
+    }
+    if entry.is_multiplayer {
+        flags |= FLAG_MULTIPLAYER;
+    }
+    if entry.is_online_only_pvp {
+        flags |= FLAG_ONLINE_ONLY_PVP;
+    }
+    if entry.details_enriched {
+        flags |= FLAG_DETAILS_ENRICHED;
+    }
+    let discount = entry.discount_percent.min(255);
+    flags |= discount << 8;
+    flags
+}
+
+#[inline]
+fn contains_ignore_ascii_case(haystack: &str, needle_lower: &str) -> bool {
+    let n = needle_lower.as_bytes();
+    if n.is_empty() {
+        return true;
+    }
+    let h = haystack.as_bytes();
+    if n.len() > h.len() {
+        return false;
+    }
+    if n.len() == 1 {
+        let b0 = n[0];
+        return h.iter().any(|&hb| hb.to_ascii_lowercase() == b0);
+    }
+    let first = n[0];
+    let limit = h.len() - n.len();
+    'outer: for i in 0..=limit {
+        if h[i].to_ascii_lowercase() != first {
+            continue;
+        }
+        for j in 1..n.len() {
+            if h[i + j].to_ascii_lowercase() != n[j] {
+                continue 'outer;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+#[inline]
+fn starts_with_ignore_ascii_case(haystack: &str, prefix_lower: &str) -> bool {
+    let p = prefix_lower.as_bytes();
+    let h = haystack.as_bytes();
+    if p.len() > h.len() {
+        return false;
+    }
+    for i in 0..p.len() {
+        if h[i].to_ascii_lowercase() != p[i] {
+            return false;
+        }
+    }
+    true
+}
+
+#[inline]
+fn normalize_alnum_ascii(input: &str, scratch: &mut String) {
+    scratch.clear();
+    for b in input.bytes() {
+        if b.is_ascii_alphanumeric() {
+            scratch.push(b.to_ascii_lowercase() as char);
+        }
+    }
+}
+
+fn pack_genre_bits(entry: &CatalogGameEntry) -> u32 {
+    let mut mask = GENRE_MASK_POPULATED;
+    for &(needle, bit) in &STANDARD_GENRE_BITS {
+        if entry
+            .genres
+            .iter()
+            .chain(entry.tags.iter())
+            .chain(entry.categories.iter())
+            .any(|item| contains_ignore_ascii_case(item, needle))
+        {
+            mask |= bit;
+        }
+    }
+    mask
+}
+
+#[inline]
+fn f64_to_sortable_u64(v: f64) -> u64 {
+    if !v.is_finite() {
+        return 0;
+    }
+    let bits = v.to_bits();
+    if (bits >> 63) != 0 {
+        !bits
+    } else {
+        bits | (1u64 << 63)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CandidateKey {
+    rec_idx: u32,
+    k1: u64,
+    k2: u64,
+    k3: u64,
+}
+
+fn join_safe(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|s| s.replace([FIELD_SEP, LIST_SEP], " "))
+        .collect::<Vec<_>>()
+        .join(&LIST_SEP.to_string())
+}
+
+fn split_safe(raw: &str) -> Vec<String> {
+    if raw.is_empty() {
+        Vec::new()
+    } else {
+        raw.split(LIST_SEP)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .collect()
+    }
+}
+
+fn sanitize_field(raw: &str) -> String {
+    raw.replace([FIELD_SEP, LIST_SEP], " ")
+}
+
+fn encode_meta(entry: &CatalogGameEntry) -> String {
+    let fields = [
+        sanitize_field(&entry.price_formatted),
+        sanitize_field(&entry.owners_label),
+        join_safe(&entry.genres),
+        join_safe(&entry.categories),
+        sanitize_field(&entry.short_description),
+        join_safe(&entry.developers),
+        join_safe(&entry.publishers),
+        sanitize_field(&entry.release_date),
+        sanitize_field(&entry.cover_url),
+        sanitize_field(&entry.header_url),
+        sanitize_field(&entry.hero_url),
+    ];
+    fields.join(&FIELD_SEP.to_string())
+}
+
+pub fn serialize_dkcat(cache: &CatalogCacheFile) -> Result<Vec<u8>, String> {
+    let header_size = core::mem::size_of::<DkCatHeader>();
+    let record_size = core::mem::size_of::<CatalogRecord>();
+    let record_count = u32::try_from(cache.entries.len())
+        .map_err(|_| "Catalog exceeds u32 record limit".to_string())?;
+
+    let records_offset = header_size as u64;
+    let records_bytes_len = (record_count as usize)
+        .checked_mul(record_size)
+        .ok_or_else(|| "Catalog records section overflow".to_string())?;
+    let strings_offset = records_offset
+        .checked_add(records_bytes_len as u64)
+        .ok_or_else(|| "Catalog string offset overflow".to_string())?;
+
+    let mut string_pool = Vec::<u8>::with_capacity(cache.entries.len() * 192);
+    let mut records = Vec::<CatalogRecord>::with_capacity(cache.entries.len());
+    let mut trigrams: BTreeMap<[u8; 3], Vec<u32>> = BTreeMap::new();
+
+    for (idx, entry) in cache.entries.iter().enumerate() {
+        let rec_idx = idx as u32;
+        let name_off = u32::try_from(string_pool.len())
+            .map_err(|_| "Catalog string pool exceeds 4 GiB".to_string())?;
+        string_pool.extend_from_slice(entry.name.as_bytes());
+        let name_len = u32::try_from(entry.name.len()).unwrap_or(u32::MAX);
+
+        let tags_joined = entry
+            .tags
+            .iter()
+            .map(|t| t.replace(',', " "))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tags_off = u32::try_from(string_pool.len())
+            .map_err(|_| "Catalog string pool exceeds 4 GiB".to_string())?;
+        string_pool.extend_from_slice(tags_joined.as_bytes());
+        let tags_len = u32::try_from(tags_joined.len()).unwrap_or(u32::MAX);
+
+        let meta_str = encode_meta(entry);
+        let meta_off = u32::try_from(string_pool.len())
+            .map_err(|_| "Catalog string pool exceeds 4 GiB".to_string())?;
+        string_pool.extend_from_slice(meta_str.as_bytes());
+        let meta_len = u32::try_from(meta_str.len()).unwrap_or(u32::MAX);
+
+        let mut unique_tri = HashSet::new();
+        push_trigrams(&entry.name, &mut unique_tri);
+        let appid_str = entry.app_id.to_string();
+        push_trigrams(&appid_str, &mut unique_tri);
+        for tag in &entry.tags {
+            push_trigrams(tag, &mut unique_tri);
+        }
+        for genre in &entry.genres {
+            push_trigrams(genre, &mut unique_tri);
+        }
+        for dev in &entry.developers {
+            push_trigrams(dev, &mut unique_tri);
+        }
+        for tri in unique_tri {
+            trigrams.entry(tri).or_default().push(rec_idx);
+        }
+
+        records.push(CatalogRecord {
+            ccu: entry.ccu,
+            owners_min: entry.owners_min,
+            owners_max: entry.owners_max,
+            positive: entry.positive,
+            negative: entry.negative,
+            value_score: entry.value_score,
+            updated_at: entry.updated_at,
+            appid: entry.app_id,
+            price_cents: entry.price_cents,
+            initial_price_cents: entry.initial_price_cents,
+            flags: pack_flags(entry),
+            name_off,
+            name_len,
+            tags_off,
+            tags_len,
+            meta_off,
+            meta_len,
+            _reserved: pack_genre_bits(entry),
+        });
+    }
+
+    let trigram_offset = strings_offset
+        .checked_add(string_pool.len() as u64)
+        .ok_or_else(|| "Catalog trigram offset overflow".to_string())?;
+
+    let mut body = Vec::<u8>::with_capacity(
+        records_bytes_len + string_pool.len() + 64 + trigrams.len() * 24,
+    );
+    for rec in &records {
+        body.extend_from_slice(bytes_of_struct(rec));
+    }
+    body.extend_from_slice(&string_pool);
+
+    // Trigram section header:
+    // fetched_at: u64 | trigram_count: u32 | fetched_pages_count: u32 | fetched_pages: [u32] | TrigramIndexEntry[] | postings: [u32]
+    body.extend_from_slice(&cache.fetched_at.to_le_bytes());
+    let trigram_count = u32::try_from(trigrams.len())
+        .map_err(|_| "Trigram index exceeds u32".to_string())?;
+    body.extend_from_slice(&trigram_count.to_le_bytes());
+    let pages_count = cache.fetched_pages.len() as u32;
+    body.extend_from_slice(&pages_count.to_le_bytes());
+    for page in &cache.fetched_pages {
+        body.extend_from_slice(&page.to_le_bytes());
+    }
+
+    let mut postings = Vec::<u8>::new();
+    for (tri, mut ids) in trigrams {
+        ids.sort_unstable();
+        ids.dedup();
+        let list_off = u32::try_from(postings.len())
+            .map_err(|_| "Trigram postings overflow".to_string())?;
+        let list_len = u32::try_from(ids.len()).unwrap_or(u32::MAX);
+        for id in ids {
+            postings.extend_from_slice(&id.to_le_bytes());
+        }
+        let tri_entry = TrigramIndexEntry {
+            trigram: tri,
+            _pad: 0,
+            list_off,
+            list_len,
+        };
+        body.extend_from_slice(bytes_of_struct(&tri_entry));
+    }
+    body.extend_from_slice(&postings);
+
+    let checksum_blake3 = *blake3::hash(&body).as_bytes();
+    let header = DkCatHeader {
+        magic: DKCAT_MAGIC,
+        version: DKCAT_VERSION,
+        record_count,
+        records_offset,
+        strings_offset,
+        trigram_offset,
+        checksum_blake3,
+    };
+
+    let mut out = Vec::with_capacity(header_size + body.len());
+    out.extend_from_slice(bytes_of_struct(&header));
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+impl MappedCatalog {
+    /// Zero-copy opens `catalog.dkcat` via OS `mmap`, validating only the 72-byte header and section bounds.
+    pub fn open(path: &Path) -> Result<Self, String> {
+        let started = Instant::now();
+        let file =
+            File::open(path).map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
+        let mmap =
+            unsafe { Mmap::map(&file) }.map_err(|e| format!("Mmap failed for {}: {}", path.display(), e))?;
+        let bytes: &[u8] = &mmap;
+
+        let header: DkCatHeader = unsafe { read_struct_unaligned(bytes, 0)? };
+        if header.magic != DKCAT_MAGIC {
+            return Err("Invalid .dkcat magic header".to_string());
+        }
+        if header.version != DKCAT_VERSION {
+            return Err(format!("Unsupported .dkcat version {}", header.version));
+        }
+
+        let rec_bytes = (header.record_count as usize)
+            .checked_mul(core::mem::size_of::<CatalogRecord>())
+            .ok_or_else(|| "Corrupt record count in .dkcat".to_string())?;
+        let rec_start = header.records_offset as usize;
+        let str_start = header.strings_offset as usize;
+        let tri_start = header.trigram_offset as usize;
+
+        if rec_start < core::mem::size_of::<DkCatHeader>()
+            || rec_start.saturating_add(rec_bytes) > str_start
+            || str_start > tri_start
+            || tri_start + 16 > bytes.len()
+        {
+            return Err("Corrupt section bounds in .dkcat header".to_string());
+        }
+
+        let fetched_at = u64::from_le_bytes(
+            bytes[tri_start..tri_start + 8]
+                .try_into()
+                .map_err(|_| "Truncated fetched_at".to_string())?,
+        );
+        let trigram_count = u32::from_le_bytes(
+            bytes[tri_start + 8..tri_start + 12]
+                .try_into()
+                .map_err(|_| "Truncated trigram_count".to_string())?,
+        );
+        let pages_count = u32::from_le_bytes(
+            bytes[tri_start + 12..tri_start + 16]
+                .try_into()
+                .map_err(|_| "Truncated pages_count".to_string())?,
+        ) as usize;
+
+        let pages_start = tri_start + 16;
+        let pages_end = pages_start
+            .checked_add(pages_count.saturating_mul(4))
+            .ok_or_else(|| "Corrupt page table in .dkcat".to_string())?;
+        if pages_end > bytes.len() {
+            return Err("Truncated page list in .dkcat".to_string());
+        }
+
+        let mut fetched_pages = Vec::with_capacity(pages_count);
+        for chunk in bytes[pages_start..pages_end].chunks_exact(4) {
+            fetched_pages.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+
+        let trigram_table_offset = pages_end;
+        let trigram_table_bytes = (trigram_count as usize)
+            .checked_mul(core::mem::size_of::<TrigramIndexEntry>())
+            .ok_or_else(|| "Corrupt trigram table in .dkcat".to_string())?;
+        let postings_offset = trigram_table_offset
+            .checked_add(trigram_table_bytes)
+            .ok_or_else(|| "Corrupt postings offset in .dkcat".to_string())?;
+        if postings_offset > bytes.len() {
+            return Err("Truncated trigram index table in .dkcat".to_string());
+        }
+
+        Ok(Self {
+            mmap,
+            path: path.to_path_buf(),
+            header,
+            fetched_at,
+            fetched_pages,
+            trigram_count,
+            trigram_table_offset,
+            postings_offset,
+            map_time_us: started.elapsed().as_micros() as u64,
+        })
+    }
+
+    /// On-demand full BLAKE3 payload integrity verification (not run on startup open to keep mmap `0 ms`).
+    #[allow(dead_code)]
+    pub fn verify_blake3(&self) -> bool {
+        let hdr_len = core::mem::size_of::<DkCatHeader>();
+        if self.mmap.len() < hdr_len {
+            return false;
+        }
+        let actual = *blake3::hash(&self.mmap[hdr_len..]).as_bytes();
+        actual == self.header.checksum_blake3
+    }
+
+    pub fn stats(&self) -> CatalogMmapStats {
+        CatalogMmapStats {
+            active: true,
+            path: self.path.to_string_lossy().into_owned(),
+            file_size_bytes: self.mmap.len() as u64,
+            record_count: self.header.record_count,
+            trigram_count: self.trigram_count,
+            fetched_at: self.fetched_at,
+            checksum_hex: hex::encode(self.header.checksum_blake3),
+            map_time_us: self.map_time_us,
+        }
+    }
+
+    #[inline]
+    pub fn record_count(&self) -> usize {
+        self.header.record_count as usize
+    }
+
+    pub fn fetched_at(&self) -> u64 {
+        self.fetched_at
+    }
+
+    pub fn fetched_pages(&self) -> &[u32] {
+        &self.fetched_pages
+    }
+
+    pub fn get_entry_by_appid(&self, app_id: u32) -> Option<CatalogGameEntry> {
+        for idx in 0..self.record_count() {
+            if let Ok(rec) = self.read_record(idx) {
+                if rec.appid == app_id {
+                    return Some(self.hydrate_record(&rec));
+                }
+            }
+        }
+        None
+    }
+
+    fn read_record(&self, index: usize) -> Result<CatalogRecord, String> {
+        if index >= self.record_count() {
+            return Err(format!("Catalog record index {index} out of bounds"));
+        }
+        let offset = self.header.records_offset as usize
+            + index * core::mem::size_of::<CatalogRecord>();
+        unsafe { read_struct_unaligned(&self.mmap, offset) }
+    }
+
+    fn pool_str(&self, off: u32, len: u32) -> &str {
+        let base = self.header.strings_offset as usize;
+        let tri = self.header.trigram_offset as usize;
+        let start = base.saturating_add(off as usize);
+        let end = start.saturating_add(len as usize);
+        if start <= end && end <= tri && end <= self.mmap.len() {
+            std::str::from_utf8(&self.mmap[start..end]).unwrap_or("")
+        } else {
+            ""
+        }
+    }
+
+    fn hydrate_record(&self, rec: &CatalogRecord) -> CatalogGameEntry {
+        let name = self.pool_str(rec.name_off, rec.name_len).to_string();
+        let tags_raw = self.pool_str(rec.tags_off, rec.tags_len);
+        let tags: Vec<String> = if tags_raw.is_empty() {
+            Vec::new()
+        } else {
+            tags_raw
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+
+        let meta_raw = self.pool_str(rec.meta_off, rec.meta_len);
+        let mut meta_parts = meta_raw.split(FIELD_SEP);
+        let price_formatted = meta_parts.next().unwrap_or("").to_string();
+        let owners_label = meta_parts.next().unwrap_or("").to_string();
+        let genres = split_safe(meta_parts.next().unwrap_or(""));
+        let categories = split_safe(meta_parts.next().unwrap_or(""));
+        let short_description = meta_parts.next().unwrap_or("").to_string();
+        let developers = split_safe(meta_parts.next().unwrap_or(""));
+        let publishers = split_safe(meta_parts.next().unwrap_or(""));
+        let release_date = meta_parts.next().unwrap_or("").to_string();
+        let cover_url = meta_parts.next().unwrap_or("").to_string();
+        let header_url = meta_parts.next().unwrap_or("").to_string();
+        let hero_url = meta_parts.next().unwrap_or("").to_string();
+
+        let positive = rec.positive;
+        let negative = rec.negative;
+        let total_reviews = positive.saturating_add(negative);
+        let review_pct = if total_reviews > 0 {
+            ((positive as f64 / total_reviews as f64) * 1000.0).round() / 10.0
+        } else {
+            0.0
+        };
+
+        CatalogGameEntry {
+            app_id: rec.appid,
+            name,
+            price_cents: rec.price_cents,
+            initial_price_cents: rec.initial_price_cents,
+            discount_percent: (rec.flags >> 8) & 0xFF,
+            price_formatted,
+            is_free: (rec.flags & FLAG_IS_FREE) != 0,
+            ccu: rec.ccu,
+            owners_min: rec.owners_min,
+            owners_max: rec.owners_max,
+            owners_label,
+            positive,
+            negative,
+            review_pct,
+            is_singleplayer: (rec.flags & FLAG_SINGLEPLAYER) != 0,
+            is_coop: (rec.flags & FLAG_COOP) != 0,
+            is_multiplayer: (rec.flags & FLAG_MULTIPLAYER) != 0,
+            is_online_only_pvp: (rec.flags & FLAG_ONLINE_ONLY_PVP) != 0,
+            genres,
+            tags,
+            categories,
+            short_description,
+            developers,
+            publishers,
+            release_date,
+            cover_url,
+            header_url,
+            hero_url,
+            value_score: rec.value_score,
+            details_enriched: (rec.flags & FLAG_DETAILS_ENRICHED) != 0,
+            updated_at: rec.updated_at,
+        }
+    }
+
+    pub fn to_catalog_cache_file(&self) -> CatalogCacheFile {
+        let mut entries = Vec::with_capacity(self.record_count());
+        for idx in 0..self.record_count() {
+            if let Ok(rec) = self.read_record(idx) {
+                entries.push(self.hydrate_record(&rec));
+            }
+        }
+        CatalogCacheFile {
+            fetched_at: self.fetched_at,
+            fetched_pages: self.fetched_pages.clone(),
+            entries,
+        }
+    }
+
+    fn lookup_trigram_postings_bytes(&self, target: [u8; 3]) -> Option<&[u8]> {
+        let count = self.trigram_count as usize;
+        if count == 0 {
+            return Some(&[]);
+        }
+        let stride = core::mem::size_of::<TrigramIndexEntry>();
+        let mut lo = 0usize;
+        let mut hi = count;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let entry: TrigramIndexEntry =
+                unsafe { read_struct_unaligned(&self.mmap, self.trigram_table_offset + mid * stride) }
+                    .ok()?;
+            match entry.trigram.cmp(&target) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => {
+                    let start = self.postings_offset.saturating_add(entry.list_off as usize);
+                    let byte_len = (entry.list_len as usize).saturating_mul(4);
+                    let end = start.saturating_add(byte_len);
+                    if end > self.mmap.len() {
+                        return Some(&[]);
+                    }
+                    return Some(&self.mmap[start..end]);
+                }
+            }
+        }
+        Some(&[])
+    }
+
+    /// Zero-copy Rust-side query, filter, sort, and pagination over 30,000+ `.dkcat` records.
+    pub fn query(&self, params: &CatalogQueryParams) -> CatalogQueryPage {
+        let started = Instant::now();
+        let total_indexed = self.record_count();
+        let limit = if params.limit == 0 {
+            60
+        } else {
+            params.limit.clamp(1, 250)
+        };
+        let offset = params.offset;
+        if total_indexed == 0 {
+            return CatalogQueryPage {
+                items: Vec::new(),
+                total_matches: 0,
+                total_indexed: 0,
+                fetched_at: self.fetched_at,
+                offset,
+                limit,
+                query_time_us: started.elapsed().as_micros() as u64,
+            };
+        }
+
+        let effective_min_price = if params.paid_only {
+            params.min_price_cents.max(1)
+        } else {
+            params.min_price_cents
+        };
+        let min_ccu = params.min_ccu;
+
+        let installed_ids: HashSet<u32> = if params.hide_installed {
+            params.installed_app_ids.iter().copied().collect()
+        } else {
+            HashSet::new()
+        };
+        let installed_titles: HashSet<&str> = if params.hide_installed {
+            params
+                .installed_titles_norm
+                .iter()
+                .map(String::as_str)
+                .filter(|s| !s.is_empty())
+                .collect()
+        } else {
+            HashSet::new()
+        };
+
+        let mut req_standard_mask = 0u32;
+        let mut all_standard_genres = true;
+        let mut all_genres_lower: Vec<String> = Vec::with_capacity(params.genres.len());
+        for g in &params.genres {
+            let low = g.trim().to_ascii_lowercase();
+            if low.is_empty() {
+                continue;
+            }
+            if let Some(&(_, bit)) = STANDARD_GENRE_BITS.iter().find(|&&(name, _)| name == low) {
+                req_standard_mask |= bit;
+            } else {
+                all_standard_genres = false;
+            }
+            all_genres_lower.push(low);
+        }
+
+        let q_lower = params.query.trim().to_ascii_lowercase();
+        let q_tokens: Vec<&str> = q_lower
+            .split_whitespace()
+            .filter(|t| !t.is_empty())
+            .collect();
+
+        let trigram_candidates: Option<Vec<u32>> = if !q_tokens.is_empty() {
+            let mut posting_slices: Vec<&[u8]> = Vec::new();
+            let mut seen_tris: HashSet<[u8; 3]> = HashSet::new();
+            for tok in &q_tokens {
+                let bytes = tok.as_bytes();
+                if bytes.len() >= 3 {
+                    for win in bytes.windows(3) {
+                        let tri = [win[0], win[1], win[2]];
+                        if seen_tris.insert(tri) {
+                            let slice = self.lookup_trigram_postings_bytes(tri).unwrap_or(&[]);
+                            if slice.is_empty() {
+                                return CatalogQueryPage {
+                                    items: Vec::new(),
+                                    total_matches: 0,
+                                    total_indexed,
+                                    fetched_at: self.fetched_at,
+                                    offset,
+                                    limit,
+                                    query_time_us: started.elapsed().as_micros() as u64,
+                                };
+                            }
+                            posting_slices.push(slice);
+                        }
+                    }
+                }
+            }
+            if posting_slices.is_empty() {
+                None
+            } else {
+                posting_slices.sort_by_key(|s| s.len());
+                let mut acc = Vec::with_capacity(posting_slices[0].len() / 4);
+                for chunk in posting_slices[0].chunks_exact(4) {
+                    acc.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                }
+                for other in posting_slices.into_iter().skip(1) {
+                    intersect_sorted_u32_bytes_in_place(&mut acc, other);
+                    if acc.is_empty() {
+                        return CatalogQueryPage {
+                            items: Vec::new(),
+                            total_matches: 0,
+                            total_indexed,
+                            fetched_at: self.fetched_at,
+                            offset,
+                            limit,
+                            query_time_us: started.elapsed().as_micros() as u64,
+                        };
+                    }
+                }
+                Some(acc)
+            }
+        } else {
+            None
+        };
+
+        let sort_mode = params.sort_by.trim();
+        let initial_cap = match &trigram_candidates {
+            Some(vec) => vec.len(),
+            None => 1024.min(total_indexed),
+        };
+        let mut matched: Vec<CandidateKey> = Vec::with_capacity(initial_cap);
+        let mut norm_scratch = String::with_capacity(64);
+        let mut id_buf = [0u8; 10];
+
+        let eval_count = match &trigram_candidates {
+            Some(vec) => vec.len(),
+            None => total_indexed,
+        };
+
+        for step in 0..eval_count {
+            let rec_idx = match &trigram_candidates {
+                Some(vec) => vec[step],
+                None => step as u32,
+            };
+            let Ok(rec) = self.read_record(rec_idx as usize) else {
+                continue;
+            };
+
+            if params.paid_only && (rec.price_cents == 0 || (rec.flags & FLAG_IS_FREE) != 0) {
+                continue;
+            }
+            if effective_min_price > 0 && rec.price_cents < effective_min_price {
+                continue;
+            }
+            if min_ccu > 0 && rec.ccu < min_ccu {
+                continue;
+            }
+            if params.exclude_pvp && (rec.flags & FLAG_ONLINE_ONLY_PVP) != 0 {
+                continue;
+            }
+
+            let is_sp = (rec.flags & FLAG_SINGLEPLAYER) != 0;
+            let is_coop = (rec.flags & FLAG_COOP) != 0;
+            let mode_ok = match (params.singleplayer, params.coop) {
+                (true, true) => is_sp || is_coop,
+                (true, false) => is_sp,
+                (false, true) => is_coop,
+                (false, false) => true,
+            };
+            if !mode_ok {
+                continue;
+            }
+
+            if params.hide_installed && installed_ids.contains(&rec.appid) {
+                continue;
+            }
+
+            let mut cached_tags: Option<&str> = None;
+            let mut cached_genres: Option<&str> = None;
+            let mut cached_categories: Option<&str> = None;
+            let mut cached_devs: Option<&str> = None;
+
+            if !all_genres_lower.is_empty() {
+                if all_standard_genres && (rec._reserved & GENRE_MASK_POPULATED) != 0 {
+                    if (rec._reserved & req_standard_mask) == 0 {
+                        continue;
+                    }
+                } else {
+                    let tags_str = self.pool_str(rec.tags_off, rec.tags_len);
+                    let meta_str = self.pool_str(rec.meta_off, rec.meta_len);
+                    let mut parts = meta_str.split(FIELD_SEP);
+                    let _ = parts.next();
+                    let _ = parts.next();
+                    let genres_str = parts.next().unwrap_or("");
+                    let categories_str = parts.next().unwrap_or("");
+                    let _ = parts.next();
+                    let devs_str = parts.next().unwrap_or("");
+                    cached_tags = Some(tags_str);
+                    cached_genres = Some(genres_str);
+                    cached_categories = Some(categories_str);
+                    cached_devs = Some(devs_str);
+
+                    let genre_ok = all_genres_lower.iter().any(|g_low| {
+                        contains_ignore_ascii_case(genres_str, g_low)
+                            || contains_ignore_ascii_case(tags_str, g_low)
+                            || contains_ignore_ascii_case(categories_str, g_low)
+                    });
+                    if !genre_ok {
+                        continue;
+                    }
+                }
+            }
+
+            let name_str = self.pool_str(rec.name_off, rec.name_len);
+            if params.hide_installed && !installed_titles.is_empty() {
+                normalize_alnum_ascii(name_str, &mut norm_scratch);
+                if !norm_scratch.is_empty() && installed_titles.contains(norm_scratch.as_str()) {
+                    continue;
+                }
+            }
+
+            if !q_tokens.is_empty() {
+                let tags_str = cached_tags
+                    .unwrap_or_else(|| self.pool_str(rec.tags_off, rec.tags_len));
+                let (genres_str, devs_str) =
+                    if let (Some(g), Some(d)) = (cached_genres, cached_devs) {
+                        let _ = cached_categories;
+                        (g, d)
+                    } else {
+                        let meta_str = self.pool_str(rec.meta_off, rec.meta_len);
+                        let mut parts = meta_str.split(FIELD_SEP);
+                        let _ = parts.next();
+                        let _ = parts.next();
+                        let g = parts.next().unwrap_or("");
+                        let _ = parts.next();
+                        let _ = parts.next();
+                        let d = parts.next().unwrap_or("");
+                        (g, d)
+                    };
+                let appid_str = format_u32_stack(rec.appid, &mut id_buf);
+                let all_toks_match = q_tokens.iter().all(|&tok| {
+                    contains_ignore_ascii_case(name_str, tok)
+                        || contains_ignore_ascii_case(appid_str, tok)
+                        || contains_ignore_ascii_case(genres_str, tok)
+                        || contains_ignore_ascii_case(tags_str, tok)
+                        || contains_ignore_ascii_case(devs_str, tok)
+                });
+                if !all_toks_match {
+                    continue;
+                }
+            }
+
+            let (k1, k2, k3) = match sort_mode {
+                "ccu" => (
+                    rec.ccu,
+                    f64_to_sortable_u64(rec.value_score),
+                    rec.owners_min,
+                ),
+                "owners" => (
+                    rec.owners_min.saturating_add(rec.owners_max),
+                    rec.ccu,
+                    f64_to_sortable_u64(rec.value_score),
+                ),
+                "price" => (
+                    rec.price_cents as u64,
+                    f64_to_sortable_u64(rec.value_score),
+                    rec.ccu,
+                ),
+                "rating" => {
+                    let total_reviews = rec.positive.saturating_add(rec.negative);
+                    let rating_tenths = if total_reviews > 0 {
+                        ((rec.positive as u128 * 1000 + (total_reviews as u128 / 2))
+                            / total_reviews as u128) as u64
+                    } else {
+                        0
+                    };
+                    (rating_tenths, total_reviews, rec.ccu)
+                }
+                "relevancy" => {
+                    let rank = compute_relevancy_rank(name_str, &q_lower, &q_tokens);
+                    (rank, f64_to_sortable_u64(rec.value_score), rec.ccu)
+                }
+                _ => (
+                    f64_to_sortable_u64(rec.value_score),
+                    rec.ccu,
+                    rec.owners_min,
+                ),
+            };
+
+            matched.push(CandidateKey {
+                rec_idx,
+                k1,
+                k2,
+                k3,
+            });
+        }
+
+        let total_matches = matched.len();
+        let cmp_desc = |a: &CandidateKey, b: &CandidateKey| {
+            b.k1.cmp(&a.k1)
+                .then_with(|| b.k2.cmp(&a.k2))
+                .then_with(|| b.k3.cmp(&a.k3))
+                .then_with(|| a.rec_idx.cmp(&b.rec_idx))
+        };
+
+        let end = offset.saturating_add(limit).min(total_matches);
+        let items = if offset < end {
+            if end < total_matches {
+                matched.select_nth_unstable_by(end - 1, cmp_desc);
+            }
+            matched[..end].sort_unstable_by(cmp_desc);
+            let mut out = Vec::with_capacity(end - offset);
+            for key in &matched[offset..end] {
+                if let Ok(rec) = self.read_record(key.rec_idx as usize) {
+                    out.push(self.hydrate_record(&rec));
+                }
+            }
+            out
+        } else {
+            Vec::new()
+        };
+
+        CatalogQueryPage {
+            items,
+            total_matches,
+            total_indexed,
+            fetched_at: self.fetched_at,
+            offset,
+            limit,
+            query_time_us: started.elapsed().as_micros() as u64,
+        }
+    }
+
+    /// Searches mapped records via trigram inverted index intersection in microseconds.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<CatalogGameEntry> {
+        let params = CatalogQueryParams {
+            query: query.to_string(),
+            sort_by: if query.trim().is_empty() {
+                "value".to_string()
+            } else {
+                "relevancy".to_string()
+            },
+            limit: limit.clamp(1, 250),
+            ..CatalogQueryParams::default()
+        };
+        self.query(&params).items
+    }
+}
+
+fn format_u32_stack(mut val: u32, buf: &mut [u8; 10]) -> &str {
+    let mut idx = buf.len();
+    loop {
+        idx -= 1;
+        buf[idx] = b'0' + (val % 10) as u8;
+        val /= 10;
+        if val == 0 {
+            break;
+        }
+    }
+    unsafe { std::str::from_utf8_unchecked(&buf[idx..]) }
+}
+
+fn compute_relevancy_rank(name: &str, query_lower: &str, tokens: &[&str]) -> u64 {
+    if query_lower.is_empty() {
+        return 0;
+    }
+    if name.eq_ignore_ascii_case(query_lower) {
+        return 1000;
+    }
+    if starts_with_ignore_ascii_case(name, query_lower) {
+        return 800;
+    }
+    let mut score = 0u64;
+    for &tok in tokens {
+        if contains_ignore_ascii_case(name, tok) {
+            score += 120;
+        }
+    }
+    score
+}
+
+fn intersect_sorted_u32_bytes_in_place(acc: &mut Vec<u32>, b_bytes: &[u8]) {
+    let b_len = b_bytes.len() / 4;
+    if acc.is_empty() || b_len == 0 {
+        acc.clear();
+        return;
+    }
+
+    #[inline]
+    fn read_le_u32(bytes: &[u8], idx: usize) -> u32 {
+        let o = idx * 4;
+        u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]])
+    }
+
+    let mut write_idx = 0usize;
+    if b_len > acc.len().saturating_mul(8) {
+        let mut lo = 0usize;
+        for read_i in 0..acc.len() {
+            let target = acc[read_i];
+            let mut hi = b_len;
+            let mut found = false;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let mid_val = read_le_u32(b_bytes, mid);
+                match mid_val.cmp(&target) {
+                    std::cmp::Ordering::Less => lo = mid + 1,
+                    std::cmp::Ordering::Greater => hi = mid,
+                    std::cmp::Ordering::Equal => {
+                        found = true;
+                        lo = mid + 1;
+                        break;
+                    }
+                }
+            }
+            if found {
+                acc[write_idx] = target;
+                write_idx += 1;
+            }
+        }
+    } else {
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < acc.len() && j < b_len {
+            let a_val = acc[i];
+            let b_val = read_le_u32(b_bytes, j);
+            match a_val.cmp(&b_val) {
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => {
+                    acc[write_idx] = a_val;
+                    write_idx += 1;
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+    }
+    acc.truncate(write_idx);
+}
+
+pub fn atomic_rebuild_dkcat(dkcat_path: &Path, cache: &CatalogCacheFile) -> Result<CatalogMmapStats, String> {
+    let bytes = serialize_dkcat(cache)?;
+    if let Some(parent) = dkcat_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create catalog dir {}: {}", parent.display(), e))?;
+    }
+    let tmp_path = dkcat_path.with_extension(format!("dkcat.tmp.{}", std::process::id()));
+    fs::write(&tmp_path, &bytes)
+        .map_err(|e| format!("Failed to write temp .dkcat archive: {}", e))?;
+
+    // Release active Windows memory mapping handle before replacing catalog.dkcat.
+    let mut slot = global_catalog_slot().write().unwrap();
+    *slot = None;
+
+    if dkcat_path.exists() {
+        let _ = fs::remove_file(dkcat_path);
+    }
+    if let Err(err) = fs::rename(&tmp_path, dkcat_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!(
+            "Failed to replace {}: {}",
+            dkcat_path.display(),
+            err
+        ));
+    }
+
+    // Purge legacy catalog_cache.json so RAM and disk are never duplicated.
+    let legacy_json = dkcat_path.with_file_name("catalog_cache.json");
+    if legacy_json.is_file() {
+        let _ = fs::remove_file(&legacy_json);
+    }
+
+    let mapped = MappedCatalog::open(dkcat_path)?;
+    let stats = mapped.stats();
+    *slot = Some(mapped);
+    Ok(stats)
+}
+
+pub fn ensure_catalog_mapped_standalone() -> Result<(), String> {
+    let json_path = get_app_data_file_standalone("catalog_cache.json")?;
+    {
+        let read_guard = global_catalog_slot().read().unwrap();
+        if read_guard.is_some() {
+            if json_path.is_file() {
+                let _ = fs::remove_file(&json_path);
+            }
+            return Ok(());
+        }
+    }
+    let dkcat_path = get_app_data_file_standalone("catalog.dkcat")?;
+    if dkcat_path.is_file() {
+        if let Ok(mapped) = MappedCatalog::open(&dkcat_path) {
+            let mut write_guard = global_catalog_slot().write().unwrap();
+            *write_guard = Some(mapped);
+            if json_path.is_file() {
+                let _ = fs::remove_file(&json_path);
+            }
+            return Ok(());
+        }
+    }
+
+    // One-time transparent upgrade from legacy catalog_cache.json if present.
+    if json_path.is_file() {
+        if let Ok(raw) = fs::read_to_string(&json_path) {
+            if let Ok(parsed) = serde_json::from_str::<CatalogCacheFile>(&raw) {
+                atomic_rebuild_dkcat(&dkcat_path, &parsed)?;
+                let _ = fs::remove_file(&json_path);
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn catalog_mmap_header_meta() -> (usize, u64, Vec<u32>) {
+    let _ = ensure_catalog_mapped_standalone();
+    let guard = global_catalog_slot().read().unwrap();
+    match guard.as_ref() {
+        Some(mapped) => (
+            mapped.record_count(),
+            mapped.fetched_at(),
+            mapped.fetched_pages().to_vec(),
+        ),
+        None => (0, 0, Vec::new()),
+    }
+}
+
+pub fn get_entry_via_mmap(app_id: u32) -> Option<CatalogGameEntry> {
+    let _ = ensure_catalog_mapped_standalone();
+    let guard = global_catalog_slot().read().unwrap();
+    guard.as_ref().and_then(|m| m.get_entry_by_appid(app_id))
+}
+
+pub fn upsert_entries_dkcat(
+    dkcat_path: &Path,
+    updates: &[CatalogGameEntry],
+    fetched_at_override: Option<u64>,
+    extra_pages: &[u32],
+) -> Result<CatalogMmapStats, String> {
+    let mut cache = {
+        let _ = ensure_catalog_mapped_standalone();
+        let guard = global_catalog_slot().read().unwrap();
+        match guard.as_ref() {
+            Some(mapped) => mapped.to_catalog_cache_file(),
+            None if dkcat_path.is_file() => MappedCatalog::open(dkcat_path)
+                .map(|m| m.to_catalog_cache_file())
+                .unwrap_or_default(),
+            None => CatalogCacheFile::default(),
+        }
+    };
+
+    if let Some(ts) = fetched_at_override {
+        cache.fetched_at = ts;
+    } else if cache.fetched_at == 0 {
+        cache.fetched_at = updates.iter().map(|u| u.updated_at).max().unwrap_or(0);
+    }
+
+    for &page in extra_pages {
+        if !cache.fetched_pages.contains(&page) {
+            cache.fetched_pages.push(page);
+        }
+    }
+
+    let mut pos_by_id: std::collections::HashMap<u32, usize> =
+        std::collections::HashMap::with_capacity(cache.entries.len());
+    for (idx, item) in cache.entries.iter().enumerate() {
+        pos_by_id.insert(item.app_id, idx);
+    }
+
+    for upd in updates {
+        if upd.app_id == 0 || upd.name.is_empty() {
+            continue;
+        }
+        if let Some(&idx) = pos_by_id.get(&upd.app_id) {
+            cache.entries[idx] = upd.clone();
+        } else {
+            pos_by_id.insert(upd.app_id, cache.entries.len());
+            cache.entries.push(upd.clone());
+        }
+    }
+
+    atomic_rebuild_dkcat(dkcat_path, &cache)
+}
+
+pub fn load_catalog_via_mmap_standalone() -> CatalogCacheFile {
+    let _ = ensure_catalog_mapped_standalone();
+    let guard = global_catalog_slot().read().unwrap();
+    match guard.as_ref() {
+        Some(mapped) => mapped.to_catalog_cache_file(),
+        None => CatalogCacheFile::default(),
+    }
+}
+
+pub fn search_catalog_via_mmap(query: &str, limit: usize) -> Option<Vec<CatalogGameEntry>> {
+    let _ = ensure_catalog_mapped_standalone();
+    let guard = global_catalog_slot().read().unwrap();
+    guard.as_ref().map(|m| m.search(query, limit))
+}
+
+#[tauri::command]
+pub async fn get_catalog_mmap_stats() -> Result<CatalogMmapStats, String> {
+    let _ = ensure_catalog_mapped_standalone();
+    let guard = global_catalog_slot().read().unwrap();
+    if let Some(mapped) = guard.as_ref() {
+        Ok(mapped.stats())
+    } else {
+        let dkcat_path = get_app_data_file_standalone("catalog.dkcat")?;
+        Ok(CatalogMmapStats {
+            active: false,
+            path: dkcat_path.to_string_lossy().into_owned(),
+            ..CatalogMmapStats::default()
+        })
+    }
+}
+
+#[tauri::command]
+pub async fn search_catalog_mmap(
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<CatalogGameEntry>, String> {
+    let cap = limit.unwrap_or(50);
+    Ok(search_catalog_via_mmap(&query, cap).unwrap_or_default())
+}
+
+#[tauri::command]
+pub async fn query_catalog_mmap(params: CatalogQueryParams) -> Result<CatalogQueryPage, String> {
+    tokio::task::spawn_blocking(move || {
+        let _ = ensure_catalog_mapped_standalone();
+        let guard = global_catalog_slot().read().unwrap();
+        match guard.as_ref() {
+            Some(mapped) => mapped.query(&params),
+            None => CatalogQueryPage {
+                items: Vec::new(),
+                total_matches: 0,
+                total_indexed: 0,
+                fetched_at: 0,
+                offset: params.offset,
+                limit: if params.limit == 0 {
+                    60
+                } else {
+                    params.limit.clamp(1, 250)
+                },
+                query_time_us: 0,
+            },
+        }
+    })
+    .await
+    .map_err(|e| format!("Catalog mmap query task failed: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dkcat_structs_have_zero_unexpected_layout_issues() {
+        assert_eq!(core::mem::size_of::<DkCatHeader>(), 72);
+        assert_eq!(core::mem::size_of::<CatalogRecord>(), 104);
+        assert_eq!(core::mem::size_of::<TrigramIndexEntry>(), 12);
+    }
+
+    #[test]
+    fn dkcat_mmap_roundtrip_and_trigram_search_work() {
+        let dir = std::env::temp_dir().join(format!("duke_dkcat_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dkcat_path = dir.join("catalog.dkcat");
+
+        let cache = CatalogCacheFile {
+            fetched_at: 1_700_000_123,
+            fetched_pages: vec![0, 1],
+            entries: vec![
+                CatalogGameEntry {
+                    app_id: 1145360,
+                    name: "Hades".to_string(),
+                    price_cents: 2499,
+                    initial_price_cents: 2499,
+                    discount_percent: 0,
+                    price_formatted: "$24.99".to_string(),
+                    is_free: false,
+                    ccu: 12000,
+                    owners_min: 5_000_000,
+                    owners_max: 10_000_000,
+                    owners_label: "5M - 10M".to_string(),
+                    positive: 240_000,
+                    negative: 4_000,
+                    review_pct: 98.4,
+                    is_singleplayer: true,
+                    is_coop: false,
+                    is_multiplayer: false,
+                    is_online_only_pvp: false,
+                    genres: vec!["Action".to_string(), "Indie".to_string()],
+                    tags: vec!["Roguelike".to_string(), "Hack and Slash".to_string()],
+                    categories: vec!["Single-player".to_string()],
+                    short_description: "Defy the god of the dead".to_string(),
+                    developers: vec!["Supergiant Games".to_string()],
+                    publishers: vec!["Supergiant Games".to_string()],
+                    release_date: "Sep 17, 2020".to_string(),
+                    cover_url: "https://example.invalid/cover.jpg".to_string(),
+                    header_url: "https://example.invalid/header.jpg".to_string(),
+                    hero_url: "https://example.invalid/hero.jpg".to_string(),
+                    value_score: 97.5,
+                    details_enriched: true,
+                    updated_at: 1_700_000_000,
+                },
+                CatalogGameEntry {
+                    app_id: 413150,
+                    name: "Stardew Valley".to_string(),
+                    price_cents: 1499,
+                    initial_price_cents: 1499,
+                    discount_percent: 0,
+                    price_formatted: "$14.99".to_string(),
+                    is_free: false,
+                    ccu: 55000,
+                    owners_min: 20_000_000,
+                    owners_max: 50_000_000,
+                    owners_label: "20M - 50M".to_string(),
+                    positive: 600_000,
+                    negative: 10_000,
+                    review_pct: 98.4,
+                    is_singleplayer: true,
+                    is_coop: true,
+                    is_multiplayer: true,
+                    is_online_only_pvp: false,
+                    genres: vec!["RPG".to_string(), "Simulation".to_string()],
+                    tags: vec!["Farming Sim".to_string(), "Co-op".to_string()],
+                    categories: vec!["Single-player".to_string(), "Online Co-op".to_string()],
+                    short_description: "You've inherited your grandfather's old farm plot".to_string(),
+                    developers: vec!["ConcernedApe".to_string()],
+                    publishers: vec!["ConcernedApe".to_string()],
+                    release_date: "Feb 26, 2016".to_string(),
+                    cover_url: String::new(),
+                    header_url: String::new(),
+                    hero_url: String::new(),
+                    value_score: 99.1,
+                    details_enriched: true,
+                    updated_at: 1_700_000_001,
+                },
+            ],
+        };
+
+        let bytes = serialize_dkcat(&cache).unwrap();
+        fs::write(&dkcat_path, bytes).unwrap();
+
+        let mapped = MappedCatalog::open(&dkcat_path).unwrap();
+        assert!(mapped.verify_blake3());
+        assert_eq!(mapped.record_count(), 2);
+
+        let hades_hits = mapped.search("roguelike", 10);
+        assert_eq!(hades_hits.len(), 1);
+        assert_eq!(hades_hits[0].app_id, 1145360);
+        assert_eq!(hades_hits[0].developers, vec!["Supergiant Games".to_string()]);
+
+        let farm_hits = mapped.search("valley", 10);
+        assert_eq!(farm_hits.len(), 1);
+        assert_eq!(farm_hits[0].app_id, 413150);
+        assert!(farm_hits[0].is_coop);
+
+        let all = mapped.to_catalog_cache_file();
+        assert_eq!(all.fetched_pages, vec![0, 1]);
+        assert_eq!(all.entries.len(), 2);
+
+        drop(mapped);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dkcat_30000_record_mmap_query_pagination_benchmark() {
+        let dir = std::env::temp_dir().join(format!("duke_dkcat_30k_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dkcat_path = dir.join("catalog.dkcat");
+
+        let genre_pool = [
+            "Action",
+            "Adventure",
+            "RPG",
+            "Simulation",
+            "Horror",
+            "Indie",
+            "Racing",
+            "Strategy",
+        ];
+        let mut entries = Vec::with_capacity(30_000);
+        for i in 0..30_000u32 {
+            let is_free = i % 7 == 0;
+            let is_pvp = i % 19 == 0;
+            let g1 = genre_pool[(i as usize) % genre_pool.len()].to_string();
+            let g2 = genre_pool[((i as usize) + 3) % genre_pool.len()].to_string();
+            let name = if i == 12_345 {
+                "Hollow Knight Silksong".to_string()
+            } else if i == 25_001 {
+                "Hollow Knight".to_string()
+            } else {
+                format!("Duke Preservation Title {}", i)
+            };
+            entries.push(CatalogGameEntry {
+                app_id: 100_000 + i,
+                name,
+                price_cents: if is_free { 0 } else { 999 + (i % 50) * 100 },
+                initial_price_cents: if is_free { 0 } else { 2999 },
+                discount_percent: 0,
+                price_formatted: if is_free {
+                    "Free".to_string()
+                } else {
+                    "$19.99".to_string()
+                },
+                is_free,
+                ccu: u64::from((i * 17) % 85_000),
+                owners_min: 100_000,
+                owners_max: 500_000,
+                owners_label: "100K - 500K".to_string(),
+                positive: 1000 + u64::from(i % 500),
+                negative: 50,
+                review_pct: 95.0,
+                is_singleplayer: i % 5 != 0,
+                is_coop: i % 3 == 0,
+                is_multiplayer: i % 4 == 0,
+                is_online_only_pvp: is_pvp,
+                genres: vec![g1, g2],
+                tags: if i == 12_345 || i == 25_001 {
+                    vec!["Metroidvania".to_string(), "Souls-like".to_string()]
+                } else {
+                    vec!["Singleplayer".to_string()]
+                },
+                categories: vec!["Single-player".to_string()],
+                short_description: String::new(),
+                developers: vec!["Studio".to_string()],
+                publishers: vec!["Pub".to_string()],
+                release_date: String::new(),
+                cover_url: String::new(),
+                header_url: String::new(),
+                hero_url: String::new(),
+                value_score: (i % 10_000) as f64 / 100.0,
+                details_enriched: false,
+                updated_at: 1_700_000_000,
+            });
+        }
+
+        let cache = CatalogCacheFile {
+            fetched_at: 1_700_000_555,
+            fetched_pages: (0..30).collect(),
+            entries,
+        };
+        let bytes = serialize_dkcat(&cache).unwrap();
+        fs::write(&dkcat_path, bytes).unwrap();
+        drop(cache);
+
+        let mapped = MappedCatalog::open(&dkcat_path).unwrap();
+        assert_eq!(mapped.record_count(), 30_000);
+
+        // 1. Filtered browse page 0 & page 1 over all 30,000 records
+        let page0_params = CatalogQueryParams {
+            sort_by: "value".to_string(),
+            paid_only: true,
+            singleplayer: true,
+            coop: true,
+            exclude_pvp: true,
+            genres: vec!["RPG".to_string()],
+            min_price_cents: 1000,
+            offset: 0,
+            limit: 60,
+            ..CatalogQueryParams::default()
+        };
+        let p0 = mapped.query(&page0_params);
+        assert_eq!(p0.total_indexed, 30_000);
+        assert_eq!(p0.items.len(), 60);
+        assert!(p0.total_matches > 100);
+        assert!(
+            p0.query_time_us < 5000,
+            "30k filtered browse took {} us (expected < 5000 us)",
+            p0.query_time_us
+        );
+
+        let page1_params = CatalogQueryParams {
+            offset: 60,
+            ..page0_params.clone()
+        };
+        let p1 = mapped.query(&page1_params);
+        assert_eq!(p1.items.len(), 60);
+        assert_ne!(p0.items[0].app_id, p1.items[0].app_id);
+
+        // 2. Trigram text query over 30,000 records
+        let tri_params = CatalogQueryParams {
+            query: "hollow knight".to_string(),
+            sort_by: "relevancy".to_string(),
+            paid_only: true,
+            singleplayer: true,
+            coop: true,
+            exclude_pvp: true,
+            offset: 0,
+            limit: 60,
+            ..CatalogQueryParams::default()
+        };
+        let tri_page = mapped.query(&tri_params);
+        assert_eq!(tri_page.total_matches, 2);
+        assert_eq!(tri_page.items[0].name, "Hollow Knight");
+        assert_eq!(tri_page.items[1].name, "Hollow Knight Silksong");
+        assert!(
+            tri_page.query_time_us < 5000,
+            "30k trigram query took {} us (expected < 5000 us)",
+            tri_page.query_time_us
+        );
+
+        drop(mapped);
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

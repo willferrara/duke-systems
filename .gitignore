@@ -1,0 +1,38 @@
+# Local Design Rulebooks & Scratch Tooling
+.design-tools/
+
+# Rust / Tauri Build Artifacts
+**/target/
+**/WixTools/
+**/*.rs.bk
+
+# Environment & OS Metadata
+.env
+.env.*
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+.agents/mcp_config.json
+*.zip
+search_sites.json
+sources.json
+library.json
+downloads.json
+catalog_cache.json
+catalog.dkcat
+ludusavi_cache.json
+settings.json
+portable.flag
+*.dkmanifest
+*.dkdelta
+.duke-cas/
+.duke-profile/
+.duke-patch-tmp/
+duke-launcher/data/
+duke-launcher/src-tauri/target/
+
+

@@ -1,0 +1,58 @@
+name: Release Windows x64
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-duke-launcher:
+    name: Build Duke Launcher (windows-latest)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            duke-core
+            duke-launcher/src-tauri
+
+      - name: Install frontend dependencies
+        working-directory: duke-launcher
+        run: npm ci
+
+      - name: Run Rust test suite
+        run: |
+          cargo test --manifest-path duke-core/Cargo.toml --all-features --locked
+          cargo test --manifest-path duke-launcher/src-tauri/Cargo.toml --locked
+
+      - name: Build and upload Tauri release bundle
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: duke-launcher
+          uploadPlainBinary: true
+          tagName: ${{ github.ref_name }}
+          releaseName: "Duke Launcher ${{ github.ref_name }}"
+          releaseBody: "Automated Windows x64 release of Duke Launcher (standalone executable and NSIS Setup installer)."
+          releaseDraft: true
+          prerelease: false

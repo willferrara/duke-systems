@@ -1,0 +1,39 @@
+[package]
+name = "duke-systems"
+version = "0.1.0"
+description = "Duke Systems - Unified Low-RAM Command Hub & Suite Orchestrator"
+authors = ["Duke Systems Contributors"]
+license = "MIT"
+repository = "https://github.com/duke-systems/duke-systems"
+edition = "2021"
+rust-version = "1.77.2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+duke-core = { path = "../../duke-core", version = "0.1.0", features = ["win32-trim", "eco-qos", "pipe-ipc", "tray-daemon", "shm-bus"] }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time"] }
+winreg = "0.56"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

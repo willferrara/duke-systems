@@ -1,0 +1,1231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Duke Launcher</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body data-theme="dark">
+  <!-- Zero-RAM Inline 1.5px Lucide-Style Vector Icon Sprite -->
+  <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+    <symbol id="icon-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></symbol>
+    <symbol id="icon-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></symbol>
+    <symbol id="icon-folder-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></symbol>
+    <symbol id="icon-shield-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="icon-trash-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></symbol>
+    <symbol id="icon-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></symbol>
+    <symbol id="icon-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="2" y1="14" x2="6" y2="14"/><line x1="10" y1="8" x2="14" y2="8"/><line x1="18" y1="16" x2="22" y2="16"/></symbol>
+    <symbol id="icon-cpu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></symbol>
+    <symbol id="icon-activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></symbol>
+    <symbol id="icon-video" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></symbol>
+    <symbol id="icon-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></symbol>
+    <symbol id="icon-gamepad-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="11" x2="10" y2="11"/><line x1="8" y1="9" x2="8" y2="13"/><line x1="15" y1="12" x2="15.01" y2="12"/><line x1="18" y1="10" x2="18.01" y2="10"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/></symbol>
+    <symbol id="icon-mouse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="7"/><path d="M12 6v4"/></symbol>
+    <symbol id="icon-radio" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+    <symbol id="icon-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+    <symbol id="icon-arrow-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></symbol>
+    <symbol id="icon-refresh-cw" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol>
+    <symbol id="icon-sparkles" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/></symbol>
+    <symbol id="icon-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></symbol>
+    <symbol id="icon-zap" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></symbol>
+    <symbol id="icon-compass" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></symbol>
+    <symbol id="icon-external-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+    <symbol id="icon-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></symbol>
+    <symbol id="icon-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></symbol>
+    <symbol id="icon-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="icon-upload" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></symbol>
+    <symbol id="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+    <symbol id="icon-bookmark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/></symbol>
+    <symbol id="icon-camera" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></symbol>
+    <symbol id="icon-share-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></symbol>
+    <symbol id="icon-box" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></symbol>
+    <symbol id="icon-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+    <symbol id="icon-win-min" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25"><line x1="3" y1="8" x2="13" y2="8"/></symbol>
+    <symbol id="icon-win-max" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25"><rect x="3.5" y="3.5" width="9" height="9" rx="0.5"/></symbol>
+    <symbol id="icon-win-close" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25"><path d="M12 4 4 12"/><path d="m4 4 8 8"/></symbol>
+  </svg>
+
+  <div class="window-shell">
+    <!-- Custom 36px Native Windows 11 Titlebar -->
+    <header class="titlebar" id="app-titlebar">
+      <div class="titlebar-left" data-tauri-drag-region>
+        <img src="dukeflag.png" alt="Duke Launcher" class="titlebar-emblem" />
+        <span class="titlebar-title">Duke Launcher</span>
+        <span class="titlebar-version mono-num">v0.2</span>
+      </div>
+
+      <div class="titlebar-center">
+        <div class="titlebar-search-wrap">
+          <svg class="icon titlebar-search-icon" aria-hidden="true"><use href="#icon-search"/></svg>
+          <input
+            type="search"
+            id="search-input"
+            class="titlebar-search-input"
+            placeholder="Search library, downloads, or sites..."
+            autocomplete="off"
+          />
+          <kbd class="titlebar-kbd mono-num">Ctrl+K</kbd>
+        </div>
+      </div>
+
+      <div class="titlebar-right">
+        <div class="titlebar-drag-filler" data-tauri-drag-region></div>
+        <button type="button" class="titlebar-status-pill hidden" id="titlebar-suspend-pill" title="Freeze or resume active game process">
+          <svg class="icon" aria-hidden="true"><use href="#icon-pause"/></svg>
+          <span>Suspend Game</span>
+        </button>
+        <button type="button" class="titlebar-status-pill hidden" id="titlebar-controller-badge" title="XInput Controller Connected (Press X to toggle Couch Mode)">
+          <svg class="icon" aria-hidden="true"><use href="#icon-gamepad-2"/></svg>
+          <span>Controller Ready</span>
+        </button>
+        <div class="window-controls">
+          <button type="button" class="win-btn" id="win-btn-min" title="Minimize" aria-label="Minimize">
+            <svg class="icon-win" aria-hidden="true"><use href="#icon-win-min"/></svg>
+          </button>
+          <button type="button" class="win-btn" id="win-btn-max" title="Maximize" aria-label="Maximize">
+            <svg class="icon-win" aria-hidden="true"><use href="#icon-win-max"/></svg>
+          </button>
+          <button type="button" class="win-btn win-btn-close" id="win-btn-close" title="Close" aria-label="Close">
+            <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <div class="app-shell">
+      <!-- Fixed Steam-Style Desktop Sidebar -->
+      <aside class="sidebar">
+        <nav class="sidebar-nav" aria-label="Main Navigation">
+          <button type="button" class="nav-item active" id="nav-library" data-tab="library">
+            <svg class="icon" aria-hidden="true"><use href="#icon-gamepad-2"/></svg>
+            <span class="nav-label">My Games</span>
+            <span class="nav-count mono-num" id="nav-library-count">0</span>
+          </button>
+          <button type="button" class="nav-item" id="nav-catalog" data-tab="catalog">
+            <svg class="icon" aria-hidden="true"><use href="#icon-compass"/></svg>
+            <span class="nav-label">Search Games</span>
+            <span class="nav-count mono-num" id="nav-catalog-count">--</span>
+          </button>
+          <button type="button" class="nav-item" id="nav-downloader" data-tab="downloader">
+            <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
+            <span class="nav-label">Downloads</span>
+            <span class="nav-count mono-num" id="nav-dl-count">0</span>
+          </button>
+          <button type="button" class="nav-item" id="nav-sources" data-tab="sources">
+            <svg class="icon" aria-hidden="true"><use href="#icon-sparkles"/></svg>
+            <span class="nav-label">Find Games</span>
+          </button>
+          <button type="button" class="nav-item" id="nav-settings" data-tab="settings">
+            <svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>
+            <span class="nav-label">Settings</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-section-header">
+          <span>Installed Games</span>
+          <span class="sidebar-badge mono-num" id="sidebar-list-count">0</span>
+        </div>
+        <div class="sidebar-game-list" id="sidebar-game-list"></div>
+
+        <div class="sidebar-quick-actions">
+          <button type="button" class="btn btn-primary btn-sm" id="btn-quick-add-exe">
+            <svg class="icon" aria-hidden="true"><use href="#icon-plus"/></svg>
+            <span>Add Game Exe</span>
+          </button>
+          <div class="sidebar-actions-split">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-auto-covers" title="Refresh missing box art">
+              <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+              <span>Covers</span>
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-scan-local-file" title="Security scan any executable or archive">
+              <svg class="icon" aria-hidden="true"><use href="#icon-shield-check"/></svg>
+              <span>Shield</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Bottom-Left Telemetry Footer -->
+        <div class="sidebar-stats">
+          <div class="stat-row">
+            <span class="stat-label">Money Saved</span>
+            <span class="stat-val mono-num gold" id="stat-money-saved">$0.00</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Disk Used</span>
+            <span class="stat-val mono-num" id="stat-total-size">0 MB</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Installed</span>
+            <span class="stat-val mono-num accent" id="stat-installed-count">0</span>
+          </div>
+          <div class="stat-divider"></div>
+          <div class="stat-row">
+            <span class="stat-label">DoH Shield</span>
+            <span class="stat-val mono-num emerald" id="sidebar-doh-badge">Active</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">RAM State</span>
+            <div class="stat-ram-wrap">
+              <span class="stat-val mono-num accent" id="sidebar-ram-badge">-- MB</span>
+              <button type="button" class="icon-mini-btn" id="btn-trim-ram-sidebar" title="Trim working set RAM now">
+                <svg class="icon" aria-hidden="true"><use href="#icon-zap"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Main Workspace -->
+      <main class="main-panel">
+        <!-- Smart Clipboard Auto-Detector Action Banner -->
+        <div class="clipboard-banner hidden" id="clipboard-detect-banner" role="region" aria-label="Clipboard Download Link Detected">
+          <div class="clipboard-banner-info">
+            <svg class="icon clipboard-banner-icon" aria-hidden="true"><use href="#icon-link"/></svg>
+            <span class="clipboard-banner-label">Clipboard Link Detected:</span>
+            <span class="clipboard-banner-url mono-num" id="clipboard-detect-url"></span>
+          </div>
+          <div class="clipboard-banner-actions">
+            <button type="button" class="btn btn-steam-green btn-sm" id="btn-clipboard-download">
+              <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
+              <span>Download Now</span>
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-clipboard-dismiss">
+              <svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg>
+              <span>Dismiss</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Library Filter Strip -->
+        <div class="subbar" id="library-controls">
+          <div class="filter-pills" id="filter-pills">
+            <button type="button" class="filter-pill active" data-filter="all">All</button>
+            <button type="button" class="filter-pill" data-filter="favorites">Favorites</button>
+            <button type="button" class="filter-pill" data-filter="steam">Steam Detected</button>
+            <button type="button" class="filter-pill" data-filter="portable">Portable</button>
+            <button type="button" class="filter-pill" data-filter="epic">Epic</button>
+            <button type="button" class="filter-pill" data-filter="gog">GOG</button>
+            <button type="button" class="filter-pill" data-filter="xbox">Xbox</button>
+          </div>
+          <div class="sort-wrap">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-import-libraries" title="Scan Steam, Epic, GOG, and Xbox Game Pass libraries">
+              <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+              <span>Import Libraries</span>
+            </button>
+            <label for="sort-select" class="sort-label">Sort</label>
+            <select id="sort-select" class="select-control">
+              <option value="recent">Recently Played</option>
+              <option value="alpha">Alphabetical</option>
+              <option value="size">Largest Size</option>
+              <option value="playtime">Most Playtime</option>
+              <option value="price">Highest Value</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="workspace-scroll">
+          <!-- TAB 1: MY GAMES -->
+          <section id="library-view" class="tab-view active">
+            <div id="library-empty" class="empty-card hidden">
+              <h3>No games in your library yet</h3>
+              <p>Import installed Steam, Epic, GOG, or Xbox games in one click, or add any local executable.</p>
+              <div class="empty-actions">
+                <button type="button" class="btn btn-primary" id="btn-empty-import-libraries">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                  <span>Import Libraries</span>
+                </button>
+                <button type="button" class="btn btn-secondary" id="btn-empty-add-game">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-plus"/></svg>
+                  <span>Add Local Game</span>
+                </button>
+              </div>
+            </div>
+            <div class="library-grid" id="library-grid"></div>
+          </section>
+
+          <!-- SINGLE GAME STEAM-STYLE DETAIL VIEW -->
+          <section id="game-detail-view" class="tab-view hidden">
+            <div class="detail-hero">
+              <div class="detail-hero-bg" id="detail-hero-bg"></div>
+              <img id="detail-hero-img" class="detail-hero-img hidden" alt="" />
+              <div class="detail-hero-scrim"></div>
+              <div class="detail-hero-inner">
+                <button type="button" class="btn btn-secondary btn-sm detail-back-btn" id="btn-detail-back">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-arrow-left"/></svg>
+                  <span>Back to My Games</span>
+                </button>
+                <div class="detail-hero-title-group">
+                  <span class="pill hidden" id="detail-hero-source"></span>
+                  <span class="pill mono-num hidden" id="detail-hero-appid"></span>
+                  <h1 class="detail-hero-title" id="detail-hero-title">Game Title</h1>
+                </div>
+              </div>
+            </div>
+
+            <!-- Action & Telemetry Ribbon -->
+            <div class="detail-action-bar">
+              <div class="detail-primary-actions">
+                <button type="button" class="btn btn-steam-green btn-lg" id="btn-detail-play">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>
+                  <span>Play</span>
+                </button>
+                <button type="button" class="btn btn-secondary btn-lg hidden" id="btn-detail-suspend">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-pause"/></svg>
+                  <span>Suspend</span>
+                </button>
+                <button type="button" class="btn btn-secondary" id="btn-detail-folder">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg>
+                  <span>Folder</span>
+                </button>
+                <button type="button" class="btn btn-secondary" id="btn-detail-pin">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-pin"/></svg>
+                  <span>Favorite</span>
+                </button>
+              </div>
+
+              <div class="detail-metrics-strip">
+                <div class="detail-metric">
+                  <span class="detail-metric-label">Last Played</span>
+                  <strong class="detail-metric-val" id="detail-last-played">Never</strong>
+                </div>
+                <div class="detail-metric">
+                  <span class="detail-metric-label">Play Time</span>
+                  <strong class="detail-metric-val mono-num" id="detail-playtime">0 min</strong>
+                </div>
+                <div class="detail-metric">
+                  <span class="detail-metric-label">Live Players</span>
+                  <strong class="detail-metric-val mono-num emerald" id="detail-live-players">--</strong>
+                </div>
+                <div class="detail-metric">
+                  <span class="detail-metric-label">Steam Price</span>
+                  <strong class="detail-metric-val mono-num gold" id="detail-steam-price">--</strong>
+                </div>
+                <div class="detail-metric">
+                  <span class="detail-metric-label">Disk Footprint</span>
+                  <strong class="detail-metric-val mono-num" id="detail-install-size">--</strong>
+                </div>
+              </div>
+            </div>
+
+            <!-- Utility Subnav Links -->
+            <div class="detail-tools-bar">
+              <div class="detail-tools-group">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-compress">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-layers"/></svg>
+                  <span>Compress Disk</span>
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-backup-saves">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
+                  <span>Backup Saves</span>
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-restore-saves">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                  <span>Restore Save</span>
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-change-exe">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>
+                  <span>Switch Exe</span>
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-cover">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-sparkles"/></svg>
+                  <span>Fix Cover</span>
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-snapshots">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-camera"/></svg>
+                  <span>Snapshots</span>
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-preflight">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-box"/></svg>
+                  <span>DLL Check</span>
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-scan">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-shield-check"/></svg>
+                  <span>Security Scan</span>
+                </button>
+                <button type="button" class="btn btn-danger-ghost btn-sm" id="btn-detail-remove">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
+                  <span>Remove</span>
+                </button>
+              </div>
+              <div class="detail-steam-links">
+                <button type="button" class="link-btn" id="btn-subnav-store">Steam Store</button>
+                <button type="button" class="link-btn" id="btn-subnav-steamdb">SteamDB</button>
+                <button type="button" class="link-btn" id="btn-subnav-pcgw">PCGamingWiki</button>
+                <button type="button" class="link-btn" id="btn-subnav-hub">Community</button>
+                <button type="button" class="link-btn" id="btn-subnav-discussions">Discussions</button>
+              </div>
+            </div>
+
+            <!-- Two-Column Detail Body -->
+            <div class="detail-columns">
+              <div class="panel-card">
+                <div class="panel-head">
+                  <h3>Game Profile &amp; Launch Options</h3>
+                  <span class="pill" id="detail-security-status">Ready</span>
+                </div>
+                <p class="detail-desc" id="detail-description">Loading metadata...</p>
+
+                <div class="kv-rows">
+                  <div class="kv-row">
+                    <span class="kv-k">Developer</span>
+                    <span class="kv-v" id="detail-developers">--</span>
+                  </div>
+                  <div class="kv-row">
+                    <span class="kv-k">Publisher</span>
+                    <span class="kv-v" id="detail-publishers">--</span>
+                  </div>
+                  <div class="kv-row">
+                    <span class="kv-k">Release Date</span>
+                    <span class="kv-v" id="detail-release-date">--</span>
+                  </div>
+                  <div class="kv-row">
+                    <span class="kv-k">Genres</span>
+                    <span class="kv-v" id="detail-genres">--</span>
+                  </div>
+                </div>
+
+                <div class="detail-field-block">
+                  <div class="detail-field-head">
+                    <label for="detail-launch-args">Custom Launch Arguments</label>
+                    <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-save-args">Save Args</button>
+                  </div>
+                  <input type="text" id="detail-launch-args" class="input-control mono-num" placeholder="e.g. -dx11 -novid -high" />
+                </div>
+
+                <div class="detail-field-block detail-runtime-profile">
+                  <label class="detail-toggle-row" for="detail-toggle-sandbox">
+                    <div class="setting-toggle-copy">
+                      <div class="setting-toggle-title">Portable Profile Sandbox (.duke-profile)</div>
+                      <div class="setting-toggle-desc">Isolate APPDATA, LOCALAPPDATA &amp; USERPROFILE inside the game folder.</div>
+                    </div>
+                    <input type="checkbox" id="detail-toggle-sandbox" class="setting-checkbox" />
+                  </label>
+                  <div class="detail-field-head detail-prefetch-row">
+                    <label for="detail-prefetch-mode">NVMe Pre-Launch Cache Warmer</label>
+                    <select id="detail-prefetch-mode" class="select-control select-compact">
+                      <option value="inherit">Use Global Setting</option>
+                      <option value="enabled">Always Warm Standby RAM</option>
+                      <option value="disabled">Skip Pre-Launch Warm</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="detail-field-block">
+                  <div class="detail-field-head">
+                    <span>Executable Target</span>
+                    <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-inline-exe">Change Exe</button>
+                  </div>
+                  <code class="path-code mono-num" id="detail-exe-path">--</code>
+                </div>
+
+                <div class="detail-field-block">
+                  <div class="detail-field-head">
+                    <span>Discovered Save Locations</span>
+                    <div class="detail-save-actions">
+                      <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-mesh-sync">Mesh Sync</button>
+                      <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-rescan-saves">Rescan Saves</button>
+                    </div>
+                  </div>
+                  <div id="detail-save-paths-list" class="save-paths-list">
+                    <div class="panel-sub">Resolving Ludusavi manifest &amp; Windows save paths...</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="panel-card">
+                <div class="panel-head">
+                  <h3>Updates &amp; Patch Notes</h3>
+                  <span class="pill" id="detail-news-status">Steam Feed</span>
+                </div>
+                <div class="news-list" id="detail-news-list"></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- TAB 2: SEARCH GAMES (STEAM CATALOG DISCOVERY) -->
+          <section id="catalog-view" class="tab-view hidden">
+            <div class="panel-card catalog-toolbar-card">
+              <div class="panel-head">
+                <div>
+                  <h2>Steam Catalog Discovery</h2>
+                  <p class="panel-sub" id="catalog-cache-status">Local encrypted DoH cache · Ready</p>
+                </div>
+                <div class="catalog-head-actions">
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-catalog-reset-filters">
+                    <span>Reset Preset</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-catalog-refresh">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                    <span>Refresh Catalog</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="catalog-search-sort-row">
+                <div class="catalog-search-wrap">
+                  <svg class="icon catalog-search-icon" aria-hidden="true"><use href="#icon-search"/></svg>
+                  <input
+                    type="search"
+                    id="input-catalog-search"
+                    class="input-control catalog-search-input"
+                    placeholder="Search 30,000+ Steam games or query live Steam Store..."
+                    autocomplete="off"
+                  />
+                </div>
+                <div class="catalog-select-group">
+                  <label for="select-catalog-sort" class="sort-label">Sort</label>
+                  <select id="select-catalog-sort" class="select-control">
+                    <option value="value">Paid SP / Co-op Value (Default)</option>
+                    <option value="ccu">Current Player Count (Live CCU)</option>
+                    <option value="owners">Total Owners / Popularity</option>
+                    <option value="price">Highest Retail Price</option>
+                    <option value="rating">Top User Rating</option>
+                    <option value="relevancy">Relevancy</option>
+                  </select>
+                </div>
+                <div class="catalog-select-group">
+                  <label for="select-catalog-min-price" class="sort-label">Price</label>
+                  <select id="select-catalog-min-price" class="select-control">
+                    <option value="1">Any Paid</option>
+                    <option value="0">All Prices</option>
+                    <option value="1000">$10+</option>
+                    <option value="2000">$20+</option>
+                    <option value="4000">$40+</option>
+                    <option value="6000">$60+ AAA</option>
+                  </select>
+                </div>
+                <div class="catalog-select-group">
+                  <label for="select-catalog-min-ccu" class="sort-label">Players</label>
+                  <select id="select-catalog-min-ccu" class="select-control">
+                    <option value="0">Any</option>
+                    <option value="100">100+ Playing</option>
+                    <option value="1000">1,000+ Playing</option>
+                    <option value="10000">10,000+ Playing</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="catalog-mode-row" id="catalog-mode-toggles">
+                <button type="button" class="filter-pill active" data-catalog-mode="paidOnly">Paid Only (&gt;$0)</button>
+                <button type="button" class="filter-pill active" data-catalog-mode="singleplayer">Single-player</button>
+                <button type="button" class="filter-pill active" data-catalog-mode="coop">Co-op / LAN</button>
+                <button type="button" class="filter-pill active" data-catalog-mode="excludePvp">Exclude PvP / MMO Only</button>
+                <button type="button" class="filter-pill" data-catalog-mode="hideInstalled">Hide Already Installed</button>
+              </div>
+
+              <div class="catalog-genre-row" id="catalog-genre-pills">
+                <button type="button" class="filter-pill active" data-catalog-genre="all">All Genres</button>
+                <button type="button" class="filter-pill" data-catalog-genre="Action">Action</button>
+                <button type="button" class="filter-pill" data-catalog-genre="Adventure">Adventure</button>
+                <button type="button" class="filter-pill" data-catalog-genre="RPG">RPG</button>
+                <button type="button" class="filter-pill" data-catalog-genre="Simulation">Simulation</button>
+                <button type="button" class="filter-pill" data-catalog-genre="Open World">Open World</button>
+                <button type="button" class="filter-pill" data-catalog-genre="Horror">Horror</button>
+                <button type="button" class="filter-pill" data-catalog-genre="Survival">Survival</button>
+                <button type="button" class="filter-pill" data-catalog-genre="Indie">Indie</button>
+                <button type="button" class="filter-pill" data-catalog-genre="Racing">Racing</button>
+                <button type="button" class="filter-pill" data-catalog-genre="Strategy">Strategy</button>
+              </div>
+            </div>
+
+            <div class="catalog-status-strip">
+              <span class="panel-sub mono-num" id="catalog-results-summary">Open Search Games to index 30,000+ Steam titles</span>
+              <span class="pill gold hidden" id="catalog-stale-badge">Cached Offline</span>
+            </div>
+
+            <div id="catalog-loading" class="empty-card hidden">
+              <h3>Fetching Steam Catalog over Encrypted DoH...</h3>
+              <p>Indexing SteamSpy top pages, Single-player &amp; Co-op tags, and live Steam Store pricing.</p>
+            </div>
+            <div id="catalog-error" class="empty-card hidden">
+              <h3>Catalog Unavailable</h3>
+              <p id="catalog-error-msg">Unable to load Steam catalog.</p>
+              <button type="button" class="btn btn-primary btn-sm" id="btn-catalog-retry">
+                <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                <span>Retry</span>
+              </button>
+            </div>
+            <div id="catalog-empty" class="empty-card hidden">
+              <h3>No Matching Games</h3>
+              <p>Adjust your search query, price tier, or mode toggles to expand catalog results.</p>
+            </div>
+
+            <div class="catalog-grid" id="catalog-grid"></div>
+            <div id="catalog-scroll-sentinel" class="catalog-scroll-sentinel" aria-hidden="true"></div>
+          </section>
+
+          <!-- TAB 3: DOWNLOADS -->
+          <section id="downloader-view" class="tab-view hidden">
+            <div class="panel-card">
+              <div class="panel-head">
+                <div>
+                  <h2>Multi-Hoster Turbo Downloader</h2>
+                  <p class="panel-sub">8-worker adaptive HTTP byte-range matrix with DoH resolution and crack-aware scanner.</p>
+                </div>
+                <div class="dl-head-actions">
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-open-host-browser">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-sparkles"/></svg>
+                    <span>Sniffer Browser</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-scan-any-btn">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-shield-check"/></svg>
+                    <span>Scan File</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="dl-compose-row">
+                <button type="button" class="btn btn-steam-green" id="btn-paste-and-dl">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
+                  <span>Paste &amp; Download</span>
+                </button>
+                <input
+                  type="url"
+                  id="input-dl-url"
+                  class="input-control dl-url-input"
+                  placeholder="Paste Buzzheavier, GoFile, Pixeldrain, MediaFire, FileDitch, or direct HTTP link..."
+                />
+                <select id="select-dl-speed-mode" class="select-control" title="Global Bandwidth Limit">
+                  <option value="unlimited">Unlimited Speed</option>
+                  <option value="100">100 MB/s Cap</option>
+                  <option value="50">50 MB/s Cap</option>
+                  <option value="20">20 MB/s Cap</option>
+                  <option value="10">10 MB/s Cap</option>
+                  <option value="5">5 MB/s Cap</option>
+                </select>
+                <button type="button" class="btn btn-primary" id="btn-start-dl">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>
+                  <span>Queue Download</span>
+                </button>
+              </div>
+
+              <div class="dl-dir-row">
+                <span class="dl-dir-label">Save Directory</span>
+                <input type="text" id="input-dl-dir" class="input-control mono-num dl-dir-input" placeholder="Default Downloads Folder" readonly />
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-browse-dl-dir">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg>
+                  <span>Browse</span>
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-pause-all">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-pause"/></svg>
+                  <span>Pause All</span>
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-resume-all">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>
+                  <span>Resume All</span>
+                </button>
+              </div>
+
+              <div class="bookmarklet-card">
+                <div class="bookmarklet-copy">
+                  <div class="bookmarklet-title">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-bookmark"/></svg>
+                    <span>1-Click Browser Bookmarklet (<code>duke://</code> Protocol)</span>
+                  </div>
+                  <p class="bookmarklet-tip">Drag this button to your browser bookmarks bar — click it on any download page to send the link straight here.</p>
+                </div>
+                <div class="bookmarklet-actions">
+                  <a
+                    id="bookmarklet-link-dl"
+                    class="btn btn-secondary btn-sm bookmarklet-drag-btn"
+                    draggable="true"
+                    href="javascript:location.href='duke://download?url='+encodeURIComponent(location.href)"
+                    title="Drag to your browser bookmarks bar"
+                  >
+                    <svg class="icon" aria-hidden="true"><use href="#icon-bookmark"/></svg>
+                    <span>Send to Duke Launcher</span>
+                  </a>
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-copy-bookmarklet-dl">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-copy"/></svg>
+                    <span>Copy Bookmarklet</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel-card">
+              <div class="panel-head">
+                <h3>Download Queue</h3>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-clear-completed-dl">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
+                  <span>Clear Completed</span>
+                </button>
+              </div>
+              <div class="dl-onboarding-strip" id="dl-onboarding-strip">
+                <div class="dl-onboarding-step">
+                  <div class="dl-onboarding-num mono-num">01</div>
+                  <div class="dl-onboarding-body">
+                    <div class="dl-onboarding-title">Find a Game Archive</div>
+                    <p class="dl-onboarding-desc">Browse any store, archive, or download host in your browser.</p>
+                  </div>
+                </div>
+                <div class="dl-onboarding-step">
+                  <div class="dl-onboarding-num mono-num">02</div>
+                  <div class="dl-onboarding-body">
+                    <div class="dl-onboarding-title">Copy the Download Link</div>
+                    <p class="dl-onboarding-desc">Copy the file URL (or click the bookmarklet).</p>
+                  </div>
+                </div>
+                <div class="dl-onboarding-step">
+                  <div class="dl-onboarding-num mono-num">03</div>
+                  <div class="dl-onboarding-body">
+                    <div class="dl-onboarding-title">1-Click Turbo Install</div>
+                    <p class="dl-onboarding-desc">Click "Paste &amp; Download" to fetch across 8 streams, verify integrity, extract, and add to My Games.</p>
+                  </div>
+                </div>
+              </div>
+              <div class="dl-jobs-list" id="dl-jobs-list"></div>
+            </div>
+
+            <div class="panel-card">
+              <div class="panel-head">
+                <h3>Security Scan Reports</h3>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-clear-dl-history">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
+                  <span>Clear History</span>
+                </button>
+              </div>
+              <div class="dl-reports-list" id="dl-reports-list"></div>
+            </div>
+          </section>
+
+          <!-- TAB 4: FIND GAMES (GAME DIRECTORY & CUSTOM SEARCH HUB) -->
+          <section id="sources-view" class="tab-view hidden">
+            <div class="panel-card">
+              <div class="panel-head">
+                <div>
+                  <h2>Game Directories &amp; Custom Search Hub</h2>
+                  <p class="panel-sub">Type a game title and click any directory card to launch an ad-blocked, popup-shielded Safe Browser window with 8-worker download auto-grab.</p>
+                </div>
+                <div class="sources-head-actions">
+                  <div id="sources-game-banner" class="sources-game-banner hidden">
+                    <span class="pill gold" id="sources-game-query-label">Target: --</span>
+                    <button type="button" class="btn btn-secondary btn-xs" id="btn-clear-source-game">Clear</button>
+                  </div>
+                  <button type="button" class="btn btn-primary btn-sm" id="btn-open-add-site-modal">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-plus"/></svg>
+                    <span>+ Add Site</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-open-bulk-import-modal">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-upload"/></svg>
+                    <span>Bulk Import</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-reset-default-sites" title="Restore the 6 built-in game directories">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                    <span>Reset Defaults</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="find-action-bar">
+                <div class="find-search-group">
+                  <svg class="icon find-search-icon" aria-hidden="true"><use href="#icon-search"/></svg>
+                  <input type="search" id="input-directory-search" class="input-control find-search-input" placeholder="Type any game title to search all directories..." />
+                  <button type="button" class="btn btn-primary btn-sm" id="btn-directory-quick-launch" title="Open active search in top matching directory">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-globe"/></svg>
+                    <span>Search First</span>
+                  </button>
+                </div>
+                <div class="find-direct-group">
+                  <svg class="icon find-search-icon" aria-hidden="true"><use href="#icon-link"/></svg>
+                  <input type="url" id="input-find-direct-url" class="input-control mono-num find-direct-input" placeholder="Direct URL / Paste Link (.zip, .7z, .exe)..." />
+                  <button type="button" class="btn btn-steam-green btn-sm" id="btn-find-direct-download">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
+                    <span>Download</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="directory-filter-row">
+                <div class="filter-pills" id="directory-category-pills">
+                  <button type="button" class="filter-pill active" data-dir-category="all">All</button>
+                  <button type="button" class="filter-pill" data-dir-category="DRM-Free">DRM-Free</button>
+                  <button type="button" class="filter-pill" data-dir-category="Indie &amp; Free">Indie &amp; Free</button>
+                  <button type="button" class="filter-pill" data-dir-category="Preservation">Preservation</button>
+                  <button type="button" class="filter-pill" data-dir-category="Fixes &amp; Guides">Fixes &amp; Guides</button>
+                  <button type="button" class="filter-pill" data-dir-category="Database">Database</button>
+                  <button type="button" class="filter-pill" data-dir-category="Custom">Custom</button>
+                </div>
+                <span class="panel-sub mono-num" id="directory-count-summary">6 directories ready</span>
+              </div>
+
+              <div class="directory-grid" id="directory-grid"></div>
+            </div>
+
+            <div class="panel-card collapsible-card" id="json-feeds-card">
+              <div class="panel-head collapsible-head">
+                <button type="button" class="collapsible-toggle-btn" id="btn-toggle-json-feeds" aria-expanded="false" aria-controls="json-feeds-body">
+                  <svg class="icon collapsible-chevron" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
+                  <div class="collapsible-title-group">
+                    <div class="collapsible-title-row">
+                      <h3>Community JSON Feeds (Hydra Schema)</h3>
+                      <span class="pill mono-num" id="json-feeds-count-badge">0 Feeds</span>
+                    </div>
+                    <p class="panel-sub">Optional external Hydra JSON manifests and local <code>.json</code> feeds.</p>
+                  </div>
+                </button>
+                <div class="sources-head-actions">
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-refresh-all-sources">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                    <span>Refresh All</span>
+                  </button>
+                </div>
+              </div>
+
+              <div id="json-feeds-body" class="collapsible-body hidden">
+                <div class="sources-import-row">
+                  <input type="url" id="input-source-url" class="input-control mono-num" placeholder="https://example.com/community-source.json" />
+                  <button type="button" class="btn btn-primary btn-sm" id="btn-import-source-url">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-link"/></svg>
+                    <span>Import JSON URL</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-import-source-file">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg>
+                    <span>Import .json File</span>
+                  </button>
+                </div>
+
+                <div class="sources-feed-list" id="sources-feed-list"></div>
+
+                <div class="panel-head sources-releases-head">
+                  <div>
+                    <h4>Indexed Source Releases</h4>
+                    <p class="panel-sub" id="sources-results-summary">Import an external Hydra JSON manifest to browse feed releases.</p>
+                  </div>
+                  <input type="search" id="input-sources-filter" class="input-control input-compact" placeholder="Filter imported releases..." />
+                </div>
+                <div class="sources-grid" id="sources-grid"></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- TAB 5: SETTINGS & THEMES -->
+          <section id="settings-view" class="tab-view hidden">
+            <div class="panel-card">
+              <div class="panel-head">
+                <div>
+                  <h2>Library Importer &amp; Save Discovery</h2>
+                  <p class="panel-sub">Import Steam VDF/ACF, Epic Games, GOG Galaxy, and Xbox Game Pass libraries or sync Ludusavi save paths.</p>
+                </div>
+                <div class="settings-btn-group">
+                  <button type="button" class="btn btn-primary btn-sm" id="btn-settings-import-libraries">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                    <span>Import Libraries</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-settings-sync-ludusavi">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
+                    <span>Sync Ludusavi Manifest</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="settings-input-row">
+                <div class="setting-toggle-copy">
+                  <div class="setting-toggle-title">SteamGridDB API Key</div>
+                  <div class="setting-toggle-desc">Optional free v2 bearer key for 600x900 grids, hero banners, and Windows `.ico` icons in Fix Cover.</div>
+                </div>
+                <div class="settings-inline-form">
+                  <input type="password" id="setting-steamgriddb-key" class="input-control mono-num" placeholder="Paste SteamGridDB API key..." autocomplete="off" />
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-save-sgdb-key">Save Key</button>
+                </div>
+              </div>
+
+              <div class="settings-input-row">
+                <div class="setting-toggle-copy">
+                  <div class="setting-toggle-title">Game Suspend / Resume Hotkey</div>
+                  <div class="setting-toggle-desc">Freeze unpausable single-player games via NtSuspendProcess and trim RAM (default Ctrl+Alt+P or Pause).</div>
+                </div>
+                <div class="settings-inline-form">
+                  <input type="text" id="setting-suspend-hotkey" class="input-control mono-num" placeholder="Ctrl+Alt+P" />
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-save-suspend-hotkey">Save Hotkey</button>
+                </div>
+              </div>
+
+              <label class="setting-toggle-row" for="setting-couch-mode">
+                <div class="setting-toggle-copy">
+                  <div class="setting-toggle-title">Controller Couch / Handheld Mode (60 Hz XInput)</div>
+                  <div class="setting-toggle-desc">Enlarge 10-foot UI typography and enter fullscreen navigation. Toggle anytime with XInput button X.</div>
+                </div>
+                <input type="checkbox" id="setting-couch-mode" class="setting-checkbox" />
+              </label>
+
+              <label class="setting-toggle-row" for="setting-auto-clean-completed">
+                <div class="setting-toggle-copy">
+                  <div class="setting-toggle-title">Auto-Clean Completed Downloads</div>
+                  <div class="setting-toggle-desc">Automatically clear completed jobs from the active queue and downloads.json 2.5 seconds after registering in My Games.</div>
+                </div>
+                <input type="checkbox" id="setting-auto-clean-completed" class="setting-checkbox" checked />
+              </label>
+
+              <label class="setting-toggle-row" for="setting-nvme-prefetch">
+                <div class="setting-toggle-copy">
+                  <div class="setting-toggle-title">NVMe Pre-Launch Standby RAM Warmer (Global Default)</div>
+                  <div class="setting-toggle-desc">Pre-warm largest game archives (.pak, .vpk, .bsa, .forge, .rpf &gt; 32 MB) via Win32 PrefetchVirtualMemory up to 25% free RAM on Play.</div>
+                </div>
+                <input type="checkbox" id="setting-nvme-prefetch" class="setting-checkbox" checked />
+              </label>
+
+              <label class="setting-toggle-row" for="setting-auto-detect-clipboard">
+                <div class="setting-toggle-copy">
+                  <div class="setting-toggle-title">Auto-detect download links on clipboard</div>
+                  <div class="setting-toggle-desc">Watch window focus for copied archive URLs (.zip, .rar, .7z, .exe, .msi, .iso) or supported hosts and show a 1-click download banner.</div>
+                </div>
+                <input type="checkbox" id="setting-auto-detect-clipboard" class="setting-checkbox" checked />
+              </label>
+
+              <div class="bookmarklet-card bookmarklet-card-settings">
+                <div class="bookmarklet-copy">
+                  <div class="bookmarklet-title">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-bookmark"/></svg>
+                    <span>Browser Bookmarklet (<code>duke://download</code> Protocol Handler)</span>
+                  </div>
+                  <p class="bookmarklet-tip">Drag this button to your browser bookmarks bar — click it on any download page to send the link straight here.</p>
+                </div>
+                <div class="bookmarklet-actions">
+                  <a
+                    id="bookmarklet-link-settings"
+                    class="btn btn-secondary btn-sm bookmarklet-drag-btn"
+                    draggable="true"
+                    href="javascript:location.href='duke://download?url='+encodeURIComponent(location.href)"
+                    title="Drag to your browser bookmarks bar"
+                  >
+                    <svg class="icon" aria-hidden="true"><use href="#icon-bookmark"/></svg>
+                    <span>Send to Duke Launcher</span>
+                  </a>
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-copy-bookmarklet-settings">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-copy"/></svg>
+                    <span>Copy Bookmarklet</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel-card">
+              <div class="panel-head">
+                <div>
+                  <h2>Duke Swarm (LAN / Tailscale Game-Beam &amp; Mesh Save Sync)</h2>
+                  <p class="panel-sub">Zero-config UDP multicast (239.255.77.88:47880) + Tailscale peer FastCDC transfer &amp; vector-clock save sync.</p>
+                </div>
+                <div class="settings-btn-group">
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-swarm-probe">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-share-2"/></svg>
+                    <span>Probe Peers</span>
+                  </button>
+                </div>
+              </div>
+
+              <label class="setting-toggle-row" for="setting-swarm-enabled">
+                <div class="setting-toggle-copy">
+                  <div class="setting-toggle-title">Enable Duke Swarm LAN &amp; Mesh Discovery</div>
+                  <div class="setting-toggle-desc">Advertise installed AppIDs over local LAN multicast and automatically sync changed save bytes on game exit.</div>
+                </div>
+                <input type="checkbox" id="setting-swarm-enabled" class="setting-checkbox" />
+              </label>
+
+              <div class="settings-input-row">
+                <div class="setting-toggle-copy">
+                  <div class="setting-toggle-title">Swarm Node Name</div>
+                  <div class="setting-toggle-desc">Friendly hostname shown to peers on your local network or Tailnet.</div>
+                </div>
+                <div class="settings-inline-form">
+                  <input type="text" id="setting-swarm-node-name" class="input-control mono-num" placeholder="Duke-Node" />
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-save-swarm-node">Save Name</button>
+                </div>
+              </div>
+
+              <div class="settings-input-row">
+                <div class="setting-toggle-copy">
+                  <div class="setting-toggle-title">Direct / Tailscale Peer Addresses</div>
+                  <div class="setting-toggle-desc">Comma-separated IPv4 or Tailscale host:port entries (default TCP port 47881) probed outside LAN multicast.</div>
+                </div>
+                <div class="settings-inline-form">
+                  <input type="text" id="setting-swarm-peers" class="input-control mono-num" placeholder="e.g. 100.64.0.12:47881, my-handheld:47881" />
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-save-swarm-peers">Save Peers</button>
+                </div>
+              </div>
+
+              <div id="swarm-peers-list" class="swarm-peers-list">
+                <div class="panel-sub">Click Probe Peers or enable Swarm discovery to inspect online nodes and beam games at LAN speed.</div>
+              </div>
+              <div class="panel-sub mono-num engine-telemetry-line" id="settings-dkcat-stats">Catalog mmap engine (.dkcat): Checking...</div>
+            </div>
+
+            <div class="panel-card">
+              <div class="panel-head">
+                <div>
+                  <h2>Imported Community JSON Sources</h2>
+                  <p class="panel-sub">Enable or disable individual Hydra JSON feeds indexed by Find Games and MCP catalog search.</p>
+                </div>
+              </div>
+              <div id="settings-sources-list" class="settings-sources-list"></div>
+            </div>
+
+            <div class="panel-card">
+              <div class="panel-head">
+                <div>
+                  <h2>Appearance &amp; Vector Themes</h2>
+                  <p class="panel-sub">10 zero-RAM inline SVG themes with Obsidian Dark, Clean Daylight, and layered art presets.</p>
+                </div>
+              </div>
+              <div class="theme-grid" id="theme-grid"></div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Details / Fix Cover & SteamGridDB Modal -->
+  <div id="details-modal" class="modal-backdrop hidden">
+    <div class="modal-card modal-card-wide">
+      <div class="modal-head">
+        <div>
+          <h3 id="details-title">Game Details &amp; Fix Cover</h3>
+          <div class="modal-badges">
+            <span class="pill mono-num" id="details-size-badge">--</span>
+            <span class="pill" id="details-genre-badge">--</span>
+          </div>
+        </div>
+        <button type="button" class="win-btn modal-close" id="btn-close-details-modal" aria-label="Close">
+          <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="kv-rows" id="details-meta-list"></div>
+
+        <div class="modal-tabs" id="cover-modal-tabs">
+          <button type="button" class="filter-pill active" data-cover-tab="steam">Steam CDN (Zero-Key)</button>
+          <button type="button" class="filter-pill" data-cover-tab="sgdb">SteamGridDB &amp; .ICO</button>
+        </div>
+
+        <div id="cover-panel-steam" class="cover-tab-panel">
+          <div class="modal-cover-row">
+            <input type="text" id="input-cover-query" class="input-control" placeholder="Override cover search query..." />
+            <button type="button" class="btn btn-primary btn-sm" id="btn-apply-cover-search">
+              <svg class="icon" aria-hidden="true"><use href="#icon-sparkles"/></svg>
+              <span>Find Cover</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="cover-panel-sgdb" class="cover-tab-panel hidden">
+          <div class="modal-cover-row">
+            <input type="text" id="input-sgdb-query" class="input-control" placeholder="Game title or Steam AppID..." />
+            <button type="button" class="btn btn-primary btn-sm" id="btn-search-sgdb">
+              <svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg>
+              <span>Search SteamGridDB</span>
+            </button>
+          </div>
+          <div id="sgdb-results-container" class="sgdb-results">
+            <div class="panel-sub">Click Search SteamGridDB to load 600x900 grids, hero banners, and Windows .ico icons.</div>
+          </div>
+          <div class="sgdb-apply-row">
+            <button type="button" class="btn btn-primary btn-sm" id="btn-apply-sgdb-artwork" disabled>Apply Selected Artwork</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-create-desktop-shortcut">Create Desktop Shortcut with Custom Icon</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-foot" id="details-actions"></div>
+    </div>
+  </div>
+
+  <!-- Restore Game Save Modal -->
+  <div id="restore-save-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <h3 id="restore-save-title">Restore Save Snapshot</h3>
+          <p class="panel-sub" id="restore-save-subtitle">Select one of your rolling 5 save ZIP snapshots to restore.</p>
+        </div>
+        <button type="button" class="win-btn modal-close" id="btn-close-restore-modal" aria-label="Close">
+          <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="detail-field-block">
+          <label for="restore-snapshot-select">Snapshot Archive</label>
+          <select id="restore-snapshot-select" class="select-control mono-num"></select>
+        </div>
+        <div id="restore-snapshot-list" class="save-paths-list"></div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-primary btn-sm" id="btn-confirm-restore-save">Restore Selected Snapshot</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-cancel-restore-save">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Catalog Game Detail Modal -->
+  <div id="catalog-detail-modal" class="modal-backdrop hidden">
+    <div class="modal-card catalog-modal-card">
+      <div class="catalog-modal-hero">
+        <div class="detail-hero-bg"></div>
+        <img id="catalog-modal-hero-img" class="detail-hero-img hidden" alt="" />
+        <div class="detail-hero-scrim"></div>
+        <button type="button" class="win-btn modal-close catalog-modal-close" id="btn-close-catalog-modal" aria-label="Close">
+          <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
+        </button>
+        <div class="catalog-modal-hero-content">
+          <div class="modal-badges" id="catalog-modal-badges"></div>
+          <h3 id="catalog-modal-title">Catalog Game</h3>
+        </div>
+      </div>
+      <div class="modal-body">
+        <p class="detail-desc" id="catalog-modal-desc">Loading store details...</p>
+        <div class="kv-rows" id="catalog-modal-meta"></div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-catalog-open-store">
+          <svg class="icon" aria-hidden="true"><use href="#icon-external-link"/></svg>
+          <span>Steam Store</span>
+        </button>
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-catalog-open-steamdb">
+          <svg class="icon" aria-hidden="true"><use href="#icon-external-link"/></svg>
+          <span>SteamDB</span>
+        </button>
+        <button type="button" class="btn btn-primary btn-sm" id="btn-catalog-find-sources">
+          <svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg>
+          <span>Find &amp; Download</span>
+        </button>
+        <button type="button" class="btn btn-steam-green btn-sm" id="btn-catalog-link-exe">
+          <svg class="icon" aria-hidden="true"><use href="#icon-link"/></svg>
+          <span>Link Local Exe</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: ADD CUSTOM DIRECTORY SITE -->
+  <div id="add-site-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="add-site-modal-title">
+    <div class="modal-card modal-card-narrow">
+      <div class="modal-head">
+        <h3 id="add-site-modal-title">Add Game Directory Site</h3>
+        <button type="button" class="win-btn modal-close" id="btn-close-add-site-modal" aria-label="Close">
+          <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
+        </button>
+      </div>
+      <div class="modal-body site-modal-form">
+        <label class="field-group">
+          <span class="field-label">Site Name</span>
+          <input type="text" id="input-site-name" class="input-control" placeholder="MobyGames" />
+        </label>
+        <label class="field-group">
+          <span class="field-label">Search URL (use <code>{query}</code> where the game title goes)</span>
+          <input type="url" id="input-site-url" class="input-control mono-num" placeholder="https://www.mobygames.com/search/?q={query}" />
+        </label>
+        <label class="field-group">
+          <span class="field-label">Category Tag</span>
+          <input type="text" id="input-site-tag" class="input-control" list="directory-tag-suggestions" placeholder="Custom" value="Custom" />
+          <datalist id="directory-tag-suggestions">
+            <option value="DRM-Free"></option>
+            <option value="Indie &amp; Free"></option>
+            <option value="Preservation"></option>
+            <option value="Fixes &amp; Guides"></option>
+            <option value="Database"></option>
+            <option value="Custom"></option>
+          </datalist>
+        </label>
+        <label class="field-group">
+          <span class="field-label">Short Note</span>
+          <input type="text" id="input-site-note" class="input-control" placeholder="Offline installers, compatibility notes, or release index" />
+        </label>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-cancel-add-site">Cancel</button>
+        <button type="button" class="btn btn-primary btn-sm" id="btn-save-add-site">
+          <svg class="icon" aria-hidden="true"><use href="#icon-plus"/></svg>
+          <span>Add Directory Card</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: BULK IMPORT DIRECTORY SITES -->
+  <div id="bulk-import-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="bulk-import-modal-title">
+    <div class="modal-card modal-card-narrow">
+      <div class="modal-head">
+        <h3 id="bulk-import-modal-title">Bulk Import Directory Sites</h3>
+        <button type="button" class="win-btn modal-close" id="btn-close-bulk-import-modal" aria-label="Close">
+          <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
+        </button>
+      </div>
+      <div class="modal-body site-modal-form">
+        <p class="panel-sub">Paste lines formatted as <code>Name | SearchURL | Tag | Note</code> or a JSON array of <code>{"name", "searchUrl", "tag", "note"}</code> objects. Saved locally in <code>search_sites.json</code>.</p>
+        <textarea id="input-bulk-sites" class="input-control mono-num modal-textarea" rows="8" placeholder="MobyGames | https://www.mobygames.com/search/?q={query} | Database | Release history &amp; credits&#10;ProtonDB | https://www.protondb.com/search?q={query} | Fixes &amp; Guides | Deck &amp; Linux reports"></textarea>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-cancel-bulk-import">Cancel</button>
+        <button type="button" class="btn btn-primary btn-sm" id="btn-submit-bulk-import">
+          <svg class="icon" aria-hidden="true"><use href="#icon-upload"/></svg>
+          <span>Import Sites</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: COPY-ON-WRITE GAME SNAPSHOTS (BLAKE3 + CreateHardLinkW) -->
+  <div id="snapshots-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="snapshots-modal-title">
+    <div class="modal-card modal-card-wide">
+      <div class="modal-head">
+        <div>
+          <h3 id="snapshots-modal-title">Copy-on-Write Game Snapshots</h3>
+          <p class="panel-sub" id="snapshots-modal-subtitle">Content-addressed BLAKE3 store + Win32 CreateHardLinkW instant rollback with zero duplicated bytes.</p>
+        </div>
+        <button type="button" class="win-btn modal-close" id="btn-close-snapshots-modal" aria-label="Close">
+          <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="settings-inline-form snapshots-create-row">
+          <input type="text" id="input-snapshot-label" class="input-control" placeholder="Optional snapshot label (e.g. Pre-Mod Load Order)" />
+          <button type="button" class="btn btn-primary btn-sm" id="btn-create-snapshot">
+            <svg class="icon" aria-hidden="true"><use href="#icon-camera"/></svg>
+            <span>Create Snapshot</span>
+          </button>
+        </div>
+        <div id="snapshots-list" class="restore-snapshot-list">
+          <div class="panel-sub">Scanning local .duke-cas store...</div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-cancel-snapshots-modal">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: PRE-FLIGHT PE32 / PE32+ IMPORT & DLL AUTO-HEALER -->
+  <div id="preflight-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="preflight-modal-title">
+    <div class="modal-card modal-card-narrow">
+      <div class="modal-head">
+        <div>
+          <h3 id="preflight-modal-title">Pre-Flight DLL Dependency Report</h3>
+          <p class="panel-sub mono-num" id="preflight-modal-subtitle">Scanning PE32 / PE32+ import directory table...</p>
+        </div>
+        <button type="button" class="win-btn modal-close" id="btn-close-preflight-modal" aria-label="Close">
+          <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div id="preflight-dll-list" class="restore-snapshot-list"></div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-primary btn-sm hidden" id="btn-preflight-heal">
+          <svg class="icon" aria-hidden="true"><use href="#icon-shield-check"/></svg>
+          <span>Auto-Heal Missing DLLs</span>
+        </button>
+        <button type="button" class="btn btn-steam-green btn-sm hidden" id="btn-preflight-launch-anyway">
+          <svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>
+          <span>Launch Anyway</span>
+        </button>
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-cancel-preflight-modal">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-container" class="toast-container"></div>
+  <script type="module" src="main.js"></script>
+</body>
+</html>
