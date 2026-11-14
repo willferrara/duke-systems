@@ -114,7 +114,41 @@ import {
   toggleOverlayWindow,
   triggerReplayClipIpc,
   updateLauncherSettings,
-  writeClipboardText
+  writeClipboardText,
+  getFramePacingAndIoringStatus,
+  toggleHalfMsFramePacing,
+  purgeStaleDriverShaders,
+  getProjfsRuntimeStatus,
+  enableProjfsWindowsFeature,
+  mountProjfsVirtualGame,
+  unmountProjfsVirtualGame,
+  deduplicateLibraryCas,
+  getShaderSwarmStatus,
+  syncGameShadersFromSwarm,
+  archiveGameShaderBundle,
+  getQuickResumeSlots,
+  quickSwitchGameSlot,
+  suspendToQuickResumeSlot,
+  removeQuickResumeSlot,
+  getSteamCmStatus,
+  connectSteamCm,
+  disconnectSteamCm,
+  sendSteamChatMessage,
+  getSteamChatMessages,
+  getSteamPendingInvites,
+  respondSteamGameInvite,
+  listSteamCloudFiles,
+  syncSteamCloudSaves,
+  getStoreDirectStatus,
+  loginGogDirect,
+  loginEpicDirect,
+  listGogOwnedTitles,
+  listEpicOwnedTitles,
+  startStoreDirectInstall,
+  scanGameModGraph,
+  registerGameModPack,
+  saveGameModLoadout,
+  activateGameModLoadout
 } from "./api.js";
 
 const BOOKMARKLET_HREF =
@@ -218,6 +252,17 @@ const state = {
   friendsLoading: false,
   detailPcgwWikiUrl: "",
   detailCompatStatus: null,
+  detailModGraph: null,
+  projfsStreamingEnabled: true,
+  shaderSwarmEnabled: true,
+  framePacingEnabled: true,
+  quickResume: null,
+  steamCmStatus: null,
+  steamChatMessages: [],
+  steamPendingInvites: [],
+  storeDirectStatus: null,
+  gogOwnedTitles: [],
+  epicOwnedTitles: [],
   audioCtx: null,
   suspendHotkey: "Ctrl+Alt+P",
   couchMode: false,
@@ -247,7 +292,16 @@ const state = {
   sidebarIconsAttempted: new Set(),
   sidebarIconVersion: 0,
   customSaveDir: localStorage.getItem("duke_launcher_dl_dir") || "",
-  activeTheme: localStorage.getItem("duke_launcher_theme") || "dark",
+  cardZoomPx: (() => {
+    const n = Number(localStorage.getItem("duke_launcher_card_zoom") || 185);
+    return Number.isFinite(n) ? Math.max(125, Math.min(280, Math.round(n))) : 185;
+  })(),
+  sidebarCollapsed: localStorage.getItem("duke_launcher_sidebar_collapsed") === "1",
+  activeTheme: (() => {
+    const saved = localStorage.getItem("duke_launcher_theme");
+    if (!saved || saved === "frosted-obsidian") return "dark";
+    return saved;
+  })(),
   catalog: {
     itemsById: new Map(),
     renderedCount: 0,
@@ -432,13 +486,50 @@ function showToast(msg, tone = "info", durationMs = 3800) {
   setTimeout(() => t.remove(), durationMs);
 }
 
-function applyTheme(themeId) {
-  const valid = THEME_PRESETS.some((t) => t.id === themeId) ? themeId : "dark";
+let cardZoomPersistTimer = null;
+
+function clampCardZoomPx(px) {
+  const n = Number(px);
+  if (!Number.isFinite(n) || n <= 0) return 185;
+  return Math.max(125, Math.min(280, Math.round(n)));
+}
+
+function applyCardZoom(px, persistToBackend = false) {
+  const next = clampCardZoomPx(px);
+  state.cardZoomPx = next;
+  document.documentElement.style.setProperty("--card-min-width", `${next}px`);
+  const label = `${next}px`;
+  if (el("library-zoom-label")) el("library-zoom-label").textContent = label;
+  if (el("catalog-zoom-label")) el("catalog-zoom-label").textContent = label;
+  localStorage.setItem("duke_launcher_card_zoom", String(next));
+  if (persistToBackend) {
+    if (cardZoomPersistTimer) clearTimeout(cardZoomPersistTimer);
+    cardZoomPersistTimer = setTimeout(() => {
+      updateLauncherSettings({ cardZoomPx: state.cardZoomPx }).catch(() => {});
+    }, 240);
+  }
+}
+
+function applySidebarCollapsed(collapsed) {
+  const next = Boolean(collapsed);
+  state.sidebarCollapsed = next;
+  document.querySelector(".sidebar")?.classList.toggle("collapsed", next);
+  const btn = el("btn-toggle-sidebar");
+  if (btn) btn.setAttribute("aria-expanded", next ? "false" : "true");
+  localStorage.setItem("duke_launcher_sidebar_collapsed", next ? "1" : "0");
+}
+
+function applyTheme(themeId, persistToBackend = false) {
+  const normalized = themeId === "frosted-obsidian" ? "dark" : themeId;
+  const valid = THEME_PRESETS.some((t) => t.id === normalized) ? normalized : "dark";
   state.activeTheme = valid;
   document.body.setAttribute("data-theme", valid);
   localStorage.setItem("duke_launcher_theme", valid);
   applyWindowBackdrop(valid).catch(() => {});
   renderThemes();
+  if (persistToBackend) {
+    updateLauncherSettings({ theme: valid }).catch(() => {});
+  }
 }
 
 function applyCompactLibraryCards(enabled) {
@@ -570,6 +661,7 @@ function switchTab(tab, keepDetail = false) {
     el("library-controls")?.classList.toggle("hidden", tab !== "library");
     if (tab === "settings") {
       loadEmulatorSettingsSection();
+      refreshFrontierDiagnostics().catch(() => {});
     }
   }
 }
@@ -1550,6 +1642,327 @@ async function loadDetailWofStorage(game, requestId) {
   }
 }
 
+function renderDetailModGraph(report) {
+  state.detailModGraph = report || null;
+  const archPill = el("detail-mods-arch-pill");
+  if (archPill) {
+    const packsCount = Array.isArray(report?.packs) ? report.packs.length : 0;
+    const colCount = Array.isArray(report?.collisions) ? report.collisions.length : 0;
+    archPill.textContent =
+      colCount > 0
+        ? `${packsCount} Packs · ${colCount} Proxy Collision${colCount === 1 ? "" : "s"}`
+        : `${packsCount} Packs · Clean Proxy Graph`;
+    archPill.classList.toggle("warn", colCount > 0);
+  }
+  if (el("detail-mods-summary")) {
+    el("detail-mods-summary").textContent =
+      report?.summary || "Proxy-DLL export graph analyzed cleanly (.duke-cas hardlink ready).";
+  }
+
+  const colHost = el("detail-mods-collisions");
+  if (colHost) {
+    const collisions = Array.isArray(report?.collisions) ? report.collisions : [];
+    colHost.innerHTML =
+      collisions.length > 0
+        ? collisions
+            .map(
+              (c) =>
+                `<span class="pill warn mono-num" title="${escapeHtml(c.description || "")}">${escapeHtml(c.proxyDll || "proxy.dll")}: ${escapeHtml((c.contendingPacks || []).join(" + "))} -&gt; ${escapeHtml(c.generatedConfigFile || "chain")}</span>`
+            )
+            .join("")
+        : `<span class="pill accent mono-num">Zero Proxy-DLL Conflicts (${Number(report?.deployedFileCount || 0)} staged)</span>`;
+  }
+
+  const packsHost = el("detail-mods-packs-list");
+  if (packsHost) {
+    const packs = Array.isArray(report?.packs) ? report.packs : [];
+    const activeLoadout = (Array.isArray(report?.loadouts) ? report.loadouts : []).find(
+      (l) => l.loadoutId === report?.activeLoadoutId
+    );
+    const activePackSet = new Set(activeLoadout?.enabledPackIds || []);
+
+    if (packs.length === 0) {
+      packsHost.innerHTML = `<div class="panel-sub">No mod packs registered or proxy DLLs (BepInEx, UE4SS, ReShade, SpecialK, DXVK) found in this folder yet.</div>`;
+    } else {
+      packsHost.innerHTML = packs
+        .map((pack) => {
+          const checked = activePackSet.size === 0 || activePackSet.has(pack.packId);
+          const dllList = Array.isArray(pack.proxyDlls) ? pack.proxyDlls : [];
+          const exportsSummary = dllList
+            .slice(0, 3)
+            .map((d) => `${d.fileNameLower || d.relPath} (${Number(d.exportCount || 0)} exports)`)
+            .join(", ");
+          return `
+            <label class="mod-pack-card">
+              <div class="mod-pack-head">
+                <span class="mod-pack-title">
+                  <input type="checkbox" data-mod-pack-id="${escapeHtml(pack.packId)}" ${checked ? "checked" : ""} />
+                  <span>${escapeHtml(pack.name || pack.packId)}</span>
+                </span>
+                <span class="pill mono-num">${escapeHtml(pack.framework || "Mod")}</span>
+              </div>
+              <div class="mod-pack-meta mono-num">${Number(pack.fileCount || 0)} files · ${formatBytesJs(pack.totalBytes || 0)}${exportsSummary ? ` · ${escapeHtml(exportsSummary)}` : ""}</div>
+            </label>
+          `;
+        })
+        .join("");
+    }
+  }
+
+  const loadoutsHost = el("detail-mods-loadouts-list");
+  if (loadoutsHost) {
+    const loadouts = Array.isArray(report?.loadouts) ? report.loadouts : [];
+    loadoutsHost.innerHTML =
+      loadouts.length > 0
+        ? loadouts
+            .map((lo) => {
+              const isActive = lo.loadoutId === report?.activeLoadoutId;
+              return `
+                <button
+                  type="button"
+                  class="btn ${isActive ? "btn-primary" : "btn-secondary"} btn-xs mod-loadout-pill"
+                  data-mod-loadout-apply="${escapeHtml(lo.loadoutId)}"
+                >${escapeHtml(lo.name || lo.loadoutId)} (${(lo.enabledPackIds || []).length})</button>
+              `;
+            })
+            .join("")
+        : `<span class="panel-sub">No saved loadouts yet. Select packs above and click Save Selected Pack Loadout.</span>`;
+  }
+}
+
+async function loadDetailModGraph(game, requestId) {
+  if (!game) return;
+  if (el("detail-mods-arch-pill")) el("detail-mods-arch-pill").textContent = "Scanning...";
+  try {
+    const report = await scanGameModGraph(game.id);
+    if (requestId !== state.activeDetailRequestId || state.selectedDetailId !== game.id) return;
+    renderDetailModGraph(report);
+  } catch (err) {
+    if (requestId !== state.activeDetailRequestId || state.selectedDetailId !== game.id) return;
+    if (el("detail-mods-arch-pill")) el("detail-mods-arch-pill").textContent = "Unavailable";
+    if (el("detail-mods-summary")) el("detail-mods-summary").textContent = String(err);
+  }
+}
+
+function renderSidebarQuickResume(summary) {
+  if (summary) state.quickResume = summary;
+  const data = summary || state.quickResume;
+  const maxSlots = Number(data?.maxSuspendedSlots || 3);
+  const suspendedCount = Number(data?.suspendedCount || 0);
+  const slots = Array.isArray(data?.slots) ? data.slots : [];
+
+  if (el("sidebar-qr-count")) {
+    el("sidebar-qr-count").textContent = `${suspendedCount}/${maxSlots}`;
+  }
+  const host = el("sidebar-qr-list");
+  if (!host) return;
+  if (slots.length === 0) {
+    host.innerHTML = `<div class="sidebar-qr-empty">No active game slots</div>`;
+    return;
+  }
+
+  host.innerHTML = slots
+    .map((slot) => {
+      const stateTag = slot.isSuspended ? "Suspended" : "Active";
+      const ramStr = `${Number(slot.workingSetMb || 0).toFixed(0)} MB`;
+      return `
+        <div class="sidebar-qr-slot">
+          <div class="sidebar-qr-slot-info">
+            <div class="sidebar-qr-slot-title" title="${escapeHtml(slot.title || "")}">${escapeHtml(slot.title || "Game")}</div>
+            <div class="sidebar-qr-slot-meta mono-num">${stateTag} · ${ramStr}${slot.usedIoringApi ? " · IoRing" : ""}</div>
+          </div>
+          <div class="sidebar-qr-slot-actions">
+            <button type="button" class="btn btn-primary btn-xs" data-qr-switch="${escapeHtml(slot.gameId)}">${slot.isSuspended ? "Resume" : "Freeze"}</button>
+            <button type="button" class="icon-mini-btn" data-qr-remove="${escapeHtml(slot.gameId)}" title="Release slot">
+              <svg class="icon-mini" aria-hidden="true"><use href="#icon-x"/></svg>
+            </button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+async function refreshQuickResumeSlots() {
+  try {
+    const summary = await getQuickResumeSlots();
+    renderSidebarQuickResume(summary);
+    return summary;
+  } catch {
+    return null;
+  }
+}
+
+function renderSteamCmFriendsState() {
+  const cm = state.steamCmStatus;
+  const pill = el("friends-cm-pill");
+  const connectBtn = el("btn-friends-cm-connect");
+  const settingsStatus = el("frontier-steam-cm-status");
+  const settingsConnectBtn = el("btn-steam-cm-connect");
+  const settingsDisconnectBtn = el("btn-steam-cm-disconnect");
+
+  const isConnected = Boolean(cm?.connected);
+  const labelText = isConnected
+    ? `Steam CM: Connected${cm?.personaName ? ` (${cm.personaName})` : ""} · ${cm?.activeCmEndpoint || "WSS"}`
+    : cm?.connecting
+      ? "Steam CM: Connecting..."
+      : `Steam CM: Disconnected${cm?.lastError ? ` (${cm.lastError})` : ""}`;
+
+  if (pill) {
+    pill.textContent = isConnected ? `Steam CM: Online` : cm?.connecting ? "Steam CM: Linking" : "Steam CM: Idle";
+    pill.classList.toggle("accent", isConnected);
+  }
+  if (connectBtn) {
+    connectBtn.textContent = isConnected ? "Disconnect CM" : "Connect CM";
+  }
+  if (settingsStatus) settingsStatus.textContent = labelText;
+  if (settingsConnectBtn) settingsConnectBtn.classList.toggle("hidden", isConnected);
+  if (settingsDisconnectBtn) settingsDisconnectBtn.classList.toggle("hidden", !isConnected);
+
+  const invitesHost = el("friends-invites-list");
+  if (invitesHost) {
+    const invites = Array.isArray(state.steamPendingInvites) ? state.steamPendingInvites : [];
+    invitesHost.classList.toggle("hidden", invites.length === 0);
+    invitesHost.innerHTML = invites
+      .map(
+        (inv) => `
+        <div class="friend-invite-card">
+          <div class="sidebar-qr-slot-title">${escapeHtml(inv.senderName || inv.senderSteamId)} invited you to ${escapeHtml(inv.gameName || `AppID ${inv.appId}`)}</div>
+          <div class="settings-btn-group">
+            <button type="button" class="btn btn-primary btn-xs" data-steam-invite-accept="${escapeHtml(inv.inviteId)}">Join Game</button>
+            <button type="button" class="btn btn-secondary btn-xs" data-steam-invite-decline="${escapeHtml(inv.inviteId)}">Decline</button>
+          </div>
+        </div>
+      `
+      )
+      .join("");
+  }
+
+  const chatHost = el("friends-chat-log");
+  if (chatHost) {
+    const msgs = Array.isArray(state.steamChatMessages) ? state.steamChatMessages : [];
+    if (msgs.length === 0) {
+      chatHost.innerHTML = `<div class="panel-sub">Select or enter a SteamID64 to chat directly over Steam CM.</div>`;
+    } else {
+      chatHost.innerHTML = msgs
+        .slice(-24)
+        .map(
+          (m) => `
+          <div class="friends-chat-line">
+            <strong>${escapeHtml(m.senderIsSelf ? "You" : m.peerName || m.peerSteamId)}:</strong>
+            <span>${escapeHtml(m.message || "")}</span>
+          </div>
+        `
+        )
+        .join("");
+      chatHost.scrollTop = chatHost.scrollHeight;
+    }
+  }
+}
+
+async function refreshSteamCmAndInvites() {
+  try {
+    const [cmStatus, msgs, invites] = await Promise.all([
+      getSteamCmStatus().catch(() => null),
+      getSteamChatMessages(null).catch(() => []),
+      getSteamPendingInvites().catch(() => [])
+    ]);
+    if (cmStatus) state.steamCmStatus = cmStatus;
+    if (Array.isArray(msgs)) state.steamChatMessages = msgs;
+    if (Array.isArray(invites)) state.steamPendingInvites = invites;
+    renderSteamCmFriendsState();
+  } catch {
+    // Keep non-fatal Steam CM UI state unchanged.
+  }
+}
+
+function renderStoreOwnedTitles() {
+  const statusEl = el("frontier-store-direct-status");
+  if (statusEl && state.storeDirectStatus) {
+    const st = state.storeDirectStatus;
+    const gogTxt = st.gogConnected ? `GOG: Signed In (${st.gogUserId || "User"})` : "GOG: Signed Out";
+    const epicTxt = st.epicConnected ? `Epic: Signed In (${st.epicDisplayName || st.epicAccountId || "User"})` : "Epic: Signed Out";
+    statusEl.textContent = `${gogTxt} · ${epicTxt}`;
+  }
+
+  const listEl = el("frontier-owned-titles-list");
+  if (!listEl) return;
+  const combined = [...(state.gogOwnedTitles || []), ...(state.epicOwnedTitles || [])];
+  if (combined.length === 0) {
+    listEl.innerHTML = "";
+    return;
+  }
+
+  listEl.innerHTML = combined
+    .slice(0, 60)
+    .map(
+      (item, idx) => `
+      <div class="frontier-owned-item">
+        <div class="sidebar-qr-slot-title" title="${escapeHtml(item.title || "")}">${escapeHtml(item.title || "Untitled")}</div>
+        <div class="sidebar-qr-slot-meta mono-num">${escapeHtml(String(item.store || "").toUpperCase())} · ${item.version ? escapeHtml(item.version) : "Latest"} · ${Number(item.totalSizeBytes || 0) > 0 ? formatBytesJs(item.totalSizeBytes) : "Direct CDN"}</div>
+        <button type="button" class="btn btn-primary btn-xs" data-store-install-idx="${idx}">
+          ${svgIcon("icon-download")}
+          <span>Install via Duke AIMD</span>
+        </button>
+      </div>
+    `
+    )
+    .join("");
+}
+
+async function refreshFrontierDiagnostics() {
+  try {
+    const [diag, storeStatus] = await Promise.all([
+      getFramePacingAndIoringStatus().catch(() => null),
+      getStoreDirectStatus().catch(() => null)
+    ]);
+    if (storeStatus) {
+      state.storeDirectStatus = storeStatus;
+      renderStoreOwnedTitles();
+    }
+    if (!diag) return;
+
+    if (diag.quickResume) renderSidebarQuickResume(diag.quickResume);
+    if (diag.steamCm) {
+      state.steamCmStatus = diag.steamCm;
+      renderSteamCmFriendsState();
+    }
+
+    if (el("frontier-ioring-status") && diag.ioring) {
+      const io = diag.ioring;
+      el("frontier-ioring-status").textContent = io.supported
+        ? `Active (${io.backend || "CreateIoRing"}, Build ${io.windowsBuild || 0})`
+        : `Fallback (${io.backend || "Overlapped"}, Build ${io.windowsBuild || 0})`;
+    }
+    if (el("frontier-gpu-hags-status")) {
+      const gpu = diag.gpuHardware;
+      const fp = diag.framePacing;
+      const hagsTxt = fp?.hagsStatus || (fp?.hagsEnabled ? "HAGS Enabled" : "HAGS Standard");
+      el("frontier-gpu-hags-status").textContent = gpu
+        ? `${gpu.adapterName || gpu.gpuKey} (Drv ${gpu.driverVersion || "?"}) · ${hagsTxt}`
+        : hagsTxt;
+    }
+    if (el("frontier-projfs-status") && diag.projfs) {
+      const pf = diag.projfs;
+      const mounts = Array.isArray(pf.activeMounts) ? pf.activeMounts.length : 0;
+      el("frontier-projfs-status").textContent = pf.apiBound
+        ? `Ready (ProjectedFSLib Bound · ${mounts} mount${mounts === 1 ? "" : "s"})`
+        : pf.dllPresent
+          ? "DLL Present · Feature Standby"
+          : "Feature Disabled (Click Enable Client-ProjFS)";
+    }
+    if (el("frontier-pacing-shader-status") && diag.framePacing) {
+      const fp = diag.framePacing;
+      const actualMs = (Number(fp.actual100nsUnits || 156250) / 10000).toFixed(2);
+      el("frontier-pacing-shader-status").textContent = fp.timerResolutionEngaged
+        ? `0.5 ms Engaged (${actualMs} ms actual · ${Number(fp.activeGameCount || 0)} game)`
+        : `Idle (${actualMs} ms OS cadence)`;
+    }
+  } catch {
+    // Non-critical telemetry refresh.
+  }
+}
+
 function loadAllDetailPanels(game, requestId) {
   if (!game) return;
   if (el("detail-ach-path")) el("detail-ach-path").value = game.achievementsPath || "";
@@ -1558,6 +1971,7 @@ function loadAllDetailPanels(game, requestId) {
   loadDetailAchievements(game, requestId);
   loadDetailCompat(game, requestId);
   loadDetailWofStorage(game, requestId);
+  loadDetailModGraph(game, requestId);
 }
 
 function buildFriendCardHtml(friend, compactOverlay = false) {
@@ -1727,7 +2141,10 @@ async function refreshFriendsPanel(silent = false) {
   if (state.friendsLoading) return;
   state.friendsLoading = true;
   try {
-    const snap = await getUnifiedFriends();
+    const [snap] = await Promise.all([
+      getUnifiedFriends(),
+      refreshSteamCmAndInvites()
+    ]);
     renderFriendsSnapshot(snap);
   } catch (err) {
     if (!silent) showToast(String(err), "error");
@@ -1788,6 +2205,20 @@ function syncSettingsUiFromBackend(settings) {
   }
   state.downloadSpeedPreset = String(settings.downloadSpeedPreset || "max");
   state.compactLibraryCards = Boolean(settings.compactLibraryCards ?? false);
+  if (typeof settings.theme === "string") {
+    const normalizedTheme = settings.theme === "frosted-obsidian" ? "dark" : settings.theme;
+    const rawLocal = localStorage.getItem("duke_launcher_theme");
+    if (
+      rawLocal === "frosted-obsidian" ||
+      !rawLocal ||
+      (normalizedTheme !== "dark" && THEME_PRESETS.some((t) => t.id === normalizedTheme))
+    ) {
+      applyTheme(normalizedTheme, false);
+    }
+  }
+  if (Number.isFinite(Number(settings.cardZoomPx)) && Number(settings.cardZoomPx) > 0) {
+    applyCardZoom(Number(settings.cardZoomPx), false);
+  }
   state.performanceBoostEnabled = Boolean(settings.performanceBoostEnabled ?? true);
   state.autoBackupSavesOnExit = Boolean(settings.autoBackupSavesOnExit ?? true);
 
@@ -1896,6 +2327,13 @@ function syncSettingsUiFromBackend(settings) {
   el("btn-clear-steam-api-key")?.classList.toggle("hidden", !state.steamApiKeyConfigured);
   el("btn-clear-xbox-api-key")?.classList.toggle("hidden", !state.xboxApiKeyConfigured);
   el("btn-clear-psn-npsso")?.classList.toggle("hidden", !state.psnNpssoConfigured);
+
+  state.projfsStreamingEnabled = Boolean(settings.projfsStreamingEnabled ?? true);
+  state.shaderSwarmEnabled = Boolean(settings.shaderSwarmEnabled ?? true);
+  state.framePacingEnabled = Boolean(settings.framePacingEnabled ?? true);
+  if (el("setting-projfs-streaming")) el("setting-projfs-streaming").checked = state.projfsStreamingEnabled;
+  if (el("setting-shader-swarm")) el("setting-shader-swarm").checked = state.shaderSwarmEnabled;
+  if (el("setting-frame-pacing")) el("setting-frame-pacing").checked = state.framePacingEnabled;
 }
 
 async function runPlaytimeSyncFlow() {
@@ -1927,7 +2365,7 @@ async function runPlaytimeSyncFlow() {
 async function initOverlayHudMode() {
   document.documentElement.classList.add("mode-overlay-root");
   document.body.classList.add("mode-overlay");
-  applyTheme(state.activeTheme || "frosted-obsidian");
+  applyTheme(state.activeTheme || "dark");
 
   const shell = el("overlay-hud-shell");
   if (shell) shell.classList.remove("hidden");
@@ -1938,9 +2376,38 @@ async function initOverlayHudMode() {
 
   let activeOverlayGameId = null;
 
+  const renderOverlayQuickResume = (qr) => {
+    const host = el("overlay-quick-resume-list");
+    if (!host) return;
+    const slots = Array.isArray(qr?.slots) ? qr.slots : [];
+    if (slots.length === 0) {
+      host.innerHTML = `<div class="panel-sub">No Quick Resume slots occupied (up to 3 games can stay suspended).</div>`;
+      return;
+    }
+    host.innerHTML = slots
+      .map(
+        (s) => `
+        <div class="overlay-qr-card">
+          <div class="overlay-qr-meta">
+            <span class="sidebar-qr-slot-title">${escapeHtml(s.title || "Game")}</span>
+            <span class="sidebar-qr-slot-meta mono-num">${s.isSuspended ? "Suspended Standby" : "Running"} · ${Number(s.workingSetMb || 0).toFixed(0)} MB${s.usedIoringApi ? " · IoRing" : ""}</span>
+          </div>
+          <div class="overlay-qr-actions">
+            <button type="button" class="btn btn-primary btn-xs" data-overlay-qr-switch="${escapeHtml(s.gameId)}">${s.isSuspended ? "Quick Switch" : "Freeze Slot"}</button>
+            <button type="button" class="btn btn-secondary btn-xs" data-overlay-qr-remove="${escapeHtml(s.gameId)}">Drop</button>
+          </div>
+        </div>
+      `
+      )
+      .join("");
+  };
+
   const refreshOverlayState = async () => {
     try {
-      const sessions = await getActiveGameSessions();
+      const [sessions, qr] = await Promise.all([
+        getActiveGameSessions(),
+        getQuickResumeSlots().catch(() => null)
+      ]);
       const active = Array.isArray(sessions) && sessions.length > 0 ? sessions[0] : null;
       activeOverlayGameId = active?.gameId || null;
       if (el("overlay-active-game")) {
@@ -1952,6 +2419,7 @@ async function initOverlayHudMode() {
       if (suspendSpan) {
         suspendSpan.textContent = active?.isSuspended ? "Resume Game" : active ? "Freeze Game" : "Freeze / Resume Game";
       }
+      if (qr) renderOverlayQuickResume(qr);
     } catch {
       // Keep idle label cleanly on transient error.
     }
@@ -2016,6 +2484,38 @@ async function initOverlayHudMode() {
     if (btn) handleFriendActionClick(btn, setStatus);
   });
 
+  el("overlay-quick-resume-list")?.addEventListener("click", async (e) => {
+    const switchBtn = e.target.closest("[data-overlay-qr-switch]");
+    if (switchBtn) {
+      const gid = switchBtn.dataset.overlayQrSwitch;
+      switchBtn.disabled = true;
+      setStatus("Orchestrating standby page swap...");
+      try {
+        const rep = await quickSwitchGameSlot(gid);
+        setStatus(rep?.summary || `Switched slot (${rep?.framePacingHzLabel || "0.5 ms"}).`);
+        await refreshOverlayState();
+      } catch (err) {
+        setStatus(String(err));
+      } finally {
+        switchBtn.disabled = false;
+      }
+      return;
+    }
+    const remBtn = e.target.closest("[data-overlay-qr-remove]");
+    if (remBtn) {
+      remBtn.disabled = true;
+      try {
+        const summary = await removeQuickResumeSlot(remBtn.dataset.overlayQrRemove, false);
+        renderOverlayQuickResume(summary);
+        setStatus("Released Quick Resume standby slot.");
+      } catch (err) {
+        setStatus(String(err));
+      } finally {
+        remBtn.disabled = false;
+      }
+    }
+  });
+
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       hideOverlayWindow().catch(() => {});
@@ -2031,6 +2531,9 @@ async function initOverlayHudMode() {
     });
     await listenEvent("game-running-state", () => refreshOverlayState());
     await listenEvent("game-suspend-state", () => refreshOverlayState());
+    await listenEvent("quick-resume-updated", (summary) => {
+      if (summary) renderOverlayQuickResume(summary);
+    });
 
     await refreshOverlayState();
   } catch (err) {
@@ -3497,6 +4000,7 @@ async function refreshSwarmAndMmapTelemetry() {
   } catch {
     // Ignore when swarm is idle/disabled.
   }
+  refreshFrontierDiagnostics().catch(() => {});
 }
 
 let pendingEmuInstallPrompt = null;
@@ -4065,6 +4569,50 @@ function wireEvents() {
   el("sort-select")?.addEventListener("change", (e) => {
     state.sortBy = e.target.value;
     renderLibraryGrid();
+  });
+
+  el("btn-toggle-sidebar")?.addEventListener("click", () => {
+    applySidebarCollapsed(!state.sidebarCollapsed);
+  });
+
+  [
+    ["btn-library-zoom-out", -15],
+    ["btn-library-zoom-in", 15],
+    ["btn-catalog-zoom-out", -15],
+    ["btn-catalog-zoom-in", 15]
+  ].forEach(([id, delta]) => {
+    el(id)?.addEventListener("click", () => applyCardZoom(state.cardZoomPx + delta, true));
+  });
+  el("btn-library-zoom-reset")?.addEventListener("click", () => applyCardZoom(185, true));
+  el("btn-catalog-zoom-reset")?.addEventListener("click", () => applyCardZoom(185, true));
+
+  let middleZoomHeld = false;
+  ["library-view", "catalog-view"].forEach((viewId) => {
+    const viewEl = el(viewId);
+    if (!viewEl) return;
+    viewEl.addEventListener("mousedown", (e) => {
+      if (e.button === 1) {
+        middleZoomHeld = true;
+        e.preventDefault();
+      }
+    });
+    viewEl.addEventListener(
+      "wheel",
+      (e) => {
+        if (e.ctrlKey || (e.buttons & 4) !== 0 || e.buttons === 4 || middleZoomHeld) {
+          e.preventDefault();
+          const step = e.deltaY < 0 ? 15 : -15;
+          applyCardZoom(state.cardZoomPx + step, true);
+        }
+      },
+      { passive: false }
+    );
+  });
+  window.addEventListener("mouseup", (e) => {
+    if (e.button === 1 || (e.buttons & 4) === 0) middleZoomHeld = false;
+  });
+  window.addEventListener("blur", () => {
+    middleZoomHeld = false;
   });
 
   el("search-input")?.addEventListener("input", (e) => {
@@ -6267,7 +6815,7 @@ function wireEvents() {
   el("theme-grid")?.addEventListener("click", (e) => {
     const card = e.target.closest(".theme-option-card[data-theme-id]");
     if (!card) return;
-    applyTheme(card.dataset.themeId);
+    applyTheme(card.dataset.themeId, true);
     renderThemes();
     showToast("Theme updated.", "info");
   });
@@ -6524,6 +7072,385 @@ function wireEvents() {
     closePreflightModal();
     if (game) {
       await launchGameDirectly(game);
+    }
+  });
+
+  // Quick Resume 3-Slot Sidebar Actions
+  el("sidebar-qr-list")?.addEventListener("click", async (e) => {
+    const switchBtn = e.target.closest("[data-qr-switch]");
+    if (switchBtn) {
+      const gid = switchBtn.dataset.qrSwitch;
+      switchBtn.disabled = true;
+      try {
+        const rep = await quickSwitchGameSlot(gid);
+        showToast(rep?.summary || `Quick switched slot (${rep?.framePacingHzLabel || "0.5 ms"}).`, "success", 3200);
+        await refreshQuickResumeSlots();
+        await refreshActiveSessions();
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        switchBtn.disabled = false;
+      }
+      return;
+    }
+    const remBtn = e.target.closest("[data-qr-remove]");
+    if (remBtn) {
+      remBtn.disabled = true;
+      try {
+        const summary = await removeQuickResumeSlot(remBtn.dataset.qrRemove, false);
+        renderSidebarQuickResume(summary);
+        showToast("Quick Resume slot released.", "info", 2000);
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        remBtn.disabled = false;
+      }
+    }
+  });
+
+  // Deterministic Mod & Proxy-DLL Conflict Graph Actions
+  el("btn-detail-scan-mods")?.addEventListener("click", async () => {
+    const game = state.library.find((g) => g.id === state.selectedDetailId);
+    if (!game) return;
+    await loadDetailModGraph(game, state.activeDetailRequestId);
+    showToast("Proxy-DLL conflict graph refreshed.", "info", 2000);
+  });
+
+  el("btn-detail-add-mod-pack")?.addEventListener("click", async () => {
+    const game = state.library.find((g) => g.id === state.selectedDetailId);
+    if (!game) return;
+    const folder = await pickGameFolder();
+    if (!folder) return;
+    const packName = folder.split(/[\\/]/).filter(Boolean).pop() || "Mod Pack";
+    try {
+      const rep = await registerGameModPack({ gameId: game.id, sourceDir: folder, packName });
+      renderDetailModGraph(rep);
+      showToast(`Registered mod pack "${packName}" into CAS isolation store.`, "success", 3000);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-detail-save-mod-loadout")?.addEventListener("click", async () => {
+    const game = state.library.find((g) => g.id === state.selectedDetailId);
+    if (!game) return;
+    const loadoutName = (el("input-mod-loadout-name")?.value || "").trim() || `Profile ${new Date().toLocaleTimeString()}`;
+    const enabledPackIds = Array.from(
+      document.querySelectorAll("#detail-mods-packs-list input[data-mod-pack-id]:checked")
+    ).map((cb) => cb.dataset.modPackId);
+    try {
+      const rep = await saveGameModLoadout({ gameId: game.id, loadoutName, enabledPackIds });
+      if (el("input-mod-loadout-name")) el("input-mod-loadout-name").value = "";
+      renderDetailModGraph(rep);
+      showToast(`Saved loadout "${loadoutName}" (${enabledPackIds.length} packs).`, "success");
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-detail-revert-vanilla")?.addEventListener("click", async () => {
+    const game = state.library.find((g) => g.id === state.selectedDetailId);
+    if (!game) return;
+    try {
+      const res = await activateGameModLoadout(game.id, null);
+      if (res?.report) renderDetailModGraph(res.report);
+      showToast(`Reverted "${game.title}" to vanilla files in ${Number(res?.elapsedMs || 0).toFixed(1)} ms.`, "success", 3200);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("detail-mods-loadouts-list")?.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-mod-loadout-apply]");
+    if (!btn) return;
+    const game = state.library.find((g) => g.id === state.selectedDetailId);
+    if (!game) return;
+    btn.disabled = true;
+    try {
+      const res = await activateGameModLoadout(game.id, btn.dataset.modLoadoutApply);
+      if (res?.report) renderDetailModGraph(res.report);
+      const chainCount = Array.isArray(res?.chainConfigsWritten) ? res.chainConfigsWritten.length : 0;
+      showToast(
+        `Activated "${res?.loadoutName || "Loadout"}" in ${Number(res?.elapsedMs || 0).toFixed(1)} ms (${Number(res?.hardlinkedFiles || 0)} CAS links, ${chainCount} proxy chains).`,
+        "success",
+        3800
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Friends Drawer Steam CM Chat & Live Game Invites
+  el("btn-friends-cm-connect")?.addEventListener("click", async () => {
+    try {
+      if (state.steamCmStatus?.connected) {
+        state.steamCmStatus = await disconnectSteamCm();
+        showToast("Disconnected Steam CM WebSocket client.", "info", 2200);
+      } else {
+        const token = (el("input-steam-cm-token")?.value || "").trim() || null;
+        const persona = (el("input-steam-cm-persona")?.value || "").trim() || null;
+        state.steamCmStatus = await connectSteamCm({ refreshToken: token, personaName: persona });
+        showToast("Steam CM WebSocket handshake active.", "success", 2600);
+      }
+      renderSteamCmFriendsState();
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("friends-invites-list")?.addEventListener("click", async (e) => {
+    const acceptBtn = e.target.closest("[data-steam-invite-accept]");
+    const declineBtn = e.target.closest("[data-steam-invite-decline]");
+    const btn = acceptBtn || declineBtn;
+    if (!btn) return;
+    const inviteId = btn.dataset.steamInviteAccept || btn.dataset.steamInviteDecline;
+    const accept = Boolean(acceptBtn);
+    btn.disabled = true;
+    try {
+      const launchTarget = await respondSteamGameInvite({ inviteId, accept });
+      state.steamPendingInvites = await getSteamPendingInvites();
+      renderSteamCmFriendsState();
+      if (accept && launchTarget) {
+        showToast(`Joining friend invite (${launchTarget})...`, "success", 3000);
+      } else {
+        showToast(accept ? "Accepted Steam invite." : "Declined Steam invite.", "info", 2000);
+      }
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  const submitSteamChat = async () => {
+    const peerSteamId = (el("input-friends-chat-peer")?.value || "").trim();
+    const message = (el("input-friends-chat-msg")?.value || "").trim();
+    if (!peerSteamId || !message) {
+      showToast("Enter a target SteamID64 and chat message.", "info", 2200);
+      return;
+    }
+    try {
+      await sendSteamChatMessage({ peerSteamId, peerName: null, message });
+      if (el("input-friends-chat-msg")) el("input-friends-chat-msg").value = "";
+      state.steamChatMessages = await getSteamChatMessages(null);
+      renderSteamCmFriendsState();
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  };
+  el("btn-friends-chat-send")?.addEventListener("click", submitSteamChat);
+  el("input-friends-chat-msg")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      submitSteamChat();
+    }
+  });
+
+  // Frontier Systems Engine Settings Controls
+  el("btn-frontier-refresh-diag")?.addEventListener("click", async () => {
+    await refreshFrontierDiagnostics();
+    showToast("Kernel IoRing, GPU HAGS & ProjFS diagnostics updated.", "info", 2200);
+  });
+
+  el("btn-frontier-dedup-cas")?.addEventListener("click", async () => {
+    const btn = el("btn-frontier-dedup-cas");
+    if (btn) btn.disabled = true;
+    showToast("Indexing shared Unreal/Unity blocks into .duke-cas...", "info", 2400);
+    try {
+      const rep = await deduplicateLibraryCas();
+      showToast(rep?.summary || "CAS block deduplication finished.", "success", 4200);
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  el("btn-frontier-purge-shaders")?.addEventListener("click", async () => {
+    try {
+      const rep = await purgeStaleDriverShaders();
+      showToast(
+        rep?.driverChanged
+          ? `Purged ${rep.filesRemoved} stale shaders (${formatBytesJs(rep.bytesReclaimed)}) after GPU driver update.`
+          : `Shader caches clean (${rep?.filesRemoved || 0} stale files removed, ${formatBytesJs(rep?.bytesReclaimed || 0)} reclaimed).`,
+        "success",
+        3400
+      );
+      await refreshFrontierDiagnostics();
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-enable-projfs-feature")?.addEventListener("click", async () => {
+    const btn = el("btn-enable-projfs-feature");
+    if (btn) btn.disabled = true;
+    showToast("Enabling Windows Client-ProjFS optional feature...", "info", 3200);
+    try {
+      const msg = await enableProjfsWindowsFeature();
+      showToast(msg || "Client-ProjFS optional feature enabled.", "success", 4000);
+      await refreshFrontierDiagnostics();
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  el("setting-projfs-streaming")?.addEventListener("change", async (e) => {
+    try {
+      const updated = await updateLauncherSettings({ projfsStreamingEnabled: Boolean(e.target.checked) });
+      syncSettingsUiFromBackend(updated);
+      showToast(updated?.projfsStreamingEnabled ? "ProjFS instant-play streaming enabled." : "ProjFS instant-play streaming disabled.", "info", 2200);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("setting-shader-swarm")?.addEventListener("change", async (e) => {
+    try {
+      const updated = await updateLauncherSettings({ shaderSwarmEnabled: Boolean(e.target.checked) });
+      syncSettingsUiFromBackend(updated);
+      showToast(updated?.shaderSwarmEnabled ? "Peer Shader Swarm enabled." : "Peer Shader Swarm disabled.", "info", 2200);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("setting-frame-pacing")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const updated = await updateLauncherSettings({ framePacingEnabled: checked });
+      syncSettingsUiFromBackend(updated);
+      await toggleHalfMsFramePacing(checked).catch(() => null);
+      await refreshFrontierDiagnostics();
+      showToast(checked ? "0.5 ms Frame Pacing Runtime enabled." : "0.5 ms Frame Pacing Runtime disabled.", "info", 2200);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-steam-cm-connect")?.addEventListener("click", async () => {
+    const refreshToken = (el("input-steam-cm-token")?.value || "").trim() || null;
+    const personaName = (el("input-steam-cm-persona")?.value || "").trim() || null;
+    try {
+      state.steamCmStatus = await connectSteamCm({ refreshToken, personaName });
+      if (el("input-steam-cm-token")) el("input-steam-cm-token").value = "";
+      renderSteamCmFriendsState();
+      showToast("Connected Steam CM WebSocket client.", "success", 2600);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-steam-cm-disconnect")?.addEventListener("click", async () => {
+    try {
+      state.steamCmStatus = await disconnectSteamCm();
+      renderSteamCmFriendsState();
+      showToast("Disconnected Steam CM client.", "info", 2000);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-steam-cloud-list")?.addEventListener("click", async () => {
+    const appId = Number(el("input-steam-cloud-appid")?.value || 0);
+    if (!Number.isFinite(appId) || appId <= 0) {
+      showToast("Enter a valid numeric Steam AppID first.", "info");
+      return;
+    }
+    try {
+      const files = await listSteamCloudFiles(appId);
+      const out = el("frontier-steam-cloud-result");
+      if (out) {
+        out.textContent =
+          Array.isArray(files) && files.length > 0
+            ? `AppID ${appId}: ${files.length} Cloud file(s) (${files.slice(0, 4).map((f) => f.filename).join(", ")})`
+            : `AppID ${appId}: No public/session Steam Cloud files returned.`;
+      }
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-login-gog-direct")?.addEventListener("click", async () => {
+    const code = (el("input-gog-oauth-token")?.value || "").trim();
+    if (!code) {
+      showToast("Paste your GOG authorization code or access token.", "info");
+      return;
+    }
+    try {
+      state.storeDirectStatus = await loginGogDirect(code);
+      if (el("input-gog-oauth-token")) el("input-gog-oauth-token").value = "";
+      renderStoreOwnedTitles();
+      showToast("GOG Direct OAuth session saved.", "success");
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-login-epic-direct")?.addEventListener("click", async () => {
+    const code = (el("input-epic-oauth-code")?.value || "").trim();
+    if (!code) {
+      showToast("Paste your Epic authorizationCode first.", "info");
+      return;
+    }
+    try {
+      state.storeDirectStatus = await loginEpicDirect(code);
+      if (el("input-epic-oauth-code")) el("input-epic-oauth-code").value = "";
+      renderStoreOwnedTitles();
+      showToast("Epic Direct OAuth session saved.", "success");
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-load-gog-owned")?.addEventListener("click", async () => {
+    try {
+      state.gogOwnedTitles = await listGogOwnedTitles();
+      renderStoreOwnedTitles();
+      showToast(`Loaded ${state.gogOwnedTitles.length} GOG title(s).`, "success");
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-load-epic-owned")?.addEventListener("click", async () => {
+    try {
+      state.epicOwnedTitles = await listEpicOwnedTitles();
+      renderStoreOwnedTitles();
+      showToast(`Loaded ${state.epicOwnedTitles.length} Epic title(s).`, "success");
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("frontier-owned-titles-list")?.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-store-install-idx]");
+    if (!btn) return;
+    const idx = Number(btn.dataset.storeInstallIdx);
+    const combined = [...(state.gogOwnedTitles || []), ...(state.epicOwnedTitles || [])];
+    const item = combined[idx];
+    if (!item) return;
+    btn.disabled = true;
+    try {
+      const rep = await startStoreDirectInstall({
+        store: item.store,
+        productId: item.productId,
+        appName: item.appName || null,
+        namespace: item.namespace || null,
+        title: item.title,
+        saveDir: state.customSaveDir || state.defaultSaveDir || null
+      });
+      showToast(rep?.summary || `Queued "${item.title}" in Duke AIMD Downloader.`, "success", 3600);
+      await refreshDownloadJobs();
+      switchTab("downloader");
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      btn.disabled = false;
     }
   });
 }
@@ -6790,6 +7717,8 @@ async function init() {
     return;
   }
   applyTheme(state.activeTheme);
+  applyCardZoom(state.cardZoomPx, false);
+  applySidebarCollapsed(state.sidebarCollapsed);
   renderThemes();
   renderSources();
   syncCatalogFilterControlsToDom();
@@ -7111,11 +8040,75 @@ async function init() {
     }
   });
 
+  await listenEvent("quick-resume-updated", (summary) => {
+    if (summary) renderSidebarQuickResume(summary);
+  });
+
+  await listenEvent("projfs-stream-ready", (payload) => {
+    if (payload?.message) showToast(payload.message, "success", 3600);
+    refreshFrontierDiagnostics().catch(() => {});
+  });
+
+  await listenEvent("projfs-mount-changed", () => {
+    refreshFrontierDiagnostics().catch(() => {});
+  });
+
+  await listenEvent("projfs-mount-unmounted", () => {
+    refreshFrontierDiagnostics().catch(() => {});
+  });
+
+  await listenEvent("shader-swarm-report", (rep) => {
+    if (rep?.summary) showToast(rep.summary, "info", 2800);
+    refreshFrontierDiagnostics().catch(() => {});
+  });
+
+  await listenEvent("frame-pacing-state", () => {
+    refreshFrontierDiagnostics().catch(() => {});
+  });
+
+  await listenEvent("steam-cm-state", (cm) => {
+    if (cm) {
+      state.steamCmStatus = cm;
+      renderSteamCmFriendsState();
+    }
+  });
+
+  await listenEvent("steam-chat-message", (msg) => {
+    if (msg) {
+      state.steamChatMessages = [...(state.steamChatMessages || []), msg].slice(-80);
+      renderSteamCmFriendsState();
+      if (!msg.senderIsSelf) {
+        showToast(`Steam Chat (${msg.peerName || msg.peerSteamId}): ${String(msg.message || "").slice(0, 60)}`, "info", 3200);
+      }
+    }
+  });
+
+  await listenEvent("steam-game-invite", (inv) => {
+    if (inv) {
+      state.steamPendingInvites = [
+        inv,
+        ...(state.steamPendingInvites || []).filter((x) => x.inviteId !== inv.inviteId)
+      ];
+      renderSteamCmFriendsState();
+      showToast(`Game Invite from ${inv.senderName || inv.senderSteamId}: ${inv.gameName || inv.appId}`, "info", 4200);
+    }
+  });
+
+  await listenEvent("steam-invites-updated", (list) => {
+    if (Array.isArray(list)) {
+      state.steamPendingInvites = list;
+      renderSteamCmFriendsState();
+    }
+  });
+
   try {
     await refreshAllData();
   } catch (err) {
     console.error("Initial refreshAllData failed:", err);
   }
+  refreshQuickResumeSlots().catch(() => {});
+  refreshSteamCmAndInvites().catch(() => {});
+  refreshFrontierDiagnostics().catch(() => {});
   try {
     await Promise.resolve(loadEmulatorSettingsSection());
   } catch (err) {

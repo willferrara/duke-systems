@@ -12,16 +12,22 @@ mod importers;
 mod ludusavi;
 mod mcp;
 mod metadata_ext;
+mod mod_graph;
 mod ntfs_compress;
 mod pe_inspect;
 mod platforms;
+mod projfs_stream;
+mod quick_resume;
 mod retro_catalog;
 mod rom_inspect;
 mod self_heal;
+mod shader_swarm;
 mod sidebar_icons;
 mod sites;
 mod snapshots;
 mod sources;
+mod steam_cm;
+mod store_direct;
 mod stream_extract;
 mod swarm;
 
@@ -107,7 +113,7 @@ static ACTIVE_JOBS: OnceLock<Mutex<HashMap<String, Arc<duke_core::win32_ffi::Pro
 static TRAY_DAEMON: OnceLock<duke_core::tray_daemon::TrayDaemonState> = OnceLock::new();
 static HOTKEY_WATCHER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-fn get_active_jobs_map(
+pub(crate) fn get_active_jobs_map(
 ) -> &'static Mutex<HashMap<String, Arc<duke_core::win32_ffi::ProcessTreeJob>>> {
     ACTIVE_JOBS.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -145,7 +151,7 @@ const CATALOG_TTL_SECS: u64 = 24 * 60 * 60;
 const HTTP_METADATA_TIMEOUT_SECS: u64 = 10;
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-fn get_active_sessions() -> &'static Mutex<HashMap<String, ActiveGameSession>> {
+pub(crate) fn get_active_sessions() -> &'static Mutex<HashMap<String, ActiveGameSession>> {
     ACTIVE_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -183,13 +189,11 @@ extern "system" {
     ) -> u32;
 }
 
-pub(crate) use duke_core::win32_ffi::{
-    apply_backdrop_to_hwnd, resolve_backdrop_type_for_theme, DWMSBT_TRANSIENTWINDOW,
-};
+pub(crate) use duke_core::win32_ffi::apply_backdrop_to_hwnd;
 #[cfg(test)]
 pub(crate) use duke_core::win32_ffi::{
-    apply_backdrop_with, DwmMargins, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DWMSBT_NONE,
+    apply_backdrop_with, resolve_backdrop_type_for_theme, DwmMargins,
+    DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
 };
 
 #[tauri::command]
@@ -199,26 +203,29 @@ fn get_app_version() -> String {
 
 #[tauri::command]
 fn apply_window_backdrop(app: AppHandle, theme_id: String) -> Result<(), String> {
-    let transparent_glass = resolve_backdrop_type_for_theme(&theme_id) == DWMSBT_TRANSIENTWINDOW;
+    let clean_theme = if theme_id.trim().eq_ignore_ascii_case("frosted-obsidian") {
+        "dark".to_string()
+    } else {
+        theme_id
+    };
     if let Some(win) = app.get_webview_window("main") {
-        let _ = win.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
         #[cfg(target_os = "windows")]
         {
             let hwnd = win
                 .hwnd()
                 .map_err(|e| format!("Failed to read main window HWND: {e}"))?;
-            let _ = apply_backdrop_to_hwnd(hwnd.0 as isize, &theme_id)?;
+            let _ = apply_backdrop_to_hwnd(hwnd.0 as isize, &clean_theme)?;
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = (win, &theme_id, transparent_glass);
+            let _ = (win, &clean_theme);
         }
     }
     if let Some(overlay) = app.get_webview_window("overlay") {
         let _ = overlay.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
         #[cfg(target_os = "windows")]
         if let Ok(hwnd) = overlay.hwnd() {
-            let _ = apply_backdrop_to_hwnd(hwnd.0 as isize, if transparent_glass { "frosted-obsidian" } else { "dark" });
+            let _ = apply_backdrop_to_hwnd(hwnd.0 as isize, "acrylic");
         }
     }
     Ok(())
@@ -476,8 +483,67 @@ pub struct LauncherSettings {
     pub swarm_auto_sync_saves: bool,
     #[serde(alias = "start_minimized_with_windows")]
     pub start_minimized_with_windows: bool,
+    #[serde(default = "default_theme_id")]
+    pub theme: String,
+    #[serde(default = "default_card_zoom_px", alias = "card_zoom_px")]
+    pub card_zoom_px: u32,
+    #[serde(default = "default_true", alias = "projfsStreamingEnabled")]
+    pub projfs_streaming_enabled: bool,
+    #[serde(default = "default_true", alias = "shaderSwarmEnabled")]
+    pub shader_swarm_enabled: bool,
+    #[serde(default = "default_true", alias = "framePacingEnabled")]
+    pub frame_pacing_enabled: bool,
     #[serde(default, alias = "customEmulatorPaths")]
     pub custom_emulator_paths: HashMap<String, String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_theme_id() -> String {
+    "dark".to_string()
+}
+
+fn default_card_zoom_px() -> u32 {
+    185
+}
+
+fn normalize_theme_id(raw: &str) -> String {
+    let clean = raw.trim().to_ascii_lowercase();
+    match clean.as_str() {
+        "dark" | "light" | "minecraft" | "sunset" | "aerospace" | "cyberpunk" | "terminal"
+        | "crimson" | "ocean" | "frost" => clean,
+        _ => "dark".to_string(),
+    }
+}
+
+pub(crate) fn normalize_loaded_settings(raw_json: &str) -> (LauncherSettings, bool) {
+    let mut parsed = serde_json::from_str::<LauncherSettings>(raw_json).unwrap_or_default();
+    let mut migrated = false;
+    let trimmed_theme = parsed.theme.trim();
+    if trimmed_theme.is_empty() || trimmed_theme.eq_ignore_ascii_case("frosted-obsidian") {
+        if trimmed_theme.eq_ignore_ascii_case("frosted-obsidian") {
+            migrated = true;
+        }
+        parsed.theme = "dark".to_string();
+    } else {
+        let normalized = normalize_theme_id(trimmed_theme);
+        if normalized != parsed.theme {
+            parsed.theme = normalized;
+            migrated = true;
+        }
+    }
+    if parsed.card_zoom_px == 0 {
+        parsed.card_zoom_px = default_card_zoom_px();
+    } else {
+        let clamped = parsed.card_zoom_px.clamp(125, 280);
+        if clamped != parsed.card_zoom_px {
+            parsed.card_zoom_px = clamped;
+            migrated = true;
+        }
+    }
+    (parsed, migrated)
 }
 
 fn is_false(v: &bool) -> bool {
@@ -549,6 +615,11 @@ impl Default for LauncherSettings {
             global_launch_args: None,
             swarm_auto_sync_saves: false,
             start_minimized_with_windows: false,
+            theme: default_theme_id(),
+            card_zoom_px: default_card_zoom_px(),
+            projfs_streaming_enabled: true,
+            shader_swarm_enabled: true,
+            frame_pacing_enabled: true,
             custom_emulator_paths: HashMap::new(),
         }
     }
@@ -724,7 +795,7 @@ pub(crate) fn validate_external_http_url(raw_url: &str) -> Result<Url, String> {
     Ok(parsed)
 }
 
-fn resolve_default_downloads_dir(app: &AppHandle) -> PathBuf {
+pub(crate) fn resolve_default_downloads_dir(app: &AppHandle) -> PathBuf {
     let settings = load_settings_from_disk(app);
     if let Some(custom) = settings.default_save_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         return PathBuf::from(custom);
@@ -1922,7 +1993,13 @@ pub(crate) fn load_settings_standalone() -> LauncherSettings {
     if raw.trim().is_empty() {
         return LauncherSettings::default();
     }
-    serde_json::from_str::<LauncherSettings>(&raw).unwrap_or_default()
+    let (settings, migrated) = normalize_loaded_settings(&raw);
+    if migrated {
+        if let Ok(serialized) = serde_json::to_string_pretty(&settings) {
+            let _ = atomic_write_string(&path, &serialized);
+        }
+    }
+    settings
 }
 
 pub(crate) fn load_catalog_cache_standalone() -> CatalogCacheFile {
@@ -2080,7 +2157,13 @@ fn load_settings_from_disk(app: &AppHandle) -> LauncherSettings {
     if raw.trim().is_empty() {
         return LauncherSettings::default();
     }
-    serde_json::from_str::<LauncherSettings>(&raw).unwrap_or_default()
+    let (settings, migrated) = normalize_loaded_settings(&raw);
+    if migrated {
+        if let Ok(serialized) = serde_json::to_string_pretty(&settings) {
+            let _ = atomic_write_string(&path, &serialized);
+        }
+    }
+    settings
 }
 
 fn save_settings_to_disk(app: &AppHandle, settings: &LauncherSettings) -> Result<(), String> {
@@ -2831,7 +2914,7 @@ fn derive_filename(url: &str, disposition: Option<&str>, suggested: Option<&str>
     )
 }
 
-fn sanitize_filename(name: &str) -> String {
+pub(crate) fn sanitize_filename(name: &str) -> String {
     let cleaned: String = name
         .chars()
         .map(|c| match c {
@@ -4448,6 +4531,9 @@ async fn execute_resumable_matrix_job(
     update_job_in_memory_and_disk(&app, &job, true);
     let _ = app.emit("download-progress", &job);
 
+    let prio_coord = projfs_stream::register_job_coordinator(&job.download_id, job.total_bytes);
+    let prio_coord_rep = Arc::clone(&prio_coord);
+
     let app_rep = app.clone();
     let job_rep_base = job.clone();
     let slots_rep = Arc::clone(&slots);
@@ -4551,6 +4637,17 @@ async fn execute_resumable_matrix_job(
             if write_disk {
                 last_disk_persist = Instant::now();
             }
+            if prio_coord_rep.update_progress(total_downloaded) {
+                let _ = app_rep.emit(
+                    "projfs-stream-ready",
+                    serde_json::json!({
+                        "downloadId": job_state.download_id,
+                        "fileName": job_state.file_name,
+                        "saveDir": job_state.save_dir,
+                        "progressPct": pct
+                    }),
+                );
+            }
             update_job_in_memory_and_disk(&app_rep, &job_state, write_disk);
             let _ = app_rep.emit("download-progress", &job_state);
         }
@@ -4607,6 +4704,7 @@ async fn execute_resumable_matrix_job(
         let zip_dispatch_w = Arc::clone(&zip_dispatch_lock);
         let part_path_zip_w = part_path_obj.clone();
         let extract_dir_w = stream_extract_dir.clone();
+        let prio_coord_w = Arc::clone(&prio_coord);
         let mut burst_client = doh_burst_client.clone();
         let total_segments_count = initial_segments as u64;
 
@@ -4625,10 +4723,19 @@ async fn execute_resumable_matrix_job(
                     return Ok::<(), String>(());
                 }
 
-                let start_pos = slots_w[current_slot].current.load(Ordering::Acquire);
-                let seg_end_byte = slots_w[current_slot].end.load(Ordering::Acquire);
+                // Demand-paged ProjFS byte ranges jump the queue across all 8 AIMD workers.
+                let urgent_range = prio_coord_w.pop_urgent_range();
+                let is_urgent = urgent_range.is_some();
+                let (start_pos, seg_end_byte) = if let Some(ref urg) = urgent_range {
+                    (urg.start, urg.end)
+                } else {
+                    (
+                        slots_w[current_slot].current.load(Ordering::Acquire),
+                        slots_w[current_slot].end.load(Ordering::Acquire),
+                    )
+                };
 
-                if seg_end_byte != u64::MAX && start_pos > seg_end_byte {
+                if !is_urgent && seg_end_byte != u64::MAX && start_pos > seg_end_byte {
                     if let Some(ref zcursor) = zst_cursor_w {
                         loop {
                             if pause_clone.load(Ordering::Relaxed) {
@@ -4761,7 +4868,11 @@ async fn execute_resumable_matrix_job(
                         if buf.is_empty() {
                             return Ok(0);
                         }
-                        let live_end = slots_ref[slot].end.load(Ordering::Acquire);
+                        let live_end = if is_urgent {
+                            seg_end_byte
+                        } else {
+                            slots_ref[slot].end.load(Ordering::Acquire)
+                        };
                         let allowed = if live_end != u64::MAX {
                             buf.len().min(
                                 live_end.saturating_add(1).saturating_sub(*offset) as usize,
@@ -4777,8 +4888,16 @@ async fn execute_resumable_matrix_job(
                                 pipe.submit_range(*offset, &buf[..allowed])?;
                                 streamed_worker.fetch_add(allowed as u64, Ordering::Relaxed);
                             }
+                            let range_start = *offset;
                             *offset += allowed as u64;
-                            slots_ref[slot].current.store(*offset, Ordering::Release);
+                            if !is_urgent {
+                                slots_ref[slot].current.store(*offset, Ordering::Release);
+                            }
+                            prio_coord_w.mark_range_completed(
+                                range_start,
+                                offset.saturating_sub(1),
+                                is_urgent,
+                            );
                             win_bytes_worker.fetch_add(allowed as u64, Ordering::Relaxed);
                         }
                         buf.clear();
@@ -4803,7 +4922,11 @@ async fn execute_resumable_matrix_job(
                     match next_chunk {
                         Ok(Ok(Some(chunk))) => {
                             consecutive_failures = 0;
-                            let live_end = slots_w[current_slot].end.load(Ordering::Acquire);
+                            let live_end = if is_urgent {
+                                seg_end_byte
+                            } else {
+                                slots_w[current_slot].end.load(Ordering::Acquire)
+                            };
                             let effective_end = if burst_end != u64::MAX && live_end != u64::MAX {
                                 burst_end.min(live_end)
                             } else if live_end != u64::MAX {
@@ -4982,6 +5105,7 @@ async fn execute_resumable_matrix_job(
 
     is_finished.store(true, Ordering::Relaxed);
     let _ = reporter_handle.await;
+    projfs_stream::unregister_job_coordinator(&job.download_id);
     get_pause_map().lock().unwrap().remove(&job.download_id);
 
     // Sync and drop the pre-allocated `.part` file handle before finalizing or pausing.
@@ -5495,6 +5619,11 @@ async fn update_launcher_settings(
     global_launch_args: Option<String>,
     swarm_auto_sync_saves: Option<bool>,
     start_minimized_with_windows: Option<bool>,
+    theme: Option<String>,
+    card_zoom_px: Option<u32>,
+    projfs_streaming_enabled: Option<bool>,
+    shader_swarm_enabled: Option<bool>,
+    frame_pacing_enabled: Option<bool>,
 ) -> Result<LauncherSettings, String> {
     let app_for_save = app.clone();
     let autostart_change = start_minimized_with_windows;
@@ -5661,6 +5790,21 @@ async fn update_launcher_settings(
         if let Some(start_min) = autostart_change {
             win32_clipboard_protocol::set_windows_autostart_minimized(start_min)?;
             current.start_minimized_with_windows = start_min;
+        }
+        if let Some(next_theme) = theme {
+            current.theme = normalize_theme_id(&next_theme);
+        }
+        if let Some(zoom_px) = card_zoom_px {
+            current.card_zoom_px = zoom_px.clamp(125, 280);
+        }
+        if let Some(pfs) = projfs_streaming_enabled {
+            current.projfs_streaming_enabled = pfs;
+        }
+        if let Some(shd) = shader_swarm_enabled {
+            current.shader_swarm_enabled = shd;
+        }
+        if let Some(fp) = frame_pacing_enabled {
+            current.frame_pacing_enabled = fp;
         }
 
         save_settings_to_disk(&app_for_save, &current)?;
@@ -7890,11 +8034,39 @@ async fn launch_game_internal(
                         "warmedMb": report.warmed_mb,
                         "throughputGbS": report.throughput_gbps,
                         "elapsedMs": report.elapsed_ms,
-                        "ramBudgetMb": report.budget_bytes / (1024 * 1024)
+                        "ramBudgetMb": report.budget_bytes / (1024 * 1024),
+                        "usedIoringApi": report.used_ioring_api,
+                        "windowsBuild": report.windows_build
                     }),
                 );
             }
         }
+    }
+
+    let session_launch_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    if launch_settings.shader_swarm_enabled && launch_settings.swarm_enabled {
+        let gid_shader = game_id.clone().unwrap_or_else(|| trimmed.clone());
+        if let Ok(sync_rep) = shader_swarm::pull_and_inject_peer_shaders(
+            &gid_shader,
+            &game_title,
+            &exe_file,
+            &game_root_dir,
+        )
+        .await
+        {
+            if sync_rep.injected_files > 0 || sync_rep.driver_purged_files > 0 {
+                let _ = app.emit("shader-swarm-report", &sync_rep);
+            }
+        }
+    }
+
+    if launch_settings.frame_pacing_enabled {
+        let fp = duke_core::win32_ffi::begin_frame_pacing_runtime();
+        let _ = app.emit("frame-pacing-state", &fp);
     }
 
     let mut parsed_args = if item_platform_id > 0 {
@@ -7973,6 +8145,15 @@ async fn launch_game_internal(
                 is_suspended: false,
             },
         );
+        quick_resume::register_launched_slot(
+            &session_key,
+            &game_title,
+            &trimmed,
+            &game_root_dir.to_string_lossy(),
+            game_pid,
+            item_platform_id as u32,
+        );
+        let _ = app.emit("quick-resume-updated", quick_resume::build_summary_snapshot());
         if let Some(ref job_arc) = job_handle_opt {
             if let Ok(mut jguard) = get_active_jobs_map().lock() {
                 jguard.insert(session_key.clone(), Arc::clone(job_arc));
@@ -8040,7 +8221,9 @@ async fn launch_game_internal(
                         "warmedMb": report.warmed_mb,
                         "throughputGbS": report.throughput_gbps,
                         "elapsedMs": report.elapsed_ms,
-                        "ramBudgetMb": report.budget_bytes / (1024 * 1024)
+                        "ramBudgetMb": report.budget_bytes / (1024 * 1024),
+                        "usedIoringApi": report.used_ioring_api,
+                        "windowsBuild": report.windows_build
                     }),
                 );
             }
@@ -8093,6 +8276,8 @@ async fn launch_game_internal(
     let exe_name_after = exe_name_for_bus;
     let cpu_mode_loop = launch_settings.cpu_priority_mode.clone();
     let swarm_auto_sync = launch_settings.swarm_enabled && launch_settings.swarm_auto_sync_saves;
+    let shader_swarm_enabled_exit = launch_settings.shader_swarm_enabled;
+    let frame_pacing_enabled_exit = launch_settings.frame_pacing_enabled;
     let auto_backup_saves = launch_settings.auto_backup_saves_on_exit;
     let install_dir_for_exit = game_root_dir.to_string_lossy().to_string();
     let session_instant = Instant::now();
@@ -8161,6 +8346,32 @@ async fn launch_game_internal(
         }
         if let Ok(mut jguard) = get_active_jobs_map().lock() {
             jguard.remove(&session_key_after);
+        }
+        quick_resume::unregister_slot(&session_key_after);
+        let _ = app_after.emit("quick-resume-updated", quick_resume::build_summary_snapshot());
+
+        if frame_pacing_enabled_exit {
+            let fp = duke_core::win32_ffi::end_frame_pacing_runtime();
+            let _ = app_after.emit("frame-pacing-state", &fp);
+        }
+
+        if shader_swarm_enabled_exit {
+            let s_gid = gid_after.clone().unwrap_or_else(|| session_key_after.clone());
+            let s_title = game_title_after.clone();
+            let s_exe = PathBuf::from(&path_after);
+            let s_dir = PathBuf::from(&install_dir_for_exit);
+            tokio::spawn(async move {
+                let _ = tokio::task::spawn_blocking(move || {
+                    shader_swarm::capture_game_exit_shaders(
+                        &s_gid,
+                        &s_title,
+                        &s_exe,
+                        &s_dir,
+                        session_launch_epoch,
+                    )
+                })
+                .await;
+            });
         }
 
         let elapsed_secs = session_instant.elapsed().as_secs().max(1);
@@ -8419,6 +8630,8 @@ async fn suspend_or_resume_game(
             sess.is_suspended = want_suspend;
         }
     }
+    quick_resume::sync_slot_suspend_state(&session_key, want_suspend, None);
+    let _ = app.emit("quick-resume-updated", quick_resume::build_summary_snapshot());
 
     let result = SuspendStateResult {
         game_id: session_key.clone(),
@@ -12839,7 +13052,7 @@ async fn toggle_overlay_window(app: AppHandle, visible: Option<bool>) -> Result<
         #[cfg(target_os = "windows")]
         {
             if let Ok(hwnd) = overlay.hwnd() {
-                let _ = apply_backdrop_to_hwnd(hwnd.0 as isize, "frosted-obsidian");
+                let _ = apply_backdrop_to_hwnd(hwnd.0 as isize, "acrylic");
             }
         }
         let _ = overlay.show();
@@ -13320,6 +13533,52 @@ mod crash_guard {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemRuntimeDiagnostics {
+    pub ioring: duke_core::nvme_prefetch::IoRingCapability,
+    pub frame_pacing: duke_core::win32_ffi::FramePacingStatus,
+    pub gpu_hardware: shader_swarm::GpuHardwareIdentity,
+    pub projfs: projfs_stream::ProjFsRuntimeStatus,
+    pub quick_resume: quick_resume::QuickResumeStateSummary,
+    pub steam_cm: steam_cm::SteamCmSessionStatus,
+    pub store_direct: store_direct::StoreDirectStatus,
+}
+
+#[tauri::command]
+async fn get_frame_pacing_and_ioring_status() -> SystemRuntimeDiagnostics {
+    SystemRuntimeDiagnostics {
+        ioring: duke_core::nvme_prefetch::probe_ioring_support(),
+        frame_pacing: duke_core::win32_ffi::inspect_frame_pacing_status(),
+        gpu_hardware: shader_swarm::detect_gpu_hardware_identity(),
+        projfs: projfs_stream::probe_projfs_status(),
+        quick_resume: quick_resume::build_summary_snapshot(),
+        steam_cm: steam_cm::get_steam_cm_status().await,
+        store_direct: store_direct::get_store_direct_status().await,
+    }
+}
+
+#[tauri::command]
+async fn toggle_half_ms_frame_pacing(
+    enabled: bool,
+) -> Result<duke_core::win32_ffi::FramePacingStatus, String> {
+    if enabled {
+        Ok(duke_core::win32_ffi::begin_frame_pacing_runtime())
+    } else {
+        Ok(duke_core::win32_ffi::end_frame_pacing_runtime())
+    }
+}
+
+#[tauri::command]
+async fn purge_stale_driver_shaders() -> Result<duke_core::win32_ffi::ShaderCachePurgeReport, String> {
+    let app_root = get_app_data_file_standalone("shader_swarm")?
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    let drv = duke_core::win32_ffi::detect_primary_gpu_driver_version();
+    duke_core::win32_ffi::check_and_purge_stale_vendor_shader_caches(&app_root, drv.as_deref())
+}
+
 fn main() {
     crash_guard::install();
 
@@ -13386,6 +13645,14 @@ fn main() {
                 None,
                 Some(on_exit_cb),
             );
+            if let Some(tray) = app.tray_by_id("duke-launcher-tray") {
+                if let Ok(dyn_img) = image::load_from_memory(include_bytes!("../icons/32x32.png")) {
+                    let rgba = dyn_img.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    let tray_img = tauri::image::Image::new_owned(rgba.into_raw(), w, h);
+                    let _ = tray.set_icon(Some(tray_img));
+                }
+            }
 
             for initial_url in &initial_protocol_urls {
                 enqueue_protocol_download_url(
@@ -13427,9 +13694,6 @@ fn main() {
             let initial_settings = load_settings_from_disk(app.handle());
             apply_runtime_settings(&initial_settings);
 
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
-            }
             if let Some(overlay) = app.get_webview_window("overlay") {
                 let _ = overlay.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
             }
@@ -13655,7 +13919,41 @@ fn main() {
             inspect_rom_path,
             add_retro_game_from_catalog,
             link_game_rom,
-            scan_rom_folder
+            scan_rom_folder,
+            get_frame_pacing_and_ioring_status,
+            toggle_half_ms_frame_pacing,
+            purge_stale_driver_shaders,
+            projfs_stream::get_projfs_runtime_status,
+            projfs_stream::enable_projfs_windows_feature,
+            projfs_stream::mount_projfs_virtual_game,
+            projfs_stream::unmount_projfs_virtual_game,
+            projfs_stream::deduplicate_library_cas,
+            shader_swarm::get_shader_swarm_status,
+            shader_swarm::sync_game_shaders_from_swarm,
+            shader_swarm::archive_game_shader_bundle,
+            quick_resume::get_quick_resume_slots,
+            quick_resume::quick_switch_game_slot,
+            quick_resume::suspend_to_quick_resume_slot,
+            quick_resume::remove_quick_resume_slot,
+            steam_cm::get_steam_cm_status,
+            steam_cm::connect_steam_cm,
+            steam_cm::disconnect_steam_cm,
+            steam_cm::send_steam_chat_message,
+            steam_cm::get_steam_chat_messages,
+            steam_cm::get_steam_pending_invites,
+            steam_cm::respond_steam_game_invite,
+            steam_cm::list_steam_cloud_files,
+            steam_cm::sync_steam_cloud_saves,
+            store_direct::get_store_direct_status,
+            store_direct::login_gog_direct,
+            store_direct::login_epic_direct,
+            store_direct::list_gog_owned_titles,
+            store_direct::list_epic_owned_titles,
+            store_direct::start_store_direct_install,
+            mod_graph::scan_game_mod_graph,
+            mod_graph::register_game_mod_pack,
+            mod_graph::save_game_mod_loadout,
+            mod_graph::activate_game_mod_loadout
         ])
         .build(tauri::generate_context!())
     {
@@ -14038,7 +14336,7 @@ mod tests {
     #[test]
     fn test_apply_window_backdrop_attributes() {
         assert_eq!(
-            resolve_backdrop_type_for_theme("frosted-obsidian"),
+            resolve_backdrop_type_for_theme("acrylic"),
             DWMSBT_TRANSIENTWINDOW
         );
         for solid in [
@@ -14057,15 +14355,15 @@ mod tests {
         }
 
         // Invalid HWND guard
-        let err = apply_backdrop_with(0, "frosted-obsidian", |_, _, _| 0, |_, _| 0).unwrap_err();
+        let err = apply_backdrop_with(0, "acrylic", |_, _, _| 0, |_, _| 0).unwrap_err();
         assert!(err.contains("HWND"));
 
-        // Verify exact Win32 DwmSetWindowAttribute + margin values for frosted-obsidian
+        // Verify exact Win32 DwmSetWindowAttribute + margin values for translucent overlay backdrop
         let mut attrs = Vec::new();
         let mut margins_log = Vec::new();
         let chosen = apply_backdrop_with(
             0x1234isize,
-            "frosted-obsidian",
+            "acrylic",
             |_, attr, val| {
                 attrs.push((attr, val));
                 0
@@ -14311,5 +14609,84 @@ mod tests {
         assert!(browser_lnk.exists());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dukeflaglogo_is_full_bleed_and_ico_has_all_required_layers() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let launcher_root = manifest_dir.parent().unwrap();
+        let logo_path = launcher_root.join("src").join("assets").join("dukeflaglogo.png");
+        let img = image::open(&logo_path)
+            .expect("dukeflaglogo.png should load")
+            .to_rgba8();
+        let (w, h) = img.dimensions();
+        assert_eq!(w, h, "logo must be square");
+        assert!(w >= 256);
+
+        let mut min_x = w;
+        let mut min_y = h;
+        let mut max_x = 0u32;
+        let mut max_y = 0u32;
+        for (x, y, px) in img.enumerate_pixels() {
+            if px[3] > 8 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+        assert_eq!(min_x, 0, "left transparent border should be cropped edge-to-edge");
+        assert_eq!(min_y, 0, "top transparent border should be cropped edge-to-edge");
+        assert_eq!(max_x, w - 1, "right transparent border should be cropped edge-to-edge");
+        assert_eq!(max_y, h - 1, "bottom transparent border should be cropped edge-to-edge");
+
+        let ico_path = manifest_dir.join("icons").join("icon.ico");
+        let ico = fs::read(&ico_path).expect("icon.ico should exist");
+        assert!(ico.len() > 6 && u16::from_le_bytes([ico[0], ico[1]]) == 0 && u16::from_le_bytes([ico[2], ico[3]]) == 1);
+        let count = u16::from_le_bytes([ico[4], ico[5]]) as usize;
+        assert_eq!(count, 7);
+        let mut dims: Vec<u32> = (0..count)
+            .map(|i| {
+                let off = 6 + i * 16;
+                let w_b = ico[off];
+                if w_b == 0 { 256 } else { w_b as u32 }
+            })
+            .collect();
+        dims.sort_unstable();
+        assert_eq!(dims, vec![16, 24, 32, 48, 64, 128, 256]);
+    }
+
+    #[test]
+    fn launcher_settings_zoom_clamps_and_migrates_frosted_obsidian() {
+        let raw = r#"{
+            "theme": "frosted-obsidian",
+            "cardZoomPx": 999
+        }"#;
+        let (parsed, migrated) = normalize_loaded_settings(raw);
+        assert!(migrated);
+        assert_eq!(parsed.theme, "dark");
+        assert_eq!(parsed.card_zoom_px, 280);
+        assert!(parsed.projfs_streaming_enabled);
+        assert!(parsed.shader_swarm_enabled);
+        assert!(parsed.frame_pacing_enabled);
+
+        let (low_zoom, low_mig) = normalize_loaded_settings(r#"{"cardZoomPx": 40}"#);
+        assert!(low_mig);
+        assert_eq!(low_zoom.card_zoom_px, 125);
+
+        let def = LauncherSettings::default();
+        assert_eq!(def.theme, "dark");
+        assert_eq!(def.card_zoom_px, 185);
+    }
+
+    #[test]
+    fn frame_pacing_and_ioring_diagnostics_report_valid_fields() {
+        let ioring = duke_core::nvme_prefetch::probe_ioring_support();
+        assert_eq!(ioring.min_required_build, 22621);
+        assert!(!ioring.backend.is_empty());
+
+        let fp = duke_core::win32_ffi::inspect_frame_pacing_status();
+        assert!(!fp.hags_status.is_empty());
+        assert!(fp.target_100ns_units > 0);
     }
 }

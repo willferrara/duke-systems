@@ -596,6 +596,9 @@ mod ext_ffi {
     const PROCESS_SUSPEND_RESUME: u32 = 0x0800;
 
     type NtProcessFn = unsafe extern "system" fn(*mut c_void) -> i32;
+    type NtSetTimerResolutionFn = unsafe extern "system" fn(u32, u8, *mut u32) -> i32;
+    type NtQueryTimerResolutionFn =
+        unsafe extern "system" fn(*mut u32, *mut u32, *mut u32) -> i32;
     type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XInputStateRaw) -> u32;
     type GetAsyncKeyStateFn = unsafe extern "system" fn(i32) -> i16;
     type RegOpenKeyExWFn =
@@ -629,6 +632,8 @@ mod ext_ffi {
 
     static NT_SUSPEND_PROCESS: OnceLock<Option<NtProcessFn>> = OnceLock::new();
     static NT_RESUME_PROCESS: OnceLock<Option<NtProcessFn>> = OnceLock::new();
+    static NT_SET_TIMER_RESOLUTION: OnceLock<Option<NtSetTimerResolutionFn>> = OnceLock::new();
+    static NT_QUERY_TIMER_RESOLUTION: OnceLock<Option<NtQueryTimerResolutionFn>> = OnceLock::new();
     static XINPUT_GET_STATE: OnceLock<Option<XInputGetStateFn>> = OnceLock::new();
     static GET_ASYNC_KEY_STATE: OnceLock<Option<GetAsyncKeyStateFn>> = OnceLock::new();
     static ADVAPI_REG: OnceLock<Option<AdvapiRegProcs>> = OnceLock::new();
@@ -670,15 +675,54 @@ mod ext_ffi {
         gamepad: XInputGamepadRaw,
     }
 
-    fn resolve_ntdll_proc(name: &'static [u8]) -> Option<NtProcessFn> {
+    fn resolve_ntdll_raw(name: &'static [u8]) -> Option<unsafe extern "system" fn() -> isize> {
         unsafe {
             let hmod = GetModuleHandleA(PCSTR::from_raw(c"ntdll.dll".as_ptr().cast())).ok()?;
-            let proc = GetProcAddress(hmod, PCSTR::from_raw(name.as_ptr()))?;
-            Some(std::mem::transmute::<
-                unsafe extern "system" fn() -> isize,
-                NtProcessFn,
-            >(proc))
+            GetProcAddress(hmod, PCSTR::from_raw(name.as_ptr()))
         }
+    }
+
+    fn resolve_ntdll_proc(name: &'static [u8]) -> Option<NtProcessFn> {
+        resolve_ntdll_raw(name).map(|proc| unsafe {
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, NtProcessFn>(proc)
+        })
+    }
+
+    pub fn nt_query_timer_resolution() -> Option<(u32, u32, u32)> {
+        let query_fn = (*NT_QUERY_TIMER_RESOLUTION.get_or_init(|| {
+            resolve_ntdll_raw(b"NtQueryTimerResolution\0").map(|proc| unsafe {
+                std::mem::transmute::<unsafe extern "system" fn() -> isize, NtQueryTimerResolutionFn>(
+                    proc,
+                )
+            })
+        }))?;
+        let (mut min_res, mut max_res, mut cur_res) = (0u32, 0u32, 0u32);
+        let status = unsafe { query_fn(&mut min_res, &mut max_res, &mut cur_res) };
+        if status >= 0 {
+            Some((min_res, max_res, cur_res))
+        } else {
+            None
+        }
+    }
+
+    pub fn nt_set_timer_resolution(desired_100ns: u32, enable: bool) -> Result<u32, String> {
+        let set_fn = (*NT_SET_TIMER_RESOLUTION.get_or_init(|| {
+            resolve_ntdll_raw(b"NtSetTimerResolution\0").map(|proc| unsafe {
+                std::mem::transmute::<unsafe extern "system" fn() -> isize, NtSetTimerResolutionFn>(
+                    proc,
+                )
+            })
+        }))
+        .ok_or_else(|| "NtSetTimerResolution unavailable in ntdll.dll".to_string())?;
+        let mut current = 0u32;
+        let status = unsafe { set_fn(desired_100ns, u8::from(enable), &mut current) };
+        if status < 0 {
+            return Err(format!(
+                "NtSetTimerResolution({}, {}) returned NTSTATUS 0x{:08X}",
+                desired_100ns, enable, status as u32
+            ));
+        }
+        Ok(current)
     }
 
     fn resolve_xinput() -> Option<XInputGetStateFn> {
@@ -932,6 +976,38 @@ mod ext_ffi {
             wide.push(ch);
         }
         Some(String::from_utf16_lossy(&wide))
+    }
+
+    /// Reads a 32-bit `REG_DWORD` value from the Windows Registry.
+    pub fn reg_read_dword(use_hklm: bool, subkey: &str, value_name: &str) -> Option<u32> {
+        const HKEY_CURRENT_USER: usize = 0x8000_0001;
+        const HKEY_LOCAL_MACHINE: usize = 0x8000_0002;
+        const REG_DWORD: u32 = 4;
+
+        let root = if use_hklm { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
+        let (hkey, procs) = open_reg_key(root, subkey)?;
+        let val_w = to_wide_null(value_name);
+        let mut reg_type: u32 = 0;
+        let mut raw = [0u8; 4];
+        let mut bytes_len: u32 = 4;
+
+        let rc = unsafe {
+            (procs.query_value)(
+                hkey,
+                val_w.as_ptr(),
+                core::ptr::null_mut(),
+                &mut reg_type,
+                raw.as_mut_ptr(),
+                &mut bytes_len,
+            )
+        };
+        unsafe {
+            let _ = (procs.close_key)(hkey);
+        }
+        if rc != 0 || reg_type != REG_DWORD || bytes_len < 4 {
+            return None;
+        }
+        Some(u32::from_le_bytes(raw))
     }
 
     /// Enumerates direct child subkey names under an `HKCU` or `HKLM` Registry key.
@@ -1464,6 +1540,15 @@ mod ext_ffi {
     pub fn reg_read_string(_use_hklm: bool, _subkey: &str, _value_name: &str) -> Option<String> {
         None
     }
+    pub fn reg_read_dword(_use_hklm: bool, _subkey: &str, _value_name: &str) -> Option<u32> {
+        None
+    }
+    pub fn nt_query_timer_resolution() -> Option<(u32, u32, u32)> {
+        None
+    }
+    pub fn nt_set_timer_resolution(_desired_100ns: u32, _enable: bool) -> Result<u32, String> {
+        Err("NtSetTimerResolution is only supported on Windows".to_string())
+    }
     pub fn reg_enum_subkeys(_use_hklm: bool, _subkey: &str) -> Vec<String> {
         Vec::new()
     }
@@ -1581,9 +1666,272 @@ pub fn is_hotkey_pressed(spec: &HotkeySpec) -> bool {
 
 pub use ext_ffi::{
     create_hard_link, create_process_tree_job, find_pid_by_exe_name, is_process_tree_minimized,
-    is_vk_down, poll_xinput_state, reg_enum_subkeys, reg_read_string, resume_external_pid,
-    resume_process_tree, suspend_external_pid, suspend_process_tree, ProcessTreeJob,
+    is_vk_down, poll_xinput_state, reg_enum_subkeys, reg_read_dword, reg_read_string,
+    resume_external_pid, resume_process_tree, suspend_external_pid, suspend_process_tree,
+    ProcessTreeJob,
 };
+
+/// `0.5 ms` Windows kernel timer resolution target (`5000` × 100 ns units).
+pub const FRAME_PACING_HALF_MS_UNITS: u32 = 5000;
+
+static FRAME_PACING_ACTIVE_GAMES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+static FRAME_PACING_PREV_RES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(156_250);
+
+/// Snapshot of the active 0.5 ms frame-pacing timer & Windows HAGS status.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FramePacingStatus {
+    pub timer_resolution_engaged: bool,
+    pub target_100ns_units: u32,
+    pub previous_100ns_units: u32,
+    pub actual_100ns_units: u32,
+    pub active_game_count: usize,
+    pub hags_enabled: bool,
+    pub hags_raw_mode: Option<u32>,
+    pub hags_status: String,
+}
+
+/// Summary returned when comparing GPU driver version against persisted vendor shader cache state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShaderCachePurgeReport {
+    pub driver_changed: bool,
+    pub previous_driver: Option<String>,
+    pub current_driver: String,
+    pub dirs_purged: Vec<String>,
+    pub files_removed: usize,
+    pub bytes_reclaimed: u64,
+}
+
+/// Maps `HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\HwSchMode` DWORD into a readable state.
+pub fn resolve_hags_status_from_dword(raw: Option<u32>) -> (bool, String) {
+    match raw {
+        Some(2) => (true, "Enabled (HwSchMode=2)".to_string()),
+        Some(1) => (false, "Disabled (HwSchMode=1)".to_string()),
+        Some(other) => (other >= 2, format!("Custom (HwSchMode={})", other)),
+        None => (false, "Unconfigured / Driver Default".to_string()),
+    }
+}
+
+/// Inspects current `NtQueryTimerResolution` state and Windows 11 Hardware-Accelerated GPU Scheduling status.
+pub fn inspect_frame_pacing_status() -> FramePacingStatus {
+    let raw_mode = reg_read_dword(
+        true,
+        "SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers",
+        "HwSchMode",
+    );
+    let (hags_enabled, hags_status) = resolve_hags_status_from_dword(raw_mode);
+    let (_min_r, _max_r, cur_r) = ext_ffi::nt_query_timer_resolution().unwrap_or((156_250, 5000, 156_250));
+    let active_game_count = FRAME_PACING_ACTIVE_GAMES.load(std::sync::atomic::Ordering::SeqCst);
+    let prev = FRAME_PACING_PREV_RES.load(std::sync::atomic::Ordering::Relaxed);
+    FramePacingStatus {
+        timer_resolution_engaged: active_game_count > 0 && cur_r <= 5500,
+        target_100ns_units: FRAME_PACING_HALF_MS_UNITS,
+        previous_100ns_units: prev,
+        actual_100ns_units: cur_r,
+        active_game_count,
+        hags_enabled,
+        hags_raw_mode: raw_mode,
+        hags_status,
+    }
+}
+
+/// Engages `0.5 ms` (`5000` × 100 ns) timer resolution via `ntdll!NtSetTimerResolution` on Windows.
+pub fn engage_half_ms_frame_pacing() -> Result<FramePacingStatus, String> {
+    if let Some((_min_r, max_r, cur_r)) = ext_ffi::nt_query_timer_resolution() {
+        FRAME_PACING_PREV_RES.store(cur_r, std::sync::atomic::Ordering::Relaxed);
+        let target = FRAME_PACING_HALF_MS_UNITS.max(max_r);
+        let actual = ext_ffi::nt_set_timer_resolution(target, true)?;
+        let mut status = inspect_frame_pacing_status();
+        status.timer_resolution_engaged = true;
+        status.target_100ns_units = target;
+        status.actual_100ns_units = actual;
+        return Ok(status);
+    }
+    Err("NtQueryTimerResolution unavailable".to_string())
+}
+
+/// Withdraws this process's `0.5 ms` `NtSetTimerResolution` request cleanly.
+pub fn release_half_ms_frame_pacing() -> Result<u32, String> {
+    let target = if let Some((_min_r, max_r, _cur_r)) = ext_ffi::nt_query_timer_resolution() {
+        FRAME_PACING_HALF_MS_UNITS.max(max_r)
+    } else {
+        FRAME_PACING_HALF_MS_UNITS
+    };
+    ext_ffi::nt_set_timer_resolution(target, false)
+}
+
+/// Reference-counted game lifecycle hook: engages `0.5 ms` timer when first game launches.
+pub fn begin_frame_pacing_runtime() -> FramePacingStatus {
+    let prev = FRAME_PACING_ACTIVE_GAMES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if prev == 0 {
+        let _ = engage_half_ms_frame_pacing();
+    }
+    inspect_frame_pacing_status()
+}
+
+/// Reference-counted game exit hook: restores default OS timer resolution once all games close/pause.
+pub fn end_frame_pacing_runtime() -> FramePacingStatus {
+    let mut prev = 0usize;
+    let mut cur = FRAME_PACING_ACTIVE_GAMES.load(std::sync::atomic::Ordering::SeqCst);
+    while cur > 0 {
+        match FRAME_PACING_ACTIVE_GAMES.compare_exchange(
+            cur,
+            cur - 1,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        ) {
+            Ok(p) => {
+                prev = p;
+                break;
+            }
+            Err(next) => cur = next,
+        }
+    }
+    if prev <= 1 {
+        let _ = release_half_ms_frame_pacing();
+    }
+    inspect_frame_pacing_status()
+}
+
+/// Reads the primary installed display adapter `DriverVersion` from Windows Registry class `{4d36e968-...}`.
+pub fn detect_primary_gpu_driver_version() -> Option<String> {
+    const DISPLAY_CLASS: &str =
+        "SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}";
+    let mut fallback: Option<String> = None;
+    for sub in reg_enum_subkeys(true, DISPLAY_CLASS) {
+        if !sub.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let full = format!("{}\\{}", DISPLAY_CLASS, sub);
+        let Some(ver) = reg_read_string(true, &full, "DriverVersion") else {
+            continue;
+        };
+        let desc = reg_read_string(true, &full, "DriverDesc").unwrap_or_default();
+        let combined = if desc.trim().is_empty() {
+            ver.trim().to_string()
+        } else {
+            format!("{}|{}", desc.trim(), ver.trim())
+        };
+        if !desc.to_ascii_lowercase().contains("microsoft basic") {
+            return Some(combined);
+        }
+        if fallback.is_none() {
+            fallback = Some(combined);
+        }
+    }
+    fallback
+}
+
+/// Resolves standard vendor DX/Vulkan shader cache directories from `%LOCALAPPDATA%`.
+pub fn vendor_shader_cache_dirs() -> Vec<std::path::PathBuf> {
+    let Some(local) = std::env::var_os("LOCALAPPDATA") else {
+        return Vec::new();
+    };
+    let base = std::path::PathBuf::from(local);
+    vec![
+        base.join("NVIDIA").join("DXCache"),
+        base.join("NVIDIA").join("GLCache"),
+        base.join("D3DSCache"),
+        base.join("AMD").join("DxCache"),
+        base.join("AMD").join("VkCache"),
+        base.join("Intel").join("ShaderCache"),
+    ]
+}
+
+fn clear_dir_files_best_effort(dir: &std::path::Path) -> (usize, u64) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    let mut removed = 0usize;
+    let mut bytes = 0u64;
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            let (r, b) = clear_dir_files_best_effort(&p);
+            removed += r;
+            bytes += b;
+            let _ = std::fs::remove_dir(&p);
+        } else if p.is_file() {
+            let sz = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            if std::fs::remove_file(&p).is_ok() {
+                removed += 1;
+                bytes = bytes.saturating_add(sz);
+            }
+        }
+    }
+    (removed, bytes)
+}
+
+/// Checks `state_file` against `current_driver` and purges stale shader cache directories if changed.
+pub fn check_and_purge_stale_vendor_shader_caches_with_dirs(
+    state_file: &std::path::Path,
+    current_driver: &str,
+    cache_dirs: &[std::path::PathBuf],
+) -> Result<ShaderCachePurgeReport, String> {
+    let clean_cur = current_driver.trim();
+    if clean_cur.is_empty() {
+        return Ok(ShaderCachePurgeReport::default());
+    }
+    let previous = std::fs::read_to_string(state_file)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let mut report = ShaderCachePurgeReport {
+        driver_changed: false,
+        previous_driver: previous.clone(),
+        current_driver: clean_cur.to_string(),
+        dirs_purged: Vec::new(),
+        files_removed: 0,
+        bytes_reclaimed: 0,
+    };
+
+    if let Some(ref prev) = previous
+        && prev != clean_cur
+    {
+        report.driver_changed = true;
+        for dir in cache_dirs {
+            if dir.is_dir() {
+                let (removed, reclaimed) = clear_dir_files_best_effort(dir);
+                if removed > 0 {
+                    report.dirs_purged.push(dir.to_string_lossy().to_string());
+                    report.files_removed += removed;
+                    report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(reclaimed);
+                }
+            }
+        }
+    }
+
+    if previous.as_deref() != Some(clean_cur) {
+        if let Some(parent) = state_file.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(state_file, clean_cur)
+            .map_err(|e| format!("Failed writing GPU driver state '{}': {e}", state_file.display()))?;
+    }
+    Ok(report)
+}
+
+/// Checks installed GPU driver version and automatically purges stale vendor shader caches when changed.
+pub fn check_and_purge_stale_vendor_shader_caches(
+    app_data_dir: &std::path::Path,
+    current_driver_override: Option<&str>,
+) -> Result<ShaderCachePurgeReport, String> {
+    let detected = current_driver_override
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(detect_primary_gpu_driver_version)
+        .unwrap_or_default();
+    if detected.is_empty() {
+        return Ok(ShaderCachePurgeReport::default());
+    }
+    let state_file = app_data_dir.join("gpu_driver_state.txt");
+    let dirs = vendor_shader_cache_dirs();
+    check_and_purge_stale_vendor_shader_caches_with_dirs(&state_file, &detected, &dirs)
+}
 
 /// Promotes every process in a tracked game tree to `ABOVE_NORMAL_PRIORITY_CLASS`.
 #[cfg(feature = "eco-qos")]
@@ -1685,7 +2033,7 @@ pub struct DwmMargins {
 /// Resolves which `DWMWA_SYSTEMBACKDROP_TYPE` value maps to a UI theme ID.
 pub fn resolve_backdrop_type_for_theme(theme_id: &str) -> i32 {
     let clean = theme_id.trim();
-    if clean.eq_ignore_ascii_case("frosted-obsidian") || clean.eq_ignore_ascii_case("acrylic") {
+    if clean.eq_ignore_ascii_case("acrylic") {
         DWMSBT_TRANSIENTWINDOW
     } else {
         DWMSBT_NONE
@@ -1755,7 +2103,7 @@ unsafe extern "system" {
     fn DwmExtendFrameIntoClientArea(hwnd: isize, p_mar_inset: *const DwmMargins) -> i32;
 }
 
-/// Applies Win11 DWM Acrylic sheet-of-glass (`frosted-obsidian`) or resets to solid for an HWND.
+/// Applies Win11 DWM Acrylic sheet-of-glass (`acrylic`) or resets to solid for an HWND.
 pub fn apply_backdrop_to_hwnd(hwnd: isize, theme_id: &str) -> Result<i32, String> {
     #[cfg(target_os = "windows")]
     {
@@ -1815,9 +2163,9 @@ mod tests {
     }
 
     #[test]
-    fn dwm_backdrop_applies_sheet_of_glass_for_frosted_obsidian() {
+    fn dwm_backdrop_applies_sheet_of_glass_for_acrylic() {
         assert_eq!(
-            resolve_backdrop_type_for_theme("frosted-obsidian"),
+            resolve_backdrop_type_for_theme("acrylic"),
             DWMSBT_TRANSIENTWINDOW
         );
         assert_eq!(resolve_backdrop_type_for_theme("dark"), DWMSBT_NONE);
@@ -1826,7 +2174,7 @@ mod tests {
         let mut margins = Vec::new();
         let chosen = apply_backdrop_with(
             0x2024isize,
-            "frosted-obsidian",
+            "acrylic",
             |_, a, v| {
                 attrs.push((a, v));
                 0
@@ -1855,5 +2203,69 @@ mod tests {
                 cy_bottom_height: -1,
             }]
         );
+    }
+
+    #[test]
+    fn hags_status_maps_hwschmode_values() {
+        assert_eq!(
+            resolve_hags_status_from_dword(Some(2)),
+            (true, "Enabled (HwSchMode=2)".to_string())
+        );
+        assert_eq!(
+            resolve_hags_status_from_dword(Some(1)),
+            (false, "Disabled (HwSchMode=1)".to_string())
+        );
+        assert_eq!(
+            resolve_hags_status_from_dword(None),
+            (false, "Unconfigured / Driver Default".to_string())
+        );
+    }
+
+    #[test]
+    fn frame_pacing_runtime_engages_and_releases_half_ms_timer() {
+        let initial = inspect_frame_pacing_status();
+        assert_eq!(initial.target_100ns_units, FRAME_PACING_HALF_MS_UNITS);
+        #[cfg(target_os = "windows")]
+        {
+            let active = begin_frame_pacing_runtime();
+            assert!(active.active_game_count >= 1);
+            assert!(active.timer_resolution_engaged || active.actual_100ns_units <= 10_000);
+            let after = end_frame_pacing_runtime();
+            assert_eq!(after.active_game_count, active.active_game_count - 1);
+        }
+    }
+
+    #[test]
+    fn stale_shader_cache_purges_when_driver_version_changes() {
+        let root = std::env::temp_dir().join(format!("duke_shader_purge_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let nv_dir = root.join("NVIDIA").join("DXCache");
+        std::fs::create_dir_all(&nv_dir).unwrap();
+        std::fs::write(nv_dir.join("old_cache.bin"), vec![1u8; 4096]).unwrap();
+        let state_file = root.join("gpu_driver_state.txt");
+
+        let first = check_and_purge_stale_vendor_shader_caches_with_dirs(
+            &state_file,
+            "RTX4090|32.0.15.6603",
+            std::slice::from_ref(&nv_dir),
+        )
+        .unwrap();
+        assert!(!first.driver_changed);
+        assert_eq!(first.files_removed, 0);
+        assert!(nv_dir.join("old_cache.bin").exists());
+
+        let second = check_and_purge_stale_vendor_shader_caches_with_dirs(
+            &state_file,
+            "RTX4090|32.0.15.7216",
+            std::slice::from_ref(&nv_dir),
+        )
+        .unwrap();
+        assert!(second.driver_changed);
+        assert_eq!(second.previous_driver.as_deref(), Some("RTX4090|32.0.15.6603"));
+        assert_eq!(second.files_removed, 1);
+        assert_eq!(second.bytes_reclaimed, 4096);
+        assert!(!nv_dir.join("old_cache.bin").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

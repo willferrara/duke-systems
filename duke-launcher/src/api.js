@@ -118,7 +118,15 @@ export async function updateLauncherSettings(patch = {}) {
     startMinimizedWithWindows:
       typeof patch.startMinimizedWithWindows === "boolean"
         ? patch.startMinimizedWithWindows
-        : null
+        : null,
+    theme: typeof patch.theme === "string" ? patch.theme : null,
+    cardZoomPx: typeof patch.cardZoomPx === "number" ? patch.cardZoomPx : null,
+    projfsStreamingEnabled:
+      typeof patch.projfsStreamingEnabled === "boolean" ? patch.projfsStreamingEnabled : null,
+    shaderSwarmEnabled:
+      typeof patch.shaderSwarmEnabled === "boolean" ? patch.shaderSwarmEnabled : null,
+    framePacingEnabled:
+      typeof patch.framePacingEnabled === "boolean" ? patch.framePacingEnabled : null
   });
 }
 
@@ -719,8 +727,7 @@ export const THEME_PRESETS = [
   { id: "terminal", name: "Retro CRT Amber", desc: "Phosphor oscilloscope sweep with scanline grid" },
   { id: "crimson", name: "Redline Carbon", desc: "Woven carbon texture and high-RPM redline arc" },
   { id: "ocean", name: "Abyssal Ocean", desc: "Deep-sea trench contours and sonar telemetry" },
-  { id: "frost", name: "Nordic Frost", desc: "Arctic aurora ribbons over alpine peaks" },
-  { id: "frosted-obsidian", name: "Obsidian Frosted Glass", desc: "Translucent Windows 11 acrylic backdrop with frosted glass panels" }
+  { id: "frost", name: "Nordic Frost", desc: "Arctic aurora ribbons over alpine peaks" }
 ];
 
 export async function getUnifiedFriends() {
@@ -939,7 +946,7 @@ export async function getAppVersion() {
     // Fall back to explicit Rust compile-time CARGO_PKG_VERSION IPC
   }
   const backendVer = await invokeCommand("get_app_version");
-  return String(backendVer || "0.4.1").trim().replace(/^v/i, "");
+  return String(backendVer || "0.5.0").trim().replace(/^v/i, "");
 }
 
 export async function resolveCatalogCover(req = {}) {
@@ -949,6 +956,208 @@ export async function resolveCatalogCover(req = {}) {
     platformId: req.platformId != null ? Number(req.platformId) : null,
     platformName: req.platformName ? String(req.platformName) : null,
     coverUrl: req.coverUrl ? String(req.coverUrl) : null
+  });
+}
+
+// =========================================================================
+// Frontier v0.5.0 Systems Engine IPC Bindings
+// =========================================================================
+
+export async function getFramePacingAndIoringStatus() {
+  return invokeCommand("get_frame_pacing_and_ioring_status");
+}
+
+export async function toggleHalfMsFramePacing(enabled) {
+  return invokeCommand("toggle_half_ms_frame_pacing", { enabled: Boolean(enabled) });
+}
+
+export async function purgeStaleDriverShaders() {
+  return invokeCommand("purge_stale_driver_shaders");
+}
+
+export async function getProjfsRuntimeStatus() {
+  return invokeCommand("get_projfs_runtime_status");
+}
+
+export async function enableProjfsWindowsFeature() {
+  return invokeCommand("enable_projfs_windows_feature");
+}
+
+export async function mountProjfsVirtualGame({
+  gameId,
+  gameTitle,
+  mountDir,
+  backingUrl = null,
+  backingFilePath = null,
+  totalBytes = null,
+  jobId = null,
+  files = []
+}) {
+  return invokeCommand("mount_projfs_virtual_game", {
+    gameId,
+    gameTitle,
+    mountDir,
+    backingUrl,
+    backingFilePath,
+    totalBytes,
+    jobId,
+    files: Array.isArray(files) ? files : []
+  });
+}
+
+export async function unmountProjfsVirtualGame(mountId) {
+  return invokeCommand("unmount_projfs_virtual_game", { mountId });
+}
+
+export async function deduplicateLibraryCas() {
+  return invokeCommand("deduplicate_library_cas");
+}
+
+export async function getShaderSwarmStatus() {
+  return invokeCommand("get_shader_swarm_status");
+}
+
+export async function syncGameShadersFromSwarm(gameId) {
+  return invokeCommand("sync_game_shaders_from_swarm", { gameId });
+}
+
+export async function archiveGameShaderBundle(gameId) {
+  return invokeCommand("archive_game_shader_bundle", { gameId });
+}
+
+export async function getQuickResumeSlots() {
+  return invokeCommand("get_quick_resume_slots");
+}
+
+export async function quickSwitchGameSlot(targetGameId) {
+  return invokeCommand("quick_switch_game_slot", { targetGameId });
+}
+
+export async function suspendToQuickResumeSlot(gameId) {
+  return invokeCommand("suspend_to_quick_resume_slot", { gameId });
+}
+
+export async function removeQuickResumeSlot(gameId, terminateProcess = false) {
+  return invokeCommand("remove_quick_resume_slot", {
+    gameId,
+    terminateProcess: Boolean(terminateProcess)
+  });
+}
+
+export async function getSteamCmStatus() {
+  return invokeCommand("get_steam_cm_status");
+}
+
+export async function connectSteamCm({ refreshToken = null, personaName = null } = {}) {
+  return invokeCommand("connect_steam_cm", {
+    refreshToken: refreshToken && String(refreshToken).trim() ? String(refreshToken).trim() : null,
+    personaName: personaName && String(personaName).trim() ? String(personaName).trim() : null
+  });
+}
+
+export async function disconnectSteamCm() {
+  return invokeCommand("disconnect_steam_cm");
+}
+
+export async function sendSteamChatMessage({ peerSteamId, peerName = null, message }) {
+  return invokeCommand("send_steam_chat_message", {
+    peerSteamId: String(peerSteamId || ""),
+    peerName: peerName ? String(peerName) : null,
+    message: String(message || "")
+  });
+}
+
+export async function getSteamChatMessages(peerSteamId = null) {
+  return invokeCommand("get_steam_chat_messages", {
+    peerSteamId: peerSteamId ? String(peerSteamId) : null
+  });
+}
+
+export async function getSteamPendingInvites() {
+  return invokeCommand("get_steam_pending_invites");
+}
+
+export async function respondSteamGameInvite({ inviteId, accept }) {
+  return invokeCommand("respond_steam_game_invite", {
+    inviteId: String(inviteId || ""),
+    accept: Boolean(accept)
+  });
+}
+
+export async function listSteamCloudFiles(appId) {
+  return invokeCommand("list_steam_cloud_files", { appId: Number(appId || 0) });
+}
+
+export async function syncSteamCloudSaves(gameId, appId) {
+  return invokeCommand("sync_steam_cloud_saves", { gameId, appId: Number(appId || 0) });
+}
+
+export async function getStoreDirectStatus() {
+  return invokeCommand("get_store_direct_status");
+}
+
+export async function loginGogDirect(authCodeOrToken) {
+  return invokeCommand("login_gog_direct", {
+    authCodeOrToken: String(authCodeOrToken || "").trim()
+  });
+}
+
+export async function loginEpicDirect(authorizationCode) {
+  return invokeCommand("login_epic_direct", {
+    authorizationCode: String(authorizationCode || "").trim()
+  });
+}
+
+export async function listGogOwnedTitles() {
+  return invokeCommand("list_gog_owned_titles");
+}
+
+export async function listEpicOwnedTitles() {
+  return invokeCommand("list_epic_owned_titles");
+}
+
+export async function startStoreDirectInstall({
+  store,
+  productId,
+  appName = null,
+  namespace = null,
+  title,
+  saveDir = null
+}) {
+  return invokeCommand("start_store_direct_install", {
+    store: String(store || ""),
+    productId: String(productId || ""),
+    appName: appName ? String(appName) : null,
+    namespace: namespace ? String(namespace) : null,
+    title: String(title || ""),
+    saveDir: saveDir && String(saveDir).trim() ? String(saveDir).trim() : null
+  });
+}
+
+export async function scanGameModGraph(gameId) {
+  return invokeCommand("scan_game_mod_graph", { gameId });
+}
+
+export async function registerGameModPack({ gameId, sourceDir, packName }) {
+  return invokeCommand("register_game_mod_pack", {
+    gameId,
+    sourceDir: String(sourceDir || ""),
+    packName: String(packName || "")
+  });
+}
+
+export async function saveGameModLoadout({ gameId, loadoutName, enabledPackIds }) {
+  return invokeCommand("save_game_mod_loadout", {
+    gameId,
+    loadoutName: String(loadoutName || ""),
+    enabledPackIds: Array.isArray(enabledPackIds) ? enabledPackIds : []
+  });
+}
+
+export async function activateGameModLoadout(gameId, loadoutId = null) {
+  return invokeCommand("activate_game_mod_loadout", {
+    gameId,
+    loadoutId: loadoutId ? String(loadoutId) : null
   });
 }
 

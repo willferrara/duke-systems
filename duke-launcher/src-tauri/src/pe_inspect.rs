@@ -128,7 +128,37 @@ fn rva_to_file_offset(rva: u32, sections: &[PeSection]) -> Option<usize> {
     Some(rva as usize)
 }
 
-pub fn parse_pe_header_and_imports(bytes: &[u8]) -> Result<(u16, u16, bool, Vec<String>), String> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeExportSymbol {
+    pub ordinal: u32,
+    pub name: Option<String>,
+    pub forwarder: Option<String>,
+    pub rva: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeExportInfo {
+    pub machine: u16,
+    pub is_32bit: bool,
+    pub dll_name: Option<String>,
+    pub ordinal_base: u32,
+    pub exported_names: Vec<String>,
+    pub symbols: Vec<PeExportSymbol>,
+}
+
+struct ParsedPeTables {
+    machine: u16,
+    characteristics: u16,
+    is_32bit: bool,
+    dd_base: usize,
+    opt_end: usize,
+    rva_count: u32,
+    sections: Vec<PeSection>,
+}
+
+fn parse_pe_tables(bytes: &[u8]) -> Result<ParsedPeTables, String> {
     if bytes.len() < 64 || &bytes[0..2] != b"MZ" {
         return Err("Not a valid MZ/DOS executable".to_string());
     }
@@ -154,11 +184,11 @@ pub fn parse_pe_header_and_imports(bytes: &[u8]) -> Result<(u16, u16, bool, Vec<
     let dd_base = if is_32bit { opt_off + 96 } else { opt_off + 112 };
     let rva_count_off = if is_32bit { opt_off + 92 } else { opt_off + 108 };
     let rva_count = read_u32_le(bytes, rva_count_off)?;
+    let opt_end = opt_off + size_of_opt;
 
-    let sec_base = opt_off + size_of_opt;
     let mut sections = Vec::with_capacity(num_sections.min(128));
     for i in 0..num_sections.min(128) {
-        let s_off = sec_base + i * 40;
+        let s_off = opt_end + i * 40;
         if s_off + 40 > bytes.len() {
             break;
         }
@@ -170,13 +200,26 @@ pub fn parse_pe_header_and_imports(bytes: &[u8]) -> Result<(u16, u16, bool, Vec<
         });
     }
 
+    Ok(ParsedPeTables {
+        machine,
+        characteristics,
+        is_32bit,
+        dd_base,
+        opt_end,
+        rva_count,
+        sections,
+    })
+}
+
+pub fn parse_pe_header_and_imports(bytes: &[u8]) -> Result<(u16, u16, bool, Vec<String>), String> {
+    let tables = parse_pe_tables(bytes)?;
     let mut dlls = Vec::new();
     let mut seen = HashSet::new();
-    if rva_count >= 2 && dd_base + 16 <= opt_off + size_of_opt {
-        let import_rva = read_u32_le(bytes, dd_base + 8)?;
-        let import_size = read_u32_le(bytes, dd_base + 12)?;
+    if tables.rva_count >= 2 && tables.dd_base + 16 <= tables.opt_end {
+        let import_rva = read_u32_le(bytes, tables.dd_base + 8)?;
+        let import_size = read_u32_le(bytes, tables.dd_base + 12)?;
         if import_rva != 0 && import_size != 0 {
-            if let Some(mut desc_off) = rva_to_file_offset(import_rva, &sections) {
+            if let Some(mut desc_off) = rva_to_file_offset(import_rva, &tables.sections) {
                 for _ in 0..2048 {
                     if desc_off + 20 > bytes.len() {
                         break;
@@ -188,7 +231,7 @@ pub fn parse_pe_header_and_imports(bytes: &[u8]) -> Result<(u16, u16, bool, Vec<
                         break;
                     }
                     if name_rva != 0 {
-                        if let Some(name_off) = rva_to_file_offset(name_rva, &sections) {
+                        if let Some(name_off) = rva_to_file_offset(name_rva, &tables.sections) {
                             if let Some(name) = read_c_string(bytes, name_off) {
                                 let key = name.to_ascii_lowercase();
                                 if seen.insert(key) {
@@ -203,7 +246,114 @@ pub fn parse_pe_header_and_imports(bytes: &[u8]) -> Result<(u16, u16, bool, Vec<
         }
     }
 
-    Ok((machine, characteristics, is_32bit, dlls))
+    Ok((tables.machine, tables.characteristics, tables.is_32bit, dlls))
+}
+
+/// Parses `IMAGE_DIRECTORY_ENTRY_EXPORT` (`DataDirectory[0]`) of a PE32 or PE32+ binary.
+pub fn parse_pe_exports(bytes: &[u8]) -> Result<PeExportInfo, String> {
+    let tables = parse_pe_tables(bytes)?;
+    let mut info = PeExportInfo {
+        machine: tables.machine,
+        is_32bit: tables.is_32bit,
+        dll_name: None,
+        ordinal_base: 0,
+        exported_names: Vec::new(),
+        symbols: Vec::new(),
+    };
+
+    if tables.rva_count < 1 || tables.dd_base + 8 > tables.opt_end {
+        return Ok(info);
+    }
+
+    let export_rva = read_u32_le(bytes, tables.dd_base)?;
+    let export_size = read_u32_le(bytes, tables.dd_base + 4)?;
+    if export_rva == 0 || export_size == 0 {
+        return Ok(info);
+    }
+
+    let Some(dir_off) = rva_to_file_offset(export_rva, &tables.sections) else {
+        return Ok(info);
+    };
+    if dir_off + 40 > bytes.len() {
+        return Ok(info);
+    }
+
+    let name_rva = read_u32_le(bytes, dir_off + 12)?;
+    let ordinal_base = read_u32_le(bytes, dir_off + 16)?;
+    let num_funcs = (read_u32_le(bytes, dir_off + 20)? as usize).min(16384);
+    let num_names = (read_u32_le(bytes, dir_off + 24)? as usize).min(16384);
+    let addr_funcs_rva = read_u32_le(bytes, dir_off + 28)?;
+    let addr_names_rva = read_u32_le(bytes, dir_off + 32)?;
+    let addr_ords_rva = read_u32_le(bytes, dir_off + 36)?;
+
+    info.ordinal_base = ordinal_base;
+    if name_rva != 0 {
+        if let Some(name_off) = rva_to_file_offset(name_rva, &tables.sections) {
+            info.dll_name = read_c_string(bytes, name_off);
+        }
+    }
+
+    let funcs_off = rva_to_file_offset(addr_funcs_rva, &tables.sections);
+    let names_off = rva_to_file_offset(addr_names_rva, &tables.sections);
+    let ords_off = rva_to_file_offset(addr_ords_rva, &tables.sections);
+
+    let mut ordinal_to_name: std::collections::HashMap<usize, String> =
+        std::collections::HashMap::with_capacity(num_names);
+    if let (Some(n_off), Some(o_off)) = (names_off, ords_off) {
+        for i in 0..num_names {
+            let nr_off = n_off + i * 4;
+            let or_off = o_off + i * 2;
+            if nr_off + 4 > bytes.len() || or_off + 2 > bytes.len() {
+                break;
+            }
+            let sym_name_rva = read_u32_le(bytes, nr_off)?;
+            let sym_ord_idx = read_u16_le(bytes, or_off)? as usize;
+            if let Some(s_off) = rva_to_file_offset(sym_name_rva, &tables.sections) {
+                if let Some(sym_name) = read_c_string(bytes, s_off) {
+                    if sym_ord_idx < num_funcs {
+                        ordinal_to_name.entry(sym_ord_idx).or_insert_with(|| sym_name.clone());
+                    }
+                    info.exported_names.push(sym_name);
+                }
+            }
+        }
+    }
+
+    let export_end = export_rva.saturating_add(export_size);
+    if let Some(f_off) = funcs_off {
+        for idx in 0..num_funcs {
+            let entry_off = f_off + idx * 4;
+            if entry_off + 4 > bytes.len() {
+                break;
+            }
+            let fn_rva = read_u32_le(bytes, entry_off)?;
+            if fn_rva == 0 {
+                continue;
+            }
+            let forwarder = if fn_rva >= export_rva && fn_rva < export_end {
+                rva_to_file_offset(fn_rva, &tables.sections)
+                    .and_then(|fo| read_c_string(bytes, fo))
+            } else {
+                None
+            };
+            info.symbols.push(PeExportSymbol {
+                ordinal: ordinal_base.saturating_add(idx as u32),
+                name: ordinal_to_name.get(&idx).cloned(),
+                forwarder,
+                rva: fn_rva,
+            });
+        }
+    }
+
+    Ok(info)
+}
+
+pub fn parse_pe_exports_file(path: &Path) -> Result<PeExportInfo, String> {
+    let file = File::open(path).map_err(|e| format!("Failed opening {}: {e}", path.display()))?;
+    let mmap = unsafe {
+        Mmap::map(&file).map_err(|e| format!("Failed mapping {}: {e}", path.display()))?
+    };
+    parse_pe_exports(&mmap)
 }
 
 pub fn parse_pe_machine_and_imports(bytes: &[u8]) -> Result<(u16, bool, Vec<String>), String> {
@@ -972,7 +1122,7 @@ pub async fn heal_game_runtime_dlls(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn build_synthetic_pe(is_32bit: bool, imported_dlls: &[&str]) -> Vec<u8> {
@@ -1150,5 +1300,95 @@ mod tests {
         assert!(set_pe_large_address_aware(&exe64, true).is_err());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    pub(crate) fn build_synthetic_pe_with_exports(
+        is_32bit: bool,
+        dll_name: &str,
+        exports: &[(&str, Option<&str>)],
+    ) -> Vec<u8> {
+        let mut buf = build_synthetic_pe(is_32bit, &[]);
+        let opt = 0x80usize + 4 + 20;
+        let dd_base = if is_32bit { opt + 96 } else { opt + 112 };
+        let edata_rva: u32 = 0x2000;
+        let edata_raw: usize = 0x400;
+        let edata_size: u32 = 0x600;
+        buf[dd_base..dd_base + 4].copy_from_slice(&edata_rva.to_le_bytes());
+        buf[dd_base + 4..dd_base + 8].copy_from_slice(&edata_size.to_le_bytes());
+
+        let n = exports.len() as u32;
+        let funcs_raw = edata_raw + 40;
+        let names_raw = funcs_raw + (exports.len() * 4);
+        let ords_raw = names_raw + (exports.len() * 4);
+        let mut str_cursor = ords_raw + (exports.len() * 2);
+
+        let dll_name_rva = edata_rva + (str_cursor - edata_raw) as u32;
+        buf[str_cursor..str_cursor + dll_name.len()].copy_from_slice(dll_name.as_bytes());
+        buf[str_cursor + dll_name.len()] = 0;
+        str_cursor += dll_name.len() + 1;
+
+        buf[edata_raw + 12..edata_raw + 16].copy_from_slice(&dll_name_rva.to_le_bytes());
+        buf[edata_raw + 16..edata_raw + 20].copy_from_slice(&1u32.to_le_bytes());
+        buf[edata_raw + 20..edata_raw + 24].copy_from_slice(&n.to_le_bytes());
+        buf[edata_raw + 24..edata_raw + 28].copy_from_slice(&n.to_le_bytes());
+        buf[edata_raw + 28..edata_raw + 32]
+            .copy_from_slice(&(edata_rva + (funcs_raw - edata_raw) as u32).to_le_bytes());
+        buf[edata_raw + 32..edata_raw + 36]
+            .copy_from_slice(&(edata_rva + (names_raw - edata_raw) as u32).to_le_bytes());
+        buf[edata_raw + 36..edata_raw + 40]
+            .copy_from_slice(&(edata_rva + (ords_raw - edata_raw) as u32).to_le_bytes());
+
+        for (i, (sym_name, forwarder)) in exports.iter().enumerate() {
+            let fn_rva = if let Some(fwd) = forwarder {
+                let rva = edata_rva + (str_cursor - edata_raw) as u32;
+                buf[str_cursor..str_cursor + fwd.len()].copy_from_slice(fwd.as_bytes());
+                buf[str_cursor + fwd.len()] = 0;
+                str_cursor += fwd.len() + 1;
+                rva
+            } else {
+                0x1000 + (i as u32) * 0x10
+            };
+            let f_off = funcs_raw + i * 4;
+            buf[f_off..f_off + 4].copy_from_slice(&fn_rva.to_le_bytes());
+
+            let sym_rva = edata_rva + (str_cursor - edata_raw) as u32;
+            buf[str_cursor..str_cursor + sym_name.len()].copy_from_slice(sym_name.as_bytes());
+            buf[str_cursor + sym_name.len()] = 0;
+            str_cursor += sym_name.len() + 1;
+
+            let n_off = names_raw + i * 4;
+            buf[n_off..n_off + 4].copy_from_slice(&sym_rva.to_le_bytes());
+            let o_off = ords_raw + i * 2;
+            buf[o_off..o_off + 2].copy_from_slice(&(i as u16).to_le_bytes());
+        }
+        buf
+    }
+
+    #[test]
+    fn pe32_and_pe64_export_directory_parses_symbols_and_forwarders() {
+        for is_32bit in [true, false] {
+            let bytes = build_synthetic_pe_with_exports(
+                is_32bit,
+                "version.dll",
+                &[
+                    ("GetFileVersionInfoW", Some("version_orig.GetFileVersionInfoW")),
+                    ("VerQueryValueW", None),
+                ],
+            );
+            let parsed = parse_pe_exports(&bytes).unwrap();
+            assert_eq!(parsed.is_32bit, is_32bit);
+            assert_eq!(parsed.dll_name.as_deref(), Some("version.dll"));
+            assert_eq!(parsed.ordinal_base, 1);
+            assert_eq!(
+                parsed.exported_names,
+                vec!["GetFileVersionInfoW".to_string(), "VerQueryValueW".to_string()]
+            );
+            assert_eq!(parsed.symbols.len(), 2);
+            assert_eq!(
+                parsed.symbols[0].forwarder.as_deref(),
+                Some("version_orig.GetFileVersionInfoW")
+            );
+            assert_eq!(parsed.symbols[1].forwarder, None);
+        }
     }
 }

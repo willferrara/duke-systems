@@ -26,6 +26,16 @@ const OVERLAPPED_READ_CHUNK_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct IoRingCapability {
+    pub supported: bool,
+    pub windows_build: u32,
+    pub min_required_build: u32,
+    pub apis_resolved: bool,
+    pub backend: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PrefetchFileStat {
     pub path: String,
     pub file_size_bytes: u64,
@@ -43,8 +53,16 @@ pub struct PrefetchReport {
     pub budget_bytes: u64,
     pub available_phys_mb: u64,
     pub used_prefetch_api: bool,
+    #[serde(default)]
+    pub used_ioring_api: bool,
+    #[serde(default)]
+    pub windows_build: u32,
     pub files: Vec<PrefetchFileStat>,
 }
+
+const IORING_MIN_WIN11_BUILD: u32 = 22621;
+const IORING_BATCH_SLOTS: usize = 16;
+const IORING_SLOT_BYTES: usize = 512 * 1024;
 
 #[cfg(target_os = "windows")]
 #[repr(C)]
@@ -61,6 +79,190 @@ type PrefetchVirtualMemoryFn = unsafe extern "system" fn(
     virtual_addresses: *const Win32MemoryRangeEntry,
     flags: u32,
 ) -> i32;
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct RtlOsVersionInfoExW {
+    os_version_info_size: u32,
+    major_version: u32,
+    minor_version: u32,
+    build_number: u32,
+    platform_id: u32,
+    sz_csd_version: [u16; 128],
+    service_pack_major: u16,
+    service_pack_minor: u16,
+    suite_mask: u16,
+    product_type: u8,
+    reserved: u8,
+}
+
+#[cfg(target_os = "windows")]
+type RtlGetVersionFn = unsafe extern "system" fn(*mut RtlOsVersionInfoExW) -> i32;
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct IoringCreateFlags {
+    required: u32,
+    advisory: u32,
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IoringHandleRef {
+    kind: u32,
+    handle: isize,
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IoringBufferRef {
+    kind: u32,
+    address: *mut core::ffi::c_void,
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct IoringCqe {
+    user_data: usize,
+    result_code: i32,
+    information: usize,
+}
+
+#[cfg(target_os = "windows")]
+type CreateIoRingFn = unsafe extern "system" fn(
+    ioring_version: u32,
+    flags: IoringCreateFlags,
+    submission_queue_size: u32,
+    completion_queue_size: u32,
+    h: *mut *mut core::ffi::c_void,
+) -> i32;
+
+#[cfg(target_os = "windows")]
+type BuildIoRingReadFileFn = unsafe extern "system" fn(
+    io_ring: *mut core::ffi::c_void,
+    file_ref: IoringHandleRef,
+    data_ref: IoringBufferRef,
+    number_of_bytes_to_read: u32,
+    file_offset: u64,
+    user_data: usize,
+    sqe_flags: u32,
+) -> i32;
+
+#[cfg(target_os = "windows")]
+type SubmitIoRingFn = unsafe extern "system" fn(
+    io_ring: *mut core::ffi::c_void,
+    wait_operations: u32,
+    milliseconds: u32,
+    submitted_entries: *mut u32,
+) -> i32;
+
+#[cfg(target_os = "windows")]
+type PopIoRingCompletionFn =
+    unsafe extern "system" fn(io_ring: *mut core::ffi::c_void, cqe: *mut IoringCqe) -> i32;
+
+#[cfg(target_os = "windows")]
+type CloseIoRingFn = unsafe extern "system" fn(io_ring: *mut core::ffi::c_void) -> i32;
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+struct IoRingProcs {
+    create_io_ring: CreateIoRingFn,
+    build_read_file: BuildIoRingReadFileFn,
+    submit_io_ring: SubmitIoRingFn,
+    pop_completion: PopIoRingCompletionFn,
+    close_io_ring: CloseIoRingFn,
+}
+
+#[cfg(target_os = "windows")]
+static IORING_PROCS: OnceLock<Option<IoRingProcs>> = OnceLock::new();
+#[cfg(target_os = "windows")]
+static WINDOWS_BUILD_CACHE: OnceLock<u32> = OnceLock::new();
+
+#[cfg(target_os = "windows")]
+fn get_ioring_procs() -> Option<IoRingProcs> {
+    *IORING_PROCS.get_or_init(|| {
+        use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress, LoadLibraryA};
+        use windows::core::s;
+
+        unsafe {
+            let hmod = GetModuleHandleA(s!("kernelbase.dll"))
+                .or_else(|_| LoadLibraryA(s!("kernelbase.dll")))
+                .ok()?;
+            let create = GetProcAddress(hmod, s!("CreateIoRing"))?;
+            let build = GetProcAddress(hmod, s!("BuildIoRingReadFile"))?;
+            let submit = GetProcAddress(hmod, s!("SubmitIoRing"))?;
+            let pop = GetProcAddress(hmod, s!("PopIoRingCompletion"))?;
+            let close = GetProcAddress(hmod, s!("CloseIoRing"))?;
+            Some(IoRingProcs {
+                create_io_ring: std::mem::transmute::<unsafe extern "system" fn() -> isize, CreateIoRingFn>(create),
+                build_read_file: std::mem::transmute::<unsafe extern "system" fn() -> isize, BuildIoRingReadFileFn>(build),
+                submit_io_ring: std::mem::transmute::<unsafe extern "system" fn() -> isize, SubmitIoRingFn>(submit),
+                pop_completion: std::mem::transmute::<unsafe extern "system" fn() -> isize, PopIoRingCompletionFn>(pop),
+                close_io_ring: std::mem::transmute::<unsafe extern "system" fn() -> isize, CloseIoRingFn>(close),
+            })
+        }
+    })
+}
+
+/// Returns the true Windows OS build number via `ntdll!RtlGetVersion`.
+pub fn windows_build_number() -> u32 {
+    #[cfg(target_os = "windows")]
+    {
+        *WINDOWS_BUILD_CACHE.get_or_init(|| {
+            use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+            use windows::core::s;
+
+            unsafe {
+                let Ok(hmod) = GetModuleHandleA(s!("ntdll.dll")) else {
+                    return 0;
+                };
+                let Some(proc_addr) = GetProcAddress(hmod, s!("RtlGetVersion")) else {
+                    return 0;
+                };
+                let rtl_ver = std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    RtlGetVersionFn,
+                >(proc_addr);
+                let mut info: RtlOsVersionInfoExW = std::mem::zeroed();
+                info.os_version_info_size = std::mem::size_of::<RtlOsVersionInfoExW>() as u32;
+                if rtl_ver(&mut info) >= 0 {
+                    info.build_number
+                } else {
+                    0
+                }
+            }
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        0
+    }
+}
+
+/// Probes whether Windows 11 22H2+ Kernel `IoRing` (`CreateIoRing`) is supported and resolved.
+pub fn probe_ioring_support() -> IoRingCapability {
+    let build = windows_build_number();
+    #[cfg(target_os = "windows")]
+    let resolved = get_ioring_procs().is_some();
+    #[cfg(not(target_os = "windows"))]
+    let resolved = false;
+    let supported = build >= IORING_MIN_WIN11_BUILD && resolved;
+    IoRingCapability {
+        supported,
+        windows_build: build,
+        min_required_build: IORING_MIN_WIN11_BUILD,
+        apis_resolved: resolved,
+        backend: if supported {
+            format!("Win11 Kernel IoRing (Build {})", build)
+        } else {
+            format!("PrefetchVirtualMemory + Overlapped Fallback (Build {})", build)
+        },
+    }
+}
 
 #[cfg(target_os = "windows")]
 static PREFETCH_VIRTUAL_MEMORY_PROC: OnceLock<Option<PrefetchVirtualMemoryFn>> = OnceLock::new();
@@ -191,7 +393,120 @@ fn plan_prefetch_slices(candidates: &[(PathBuf, u64)], avail_phys_bytes: u64) ->
 }
 
 #[cfg(target_os = "windows")]
-fn warm_single_file_windows(path: &Path, target_bytes: u64) -> Result<(u64, bool), String> {
+fn warm_file_via_ioring(
+    wide_path: &[u16],
+    target_bytes: u64,
+    procs: &IoRingProcs,
+) -> Result<u64, String> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_SEQUENTIAL_SCAN, FILE_GENERIC_READ,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::core::PCWSTR;
+
+    if target_bytes == 0 {
+        return Ok(0);
+    }
+
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide_path.as_ptr()),
+            FILE_GENERIC_READ.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+            None,
+        )
+    }
+    .map_err(|e| format!("IoRing CreateFileW failed: {}", e))?;
+
+    let mut ring: *mut core::ffi::c_void = std::ptr::null_mut();
+    let flags = IoringCreateFlags::default();
+    let mut create_hr = -1i32;
+    for ver in [3u32, 2u32, 1u32] {
+        create_hr = unsafe { (procs.create_io_ring)(ver, flags, 64, 64, &mut ring) };
+        if create_hr >= 0 && !ring.is_null() {
+            break;
+        }
+    }
+    if create_hr < 0 || ring.is_null() {
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        return Err(format!("CreateIoRing failed: 0x{:08X}", create_hr as u32));
+    }
+
+    let mut slot_buffers: Vec<Vec<u8>> = (0..IORING_BATCH_SLOTS)
+        .map(|_| vec![0u8; IORING_SLOT_BYTES])
+        .collect();
+    let mut offset = 0u64;
+    let mut total_read = 0u64;
+    let file_ref = IoringHandleRef {
+        kind: 0,
+        handle: handle.0 as isize,
+    };
+
+    while offset < target_bytes {
+        let mut queued = 0u32;
+        for (slot_idx, buf) in slot_buffers.iter_mut().enumerate() {
+            if offset >= target_bytes {
+                break;
+            }
+            let chunk = (target_bytes - offset).min(IORING_SLOT_BYTES as u64) as u32;
+            if chunk == 0 {
+                break;
+            }
+            let data_ref = IoringBufferRef {
+                kind: 0,
+                address: buf.as_mut_ptr().cast::<core::ffi::c_void>(),
+            };
+            let hr = unsafe {
+                (procs.build_read_file)(ring, file_ref, data_ref, chunk, offset, slot_idx, 0)
+            };
+            if hr < 0 {
+                break;
+            }
+            offset = offset.saturating_add(chunk as u64);
+            queued += 1;
+        }
+        if queued == 0 {
+            break;
+        }
+        let mut submitted = 0u32;
+        let submit_hr = unsafe { (procs.submit_io_ring)(ring, queued, 15_000, &mut submitted) };
+        if submit_hr < 0 {
+            unsafe {
+                let _ = (procs.close_io_ring)(ring);
+                let _ = CloseHandle(handle);
+            }
+            return Err(format!("SubmitIoRing failed: 0x{:08X}", submit_hr as u32));
+        }
+
+        let mut drained = 0u32;
+        while drained < queued {
+            let mut cqe = IoringCqe::default();
+            let pop_hr = unsafe { (procs.pop_completion)(ring, &mut cqe) };
+            if pop_hr != 0 {
+                break;
+            }
+            drained += 1;
+            if cqe.result_code >= 0 {
+                total_read = total_read.saturating_add(cqe.information as u64);
+            }
+        }
+    }
+
+    unsafe {
+        let _ = (procs.close_io_ring)(ring);
+        let _ = CloseHandle(handle);
+    }
+    Ok(total_read)
+}
+
+#[cfg(target_os = "windows")]
+fn warm_single_file_windows(path: &Path, target_bytes: u64) -> Result<(u64, bool, bool), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Foundation::{CloseHandle, ERROR_IO_PENDING, HANDLE, WAIT_OBJECT_0};
     use windows::Win32::Storage::FileSystem::{
@@ -209,7 +524,7 @@ fn warm_single_file_windows(path: &Path, target_bytes: u64) -> Result<(u64, bool
     use windows::core::{HRESULT, PCWSTR};
 
     if target_bytes == 0 {
-        return Ok((0, false));
+        return Ok((0, false, false));
     }
 
     let wide: Vec<u16> = path
@@ -292,7 +607,17 @@ fn warm_single_file_windows(path: &Path, target_bytes: u64) -> Result<(u64, bool
         let _ = CloseHandle(map_file_handle);
     }
 
-    // 3. Pair with parallel overlapped read-ahead (`FILE_FLAG_OVERLAPPED`) using two pipelined 1 MiB buffers.
+    // 3. On Win11 22H2+ (build >= 22621), submit batched kernel IoRing reads; otherwise fall back to double-buffered overlapped ReadFile.
+    let cap = probe_ioring_support();
+    if cap.supported
+        && let Some(procs) = get_ioring_procs()
+        && let Ok(ioring_warmed) = warm_file_via_ioring(&wide, target_bytes, &procs)
+        && ioring_warmed > 0
+    {
+        return Ok((ioring_warmed, used_prefetch, true));
+    }
+
+    // Fallback: Pair with parallel overlapped read-ahead (`FILE_FLAG_OVERLAPPED`) using two pipelined 1 MiB buffers.
     // SAFETY: Valid wide path opened with `FILE_FLAG_OVERLAPPED` for async NVMe read-ahead.
     let async_handle = unsafe {
         CreateFileW(
@@ -424,11 +749,11 @@ fn warm_single_file_windows(path: &Path, target_bytes: u64) -> Result<(u64, bool
         let _ = CloseHandle(async_handle);
     }
 
-    Ok((warmed_total, used_prefetch))
+    Ok((warmed_total, used_prefetch, false))
 }
 
 #[cfg(not(target_os = "windows"))]
-fn warm_single_file_windows(path: &Path, target_bytes: u64) -> Result<(u64, bool), String> {
+fn warm_single_file_windows(path: &Path, target_bytes: u64) -> Result<(u64, bool, bool), String> {
     use std::io::Read;
     let mut file = fs::File::open(path).map_err(|e| format!("Failed opening {}: {}", path.display(), e))?;
     let mut buf = vec![0u8; OVERLAPPED_READ_CHUNK_BYTES];
@@ -443,7 +768,7 @@ fn warm_single_file_windows(path: &Path, target_bytes: u64) -> Result<(u64, bool
         total += n as u64;
         remaining -= n as u64;
     }
-    Ok((total, false))
+    Ok((total, false, false))
 }
 
 /// Scans `game_dir` for large game archives (> 32 MiB) capped at 25% of available physical RAM
@@ -478,6 +803,7 @@ pub fn warm_game_assets_with_options(
 
     let started = Instant::now();
     let avail_phys = query_available_physical_ram_bytes();
+    let win_build = windows_build_number();
     let candidates = collect_archive_candidates(game_dir, min_file_bytes);
     let (budget_bytes, plan) = plan_prefetch_slices_with_pct(&candidates, avail_phys, budget_pct);
 
@@ -491,12 +817,15 @@ pub fn warm_game_assets_with_options(
             budget_bytes,
             available_phys_mb: avail_phys / (1024 * 1024),
             used_prefetch_api: false,
+            used_ioring_api: false,
+            windows_build: win_build,
             files: Vec::new(),
         });
     }
 
     let total_warmed = AtomicU64::new(0);
     let used_api = AtomicBool::new(false);
+    let used_ioring = AtomicBool::new(false);
     let next_idx = AtomicU64::new(0);
     let file_stats = std::sync::Mutex::new(Vec::<PrefetchFileStat>::with_capacity(plan.len()));
 
@@ -509,6 +838,7 @@ pub fn warm_game_assets_with_options(
         for _ in 0..worker_count {
             let total_ref = &total_warmed;
             let used_ref = &used_api;
+            let ioring_ref = &used_ioring;
             let idx_ref = &next_idx;
             let stats_ref = &file_stats;
             let plan_ref = &plan;
@@ -519,10 +849,13 @@ pub fn warm_game_assets_with_options(
                     break;
                 }
                 let (ref path, size_bytes, target_bytes) = plan_ref[i];
-                if let Ok((warmed, prefetch_ok)) = warm_single_file_windows(path, target_bytes) {
+                if let Ok((warmed, prefetch_ok, ioring_ok)) = warm_single_file_windows(path, target_bytes) {
                     total_ref.fetch_add(warmed, Ordering::Relaxed);
                     if prefetch_ok {
                         used_ref.store(true, Ordering::Relaxed);
+                    }
+                    if ioring_ok {
+                        ioring_ref.store(true, Ordering::Relaxed);
                     }
                     if let Ok(mut guard) = stats_ref.lock() {
                         guard.push(PrefetchFileStat {
@@ -553,6 +886,8 @@ pub fn warm_game_assets_with_options(
         budget_bytes,
         available_phys_mb: avail_phys / (1024 * 1024),
         used_prefetch_api: used_api.load(Ordering::Relaxed),
+        used_ioring_api: used_ioring.load(Ordering::Relaxed),
+        windows_build: win_build,
         files,
     })
 }
@@ -578,6 +913,7 @@ pub fn warm_single_file_with_options(
 
     let started = Instant::now();
     let avail_phys = query_available_physical_ram_bytes();
+    let win_build = windows_build_number();
     let size_bytes = fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
     if size_bytes < min_file_bytes {
         return Ok(PrefetchReport {
@@ -589,6 +925,8 @@ pub fn warm_single_file_with_options(
             budget_bytes: (avail_phys.saturating_mul(budget_pct.clamp(0, 40) as u64)) / 100,
             available_phys_mb: avail_phys / (1024 * 1024),
             used_prefetch_api: false,
+            used_ioring_api: false,
+            windows_build: win_build,
             files: Vec::new(),
         });
     }
@@ -600,7 +938,7 @@ pub fn warm_single_file_with_options(
     }
 
     let (_, total_size, target_bytes) = plan[0];
-    let (warmed_bytes, used_prefetch_api) = warm_single_file_windows(file_path, target_bytes)?;
+    let (warmed_bytes, used_prefetch_api, used_ioring_api) = warm_single_file_windows(file_path, target_bytes)?;
     let elapsed = started.elapsed();
     let elapsed_secs = elapsed.as_secs_f64().max(0.000_1);
     let warmed_mb = (warmed_bytes as f64 / (1024.0 * 1024.0) * 10.0).round() / 10.0;
@@ -616,6 +954,8 @@ pub fn warm_single_file_with_options(
         budget_bytes,
         available_phys_mb: avail_phys / (1024 * 1024),
         used_prefetch_api,
+        used_ioring_api,
+        windows_build: win_build,
         files: vec![PrefetchFileStat {
             path: file_path.to_string_lossy().to_string(),
             file_size_bytes: total_size,
@@ -692,6 +1032,27 @@ mod tests {
         let single = warm_single_file_with_options(&rvz_path, 64 * 1024, 25).unwrap();
         assert_eq!(single.files_warmed, 1);
         assert_eq!(single.warmed_bytes, 256 * 1024);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ioring_capability_probe_and_fallback_contract() {
+        let cap = probe_ioring_support();
+        assert_eq!(cap.min_required_build, IORING_MIN_WIN11_BUILD);
+        assert!(!cap.backend.is_empty());
+
+        let dir = std::env::temp_dir().join(format!("duke_ioring_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let pak = dir.join("chunk_test.pak");
+        fs::write(&pak, vec![0xA5u8; 768 * 1024]).unwrap();
+
+        let report = warm_single_file_with_options(&pak, 64 * 1024, 25).unwrap();
+        assert_eq!(report.files_warmed, 1);
+        assert_eq!(report.warmed_bytes, 768 * 1024);
+        #[cfg(target_os = "windows")]
+        assert_eq!(report.used_ioring_api, cap.supported);
 
         let _ = fs::remove_dir_all(&dir);
     }

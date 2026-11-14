@@ -165,7 +165,7 @@ struct SwarmLocalState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
-enum SwarmWireRequest {
+pub(crate) enum SwarmWireRequest {
     GetBeacon,
     BeamManifest {
         game_key: String,
@@ -184,11 +184,16 @@ enum SwarmWireRequest {
         save_key: String,
         have_hashes: Vec<String>,
     },
+    ShaderPull {
+        game_blake3: String,
+        gpu_key: String,
+        driver_version: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
-enum SwarmWireResponse {
+pub(crate) enum SwarmWireResponse {
     Beacon(SwarmBeacon),
     Manifest(DkManifest),
     DeltaBundle {
@@ -200,6 +205,12 @@ enum SwarmWireResponse {
         bundle_bytes: Option<Vec<u8>>,
         applied: bool,
         conflict_backup: bool,
+    },
+    ShaderBundle {
+        found: bool,
+        bundle_zst_bytes: Vec<u8>,
+        key: String,
+        file_count: usize,
     },
     Error {
         message: String,
@@ -687,6 +698,11 @@ async fn handle_tcp_connection(mut stream: TcpStream) -> Result<(), String> {
                 }
             }
         }
+        SwarmWireRequest::ShaderPull {
+            game_blake3,
+            gpu_key,
+            driver_version,
+        } => crate::shader_swarm::serve_shader_pull(&game_blake3, &gpu_key, &driver_version),
     };
 
     write_frame(&mut stream, &response).await
@@ -718,6 +734,33 @@ fn normalize_peer_socket_addr(raw: &str) -> String {
     } else {
         format!("{}:{}", trimmed, SWARM_DEFAULT_TCP_PORT)
     }
+}
+
+pub(crate) async fn send_tcp_request_public(
+    addr: &str,
+    req: &SwarmWireRequest,
+) -> Result<SwarmWireResponse, String> {
+    send_tcp_request(addr, req).await
+}
+
+pub(crate) fn known_peer_addrs_public() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    if let Ok(guard) = peer_registry().lock() {
+        for peer in guard.values() {
+            if seen.insert(peer.addr.clone()) {
+                out.push((peer.node_name.clone(), peer.addr.clone()));
+            }
+        }
+    }
+    let settings = crate::load_settings_standalone();
+    for raw in settings.swarm_peers {
+        let norm = normalize_peer_socket_addr(&raw);
+        if seen.insert(norm.clone()) {
+            out.push((raw, norm));
+        }
+    }
+    out
 }
 
 async fn send_tcp_request(addr: &str, req: &SwarmWireRequest) -> Result<SwarmWireResponse, String> {
