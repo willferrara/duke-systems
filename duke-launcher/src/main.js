@@ -1883,16 +1883,20 @@ async function initOverlayHudMode() {
     }
   });
 
-  await listenEvent("overlay-opened", (payload) => {
-    if (payload?.visible) {
-      refreshOverlayState();
-      setStatus("Overlay active (Guide / Alt+G)");
-    }
-  });
-  await listenEvent("game-running-state", () => refreshOverlayState());
-  await listenEvent("game-suspend-state", () => refreshOverlayState());
+  try {
+    await listenEvent("overlay-opened", (payload) => {
+      if (payload?.visible) {
+        refreshOverlayState();
+        setStatus("Overlay active (Guide / Alt+G)");
+      }
+    });
+    await listenEvent("game-running-state", () => refreshOverlayState());
+    await listenEvent("game-suspend-state", () => refreshOverlayState());
 
-  await refreshOverlayState();
+    await refreshOverlayState();
+  } catch (err) {
+    setStatus(`Overlay init warning: ${String(err)}`);
+  }
 }
 
 function buildDownloadJobCardHtml(job) {
@@ -6593,25 +6597,33 @@ function startGamepadControllerLoop() {
 
 async function init() {
   if (new URLSearchParams(window.location.search).get("mode") === "overlay") {
-    await initOverlayHudMode();
+    try {
+      await initOverlayHudMode();
+    } catch (err) {
+      console.error("Overlay HUD init failed:", err);
+    }
     return;
   }
   applyTheme(state.activeTheme);
   renderThemes();
   renderSources();
   syncCatalogFilterControlsToDom();
-  initWindowControls({
-    onCtrlK: () => {
-      const inp = state.activeTab === "catalog" ? el("input-catalog-search") : el("search-input");
-      if (inp) {
-        inp.focus();
-        inp.select();
+  try {
+    initWindowControls({
+      onCtrlK: () => {
+        const inp = state.activeTab === "catalog" ? el("input-catalog-search") : el("search-input");
+        if (inp) {
+          inp.focus();
+          inp.select();
+        }
       }
-    }
-  });
+    });
+  } catch (err) {
+    console.error("Window controls init warning:", err);
+  }
   wireEvents();
   switchSettingsTab("essentials");
-  initDragAndDropIngestion();
+  initDragAndDropIngestion().catch(() => {});
 
   getLauncherSettings()
     .then((settings) => {
@@ -6869,9 +6881,21 @@ async function init() {
     }
   });
 
-  await refreshAllData();
-  loadEmulatorSettingsSection();
-  refreshFriendsPanel(true);
+  try {
+    await refreshAllData();
+  } catch (err) {
+    console.error("Initial refreshAllData failed:", err);
+  }
+  try {
+    await Promise.resolve(loadEmulatorSettingsSection());
+  } catch (err) {
+    console.error("Initial loadEmulatorSettingsSection failed:", err);
+  }
+  try {
+    await Promise.resolve(refreshFriendsPanel(true));
+  } catch (err) {
+    console.error("Initial refreshFriendsPanel failed:", err);
+  }
   const pendingProtocolUrls = await takePendingProtocolUrls().catch(() => []);
   if (Array.isArray(pendingProtocolUrls) && pendingProtocolUrls.length > 0) {
     pendingProtocolUrls.forEach((u) => markClipboardUrlHandled(u));
@@ -6880,7 +6904,13 @@ async function init() {
     const suffix = pendingProtocolUrls.length === 1 ? "" : "s";
     showToast(`Queued ${pendingProtocolUrls.length} download${suffix} from browser link.`, "success", 3400);
   }
-  startGamepadControllerLoop();
+  try {
+    startGamepadControllerLoop();
+  } catch (err) {
+    console.error("Gamepad loop init warning:", err);
+  }
 }
 
-init();
+init().catch((err) => {
+  console.error("Duke Launcher startup failed:", err);
+});

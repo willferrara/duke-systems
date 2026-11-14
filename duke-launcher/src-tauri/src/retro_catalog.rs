@@ -228,7 +228,8 @@ impl<'a> CursorReader<'a> {
         if self.remaining() < 4 {
             return Err("Unexpected EOF reading u32".to_string());
         }
-        let v = u32::from_be_bytes(self.data[self.pos..self.pos + 4].try_into().unwrap());
+        let b = &self.data[self.pos..self.pos + 4];
+        let v = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
         self.pos += 4;
         Ok(v)
     }
@@ -237,7 +238,8 @@ impl<'a> CursorReader<'a> {
         if self.remaining() < 8 {
             return Err("Unexpected EOF reading u64".to_string());
         }
-        let v = u64::from_be_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
+        let b = &self.data[self.pos..self.pos + 8];
+        let v = u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
         self.pos += 8;
         Ok(v)
     }
@@ -296,13 +298,15 @@ impl<'a> CursorReader<'a> {
             }
             0xca => {
                 let b = self.read_bytes(4)?;
-                Ok(MsgPackVal::Float(f64::from(f32::from_be_bytes(
-                    b.try_into().unwrap(),
-                ))))
+                Ok(MsgPackVal::Float(f64::from(f32::from_be_bytes([
+                    b[0], b[1], b[2], b[3],
+                ]))))
             }
             0xcb => {
                 let b = self.read_bytes(8)?;
-                Ok(MsgPackVal::Float(f64::from_be_bytes(b.try_into().unwrap())))
+                Ok(MsgPackVal::Float(f64::from_be_bytes([
+                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                ])))
             }
             0xcc => Ok(MsgPackVal::Uint(u64::from(self.read_u8()?))),
             0xcd => Ok(MsgPackVal::Uint(u64::from(self.read_u16_be()?))),
@@ -411,7 +415,9 @@ pub fn parse_libretro_rdb(bytes: &[u8]) -> Result<Vec<RdbGameRecord>, String> {
     if bytes.len() < 16 || &bytes[0..8] != b"RARCHDB\0" {
         return Err("Not a valid Libretro RDB file (missing RARCHDB\\0 header)".to_string());
     }
-    let metadata_offset = u64::from_be_bytes(bytes[8..16].try_into().unwrap()) as usize;
+    let metadata_offset = u64::from_be_bytes([
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    ]) as usize;
     let end = if metadata_offset >= 16 && metadata_offset <= bytes.len() {
         metadata_offset
     } else {
@@ -905,7 +911,7 @@ pub async fn harvest_retro_catalog_internal(
 
     for spec in targets {
         let sem_c = sem.clone();
-        handles.push(tokio::spawn(async move {
+        handles.push(tauri::async_runtime::spawn(async move {
             let _permit = sem_c.acquire_owned().await.ok();
             let recs = fetch_single_platform_rdb(spec).await.unwrap_or_default();
             (spec, recs)
@@ -984,7 +990,8 @@ pub fn spawn_background_retro_catalog_sync_if_needed(app: AppHandle) {
     if sync_state.last_platform_sync.len() >= 20 {
         return;
     }
-    tokio::spawn(async move {
+    // Use Tauri's managed async runtime because `.setup()` runs synchronously before the main thread enters Tokio.
+    tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(4)).await;
         let _ = harvest_retro_catalog_internal(Some(app), false).await;
     });

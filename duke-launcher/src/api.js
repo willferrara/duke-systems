@@ -468,8 +468,13 @@ export function parseSteamBbcodeToSafeHtml(raw) {
 }
 
 export async function listenEvent(eventName, callback) {
-  if (window.__TAURI__?.event?.listen) {
-    return window.__TAURI__.event.listen(eventName, (event) => callback(event.payload));
+  try {
+    const listenFn = window.__TAURI__?.event?.listen;
+    if (typeof listenFn === "function") {
+      return await listenFn(eventName, (event) => callback(event.payload));
+    }
+  } catch {
+    // WebView event capability or Tauri IPC may be unavailable during early startup or browser preview.
   }
   return () => {};
 }
@@ -479,7 +484,12 @@ export function listenDownloadProgress(callback) {
 }
 
 export function initWindowControls({ onCtrlK } = {}) {
-  const win = window.__TAURI__?.window?.getCurrentWindow?.();
+  let win = null;
+  try {
+    win = window.__TAURI__?.window?.getCurrentWindow?.() ?? null;
+  } catch {
+    win = null;
+  }
   const minBtn = document.getElementById("win-btn-min");
   const maxBtn = document.getElementById("win-btn-max");
   const closeBtn = document.getElementById("win-btn-close");

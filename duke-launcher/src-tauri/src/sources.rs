@@ -179,7 +179,9 @@ pub fn parse_hydra_manifest_str(
 }
 
 pub(crate) fn load_sources_from_disk_standalone() -> Vec<ImportedSourceRecord> {
-    let _guard = get_sources_io_lock().lock().unwrap();
+    let _guard = get_sources_io_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let Ok(path) = crate::get_app_data_file_standalone("sources.json") else {
         return Vec::new();
     };
@@ -198,7 +200,9 @@ pub(crate) fn load_sources_from_disk_standalone() -> Vec<ImportedSourceRecord> {
 pub(crate) fn save_sources_to_disk_standalone(
     records: &[ImportedSourceRecord],
 ) -> Result<(), String> {
-    let _guard = get_sources_io_lock().lock().unwrap();
+    let _guard = get_sources_io_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let path = crate::get_app_data_file_standalone("sources.json")?;
     let serialized = serde_json::to_string(records)
         .map_err(|e| format!("Failed to serialize sources.json: {}", e))?;
@@ -293,7 +297,7 @@ fn upsert_source_record(
     }
 
     save_sources_to_disk_standalone(&records)?;
-    Ok(summary.unwrap())
+    summary.ok_or_else(|| "Failed to construct imported source summary.".to_string())
 }
 
 pub(crate) fn search_imported_sources_from_records(

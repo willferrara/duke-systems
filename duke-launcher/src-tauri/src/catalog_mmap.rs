@@ -503,6 +503,18 @@ fn global_catalog_slot() -> &'static RwLock<Option<MappedCatalog>> {
     GLOBAL_MMAP_CATALOG.get_or_init(|| RwLock::new(None))
 }
 
+fn read_catalog_slot() -> std::sync::RwLockReadGuard<'static, Option<MappedCatalog>> {
+    global_catalog_slot()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn write_catalog_slot() -> std::sync::RwLockWriteGuard<'static, Option<MappedCatalog>> {
+    global_catalog_slot()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[inline]
 unsafe fn read_struct_unaligned<T: Copy>(bytes: &[u8], offset: usize) -> Result<T, String> {
     let size = core::mem::size_of::<T>();
@@ -886,7 +898,8 @@ pub fn serialize_dkcat(cache: &CatalogCacheFile) -> Result<Vec<u8>, String> {
 }
 
 impl MappedCatalog {
-    /// Zero-copy opens `catalog.dkcat` via OS `mmap`, validating only the 72-byte header and section bounds.
+    /// Zero-copy opens `catalog.dkcat` via OS `mmap`, validating the 72-byte header, stride alignment,
+    /// string-pool offsets, and trigram table bounds before casting or indexing.
     pub fn open(path: &Path) -> Result<Self, String> {
         let started = Instant::now();
         let file =
@@ -894,6 +907,13 @@ impl MappedCatalog {
         let mmap =
             unsafe { Mmap::map(&file) }.map_err(|e| format!("Mmap failed for {}: {}", path.display(), e))?;
         let bytes: &[u8] = &mmap;
+        let header_len = core::mem::size_of::<DkCatHeader>();
+        if bytes.len() < header_len {
+            return Err(format!(
+                "Truncated .dkcat archive (needed {header_len} header bytes, have {})",
+                bytes.len()
+            ));
+        }
 
         let header: DkCatHeader = unsafe { read_struct_unaligned(bytes, 0)? };
         if header.magic != DKCAT_MAGIC {
@@ -903,19 +923,31 @@ impl MappedCatalog {
             return Err(format!("Unsupported .dkcat version {}", header.version));
         }
 
+        let rec_stride = core::mem::size_of::<CatalogRecord>();
         let rec_bytes = (header.record_count as usize)
-            .checked_mul(core::mem::size_of::<CatalogRecord>())
+            .checked_mul(rec_stride)
             .ok_or_else(|| "Corrupt record count in .dkcat".to_string())?;
-        let rec_start = header.records_offset as usize;
-        let str_start = header.strings_offset as usize;
-        let tri_start = header.trigram_offset as usize;
+        let rec_start = usize::try_from(header.records_offset)
+            .map_err(|_| "Corrupt records_offset in .dkcat".to_string())?;
+        let str_start = usize::try_from(header.strings_offset)
+            .map_err(|_| "Corrupt strings_offset in .dkcat".to_string())?;
+        let tri_start = usize::try_from(header.trigram_offset)
+            .map_err(|_| "Corrupt trigram_offset in .dkcat".to_string())?;
 
-        if rec_start < core::mem::size_of::<DkCatHeader>()
-            || rec_start.saturating_add(rec_bytes) > str_start
+        let rec_end = rec_start
+            .checked_add(rec_bytes)
+            .ok_or_else(|| "Corrupt record section bounds in .dkcat".to_string())?;
+        let tri_meta_end = tri_start
+            .checked_add(16)
+            .ok_or_else(|| "Corrupt trigram header offset in .dkcat".to_string())?;
+
+        if rec_start < header_len
+            || rec_end > str_start
+            || (str_start - rec_start) % rec_stride != 0
             || str_start > tri_start
-            || tri_start + 16 > bytes.len()
+            || tri_meta_end > bytes.len()
         {
-            return Err("Corrupt section bounds in .dkcat header".to_string());
+            return Err("Corrupt section bounds or stride alignment in .dkcat header".to_string());
         }
 
         let fetched_at = u64::from_le_bytes(
@@ -934,9 +966,12 @@ impl MappedCatalog {
                 .map_err(|_| "Truncated pages_count".to_string())?,
         ) as usize;
 
-        let pages_start = tri_start + 16;
+        let pages_start = tri_meta_end;
+        let pages_bytes = pages_count
+            .checked_mul(4)
+            .ok_or_else(|| "Corrupt page count in .dkcat".to_string())?;
         let pages_end = pages_start
-            .checked_add(pages_count.saturating_mul(4))
+            .checked_add(pages_bytes)
             .ok_or_else(|| "Corrupt page table in .dkcat".to_string())?;
         if pages_end > bytes.len() {
             return Err("Truncated page list in .dkcat".to_string());
@@ -1023,16 +1058,28 @@ impl MappedCatalog {
         if index >= self.record_count() {
             return Err(format!("Catalog record index {index} out of bounds"));
         }
-        let offset = self.header.records_offset as usize
-            + index * core::mem::size_of::<CatalogRecord>();
-        unsafe { read_struct_unaligned(&self.mmap, offset) }
+        let rec_base = usize::try_from(self.header.records_offset)
+            .map_err(|_| "Catalog records_offset overflow".to_string())?;
+        let byte_off = index
+            .checked_mul(core::mem::size_of::<CatalogRecord>())
+            .and_then(|rel| rec_base.checked_add(rel))
+            .ok_or_else(|| "Catalog record offset overflow".to_string())?;
+        unsafe { read_struct_unaligned(&self.mmap, byte_off) }
     }
 
     fn pool_str(&self, off: u32, len: u32) -> &str {
-        let base = self.header.strings_offset as usize;
-        let tri = self.header.trigram_offset as usize;
-        let start = base.saturating_add(off as usize);
-        let end = start.saturating_add(len as usize);
+        let Some(base) = usize::try_from(self.header.strings_offset).ok() else {
+            return "";
+        };
+        let Some(tri) = usize::try_from(self.header.trigram_offset).ok() else {
+            return "";
+        };
+        let Some(start) = base.checked_add(off as usize) else {
+            return "";
+        };
+        let Some(end) = start.checked_add(len as usize) else {
+            return "";
+        };
         if start <= end && end <= tri && end <= self.mmap.len() {
             std::str::from_utf8(&self.mmap[start..end]).unwrap_or("")
         } else {
@@ -1146,16 +1193,18 @@ impl MappedCatalog {
         let mut hi = count;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
+            let entry_off = mid
+                .checked_mul(stride)
+                .and_then(|rel| self.trigram_table_offset.checked_add(rel))?;
             let entry: TrigramIndexEntry =
-                unsafe { read_struct_unaligned(&self.mmap, self.trigram_table_offset + mid * stride) }
-                    .ok()?;
+                unsafe { read_struct_unaligned(&self.mmap, entry_off) }.ok()?;
             match entry.trigram.cmp(&target) {
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,
                 std::cmp::Ordering::Equal => {
-                    let start = self.postings_offset.saturating_add(entry.list_off as usize);
-                    let byte_len = (entry.list_len as usize).saturating_mul(4);
-                    let end = start.saturating_add(byte_len);
+                    let start = self.postings_offset.checked_add(entry.list_off as usize)?;
+                    let byte_len = (entry.list_len as usize).checked_mul(4)?;
+                    let end = start.checked_add(byte_len)?;
                     if end > self.mmap.len() {
                         return Some(&[]);
                     }
@@ -1787,7 +1836,7 @@ pub fn atomic_rebuild_dkcat(dkcat_path: &Path, cache: &CatalogCacheFile) -> Resu
         .map_err(|e| format!("Failed to write temp .dkcat archive: {}", e))?;
 
     // Release active Windows memory mapping handle before replacing catalog.dkcat.
-    let mut slot = global_catalog_slot().write().unwrap();
+    let mut slot = write_catalog_slot();
     *slot = None;
 
     if dkcat_path.exists() {
@@ -1836,21 +1885,35 @@ pub fn try_migrate_dkcat_v1_to_v2(dkcat_path: &Path) -> Result<bool, String> {
         let mmap = unsafe { Mmap::map(&file) }
             .map_err(|e| format!("Mmap failed during V1 migration: {}", e))?;
         let bytes: &[u8] = &mmap;
+        let header_len = core::mem::size_of::<DkCatHeader>();
+        if bytes.len() < header_len {
+            return Err("Truncated legacy .dkcat header".to_string());
+        }
         let header: DkCatHeader = unsafe { read_struct_unaligned(bytes, 0)? };
         if header.magic != DKCAT_MAGIC_V1 || header.version != 2 {
             None
         } else {
             let rec_size = core::mem::size_of::<CatalogRecordV1>();
-            let rec_start = header.records_offset as usize;
-            let str_start = header.strings_offset as usize;
-            let tri_start = header.trigram_offset as usize;
+            let rec_start = usize::try_from(header.records_offset)
+                .map_err(|_| "Corrupt V1 records_offset".to_string())?;
+            let str_start = usize::try_from(header.strings_offset)
+                .map_err(|_| "Corrupt V1 strings_offset".to_string())?;
+            let tri_start = usize::try_from(header.trigram_offset)
+                .map_err(|_| "Corrupt V1 trigram_offset".to_string())?;
             let rec_bytes = (header.record_count as usize)
                 .checked_mul(rec_size)
                 .ok_or_else(|| "Corrupt V1 record count".to_string())?;
-            if rec_start < core::mem::size_of::<DkCatHeader>()
-                || rec_start.saturating_add(rec_bytes) > str_start
+            let rec_end = rec_start
+                .checked_add(rec_bytes)
+                .ok_or_else(|| "Corrupt V1 record bounds".to_string())?;
+            let tri_meta_end = tri_start
+                .checked_add(16)
+                .ok_or_else(|| "Corrupt V1 trigram offset".to_string())?;
+            if rec_start < header_len
+                || rec_end > str_start
+                || (str_start - rec_start) % rec_size != 0
                 || str_start > tri_start
-                || tri_start + 16 > bytes.len()
+                || tri_meta_end > bytes.len()
             {
                 return Err("Corrupt section bounds in legacy DKCAT001 header".to_string());
             }
@@ -1865,15 +1928,19 @@ pub fn try_migrate_dkcat_v1_to_v2(dkcat_path: &Path) -> Result<bool, String> {
                     .try_into()
                     .map_err(|_| "Truncated V1 pages_count".to_string())?,
             ) as usize;
-            let pages_start = tri_start + 16;
+            let pages_start = tri_meta_end;
+            let pages_bytes = pages_count
+                .checked_mul(4)
+                .ok_or_else(|| "Corrupt V1 page count".to_string())?;
             let pages_end = pages_start
-                .checked_add(pages_count.saturating_mul(4))
+                .checked_add(pages_bytes)
                 .ok_or_else(|| "Corrupt V1 page table".to_string())?;
-            let mut fetched_pages = Vec::new();
-            if pages_end <= bytes.len() {
-                for chunk in bytes[pages_start..pages_end].chunks_exact(4) {
-                    fetched_pages.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-                }
+            if pages_end > bytes.len() {
+                return Err("Truncated V1 page list".to_string());
+            }
+            let mut fetched_pages = Vec::with_capacity(pages_count);
+            for chunk in bytes[pages_start..pages_end].chunks_exact(4) {
+                fetched_pages.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
             }
 
             let pc_spec = crate::platforms::platform_by_id(crate::platforms::PLATFORM_PC);
@@ -1970,10 +2037,72 @@ pub fn try_migrate_dkcat_v1_to_v2(dkcat_path: &Path) -> Result<bool, String> {
     }
 }
 
+pub fn open_or_rebuild_dkcat_at(
+    dkcat_path: &Path,
+    legacy_json_path: Option<&Path>,
+) -> Result<(), String> {
+    let cleanup_json = || {
+        if let Some(jp) = legacy_json_path {
+            if jp.is_file() {
+                let _ = fs::remove_file(jp);
+            }
+        }
+    };
+
+    if dkcat_path.is_file() {
+        if let Ok(mapped) = MappedCatalog::open(dkcat_path) {
+            let mut write_guard = write_catalog_slot();
+            *write_guard = Some(mapped);
+            cleanup_json();
+            return Ok(());
+        }
+        if matches!(try_migrate_dkcat_v1_to_v2(dkcat_path), Ok(true)) {
+            cleanup_json();
+            return Ok(());
+        }
+
+        // Corrupt, truncated, or unmigratable archive on disk: release any mmap handle,
+        // delete the bad file, and rebuild cleanly so startup never crashes.
+        {
+            let mut write_guard = write_catalog_slot();
+            *write_guard = None;
+        }
+        let _ = fs::remove_file(dkcat_path);
+
+        if let Some(jp) = legacy_json_path {
+            if jp.is_file() {
+                if let Ok(raw) = fs::read_to_string(jp) {
+                    if let Ok(parsed) = serde_json::from_str::<CatalogCacheFile>(&raw) {
+                        atomic_rebuild_dkcat(dkcat_path, &parsed)?;
+                        let _ = fs::remove_file(jp);
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        let _ = atomic_rebuild_dkcat(dkcat_path, &CatalogCacheFile::default());
+        return Ok(());
+    }
+
+    // One-time transparent upgrade from legacy catalog_cache.json if present.
+    if let Some(jp) = legacy_json_path {
+        if jp.is_file() {
+            if let Ok(raw) = fs::read_to_string(jp) {
+                if let Ok(parsed) = serde_json::from_str::<CatalogCacheFile>(&raw) {
+                    atomic_rebuild_dkcat(dkcat_path, &parsed)?;
+                    let _ = fs::remove_file(jp);
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn ensure_catalog_mapped_standalone() -> Result<(), String> {
     let json_path = get_app_data_file_standalone("catalog_cache.json")?;
     {
-        let read_guard = global_catalog_slot().read().unwrap();
+        let read_guard = read_catalog_slot();
         if read_guard.is_some() {
             if json_path.is_file() {
                 let _ = fs::remove_file(&json_path);
@@ -1982,39 +2111,12 @@ pub fn ensure_catalog_mapped_standalone() -> Result<(), String> {
         }
     }
     let dkcat_path = get_app_data_file_standalone("catalog.dkcat")?;
-    if dkcat_path.is_file() {
-        if let Ok(mapped) = MappedCatalog::open(&dkcat_path) {
-            let mut write_guard = global_catalog_slot().write().unwrap();
-            *write_guard = Some(mapped);
-            if json_path.is_file() {
-                let _ = fs::remove_file(&json_path);
-            }
-            return Ok(());
-        }
-        if matches!(try_migrate_dkcat_v1_to_v2(&dkcat_path), Ok(true)) {
-            if json_path.is_file() {
-                let _ = fs::remove_file(&json_path);
-            }
-            return Ok(());
-        }
-    }
-
-    // One-time transparent upgrade from legacy catalog_cache.json if present.
-    if json_path.is_file() {
-        if let Ok(raw) = fs::read_to_string(&json_path) {
-            if let Ok(parsed) = serde_json::from_str::<CatalogCacheFile>(&raw) {
-                atomic_rebuild_dkcat(&dkcat_path, &parsed)?;
-                let _ = fs::remove_file(&json_path);
-                return Ok(());
-            }
-        }
-    }
-    Ok(())
+    open_or_rebuild_dkcat_at(&dkcat_path, Some(&json_path))
 }
 
 pub fn catalog_mmap_header_meta() -> (usize, u64, Vec<u32>) {
     let _ = ensure_catalog_mapped_standalone();
-    let guard = global_catalog_slot().read().unwrap();
+    let guard = read_catalog_slot();
     match guard.as_ref() {
         Some(mapped) => (
             mapped.record_count(),
@@ -2027,7 +2129,7 @@ pub fn catalog_mmap_header_meta() -> (usize, u64, Vec<u32>) {
 
 pub fn get_entry_via_mmap(app_id: u32) -> Option<CatalogGameEntry> {
     let _ = ensure_catalog_mapped_standalone();
-    let guard = global_catalog_slot().read().unwrap();
+    let guard = read_catalog_slot();
     guard.as_ref().and_then(|m| m.get_entry_by_appid(app_id))
 }
 
@@ -2050,7 +2152,7 @@ pub fn lookup_entry_by_title_or_appid_via_mmap(
     title: &str,
 ) -> Option<CatalogGameEntry> {
     let _ = ensure_catalog_mapped_standalone();
-    let guard = global_catalog_slot().read().unwrap();
+    let guard = read_catalog_slot();
     let mapped = guard.as_ref()?;
     if let Some(id) = app_id.filter(|&id| id > 0) {
         if let Some(hit) = mapped.get_entry_by_appid(id) {
@@ -2102,7 +2204,7 @@ pub fn lookup_retro_entry_by_title_or_id(
         return None;
     }
     let _ = ensure_catalog_mapped_standalone();
-    let guard = global_catalog_slot().read().unwrap();
+    let guard = read_catalog_slot();
     let mapped = guard.as_ref()?;
 
     let clean_serial = rom_id.trim();
@@ -2153,7 +2255,7 @@ pub fn upsert_entries_dkcat(
 ) -> Result<CatalogMmapStats, String> {
     let mut cache = {
         let _ = ensure_catalog_mapped_standalone();
-        let guard = global_catalog_slot().read().unwrap();
+        let guard = read_catalog_slot();
         match guard.as_ref() {
             Some(mapped) => mapped.to_catalog_cache_file(),
             None if dkcat_path.is_file() => MappedCatalog::open(dkcat_path)
@@ -2198,7 +2300,7 @@ pub fn upsert_entries_dkcat(
 
 pub fn load_catalog_via_mmap_standalone() -> CatalogCacheFile {
     let _ = ensure_catalog_mapped_standalone();
-    let guard = global_catalog_slot().read().unwrap();
+    let guard = read_catalog_slot();
     match guard.as_ref() {
         Some(mapped) => mapped.to_catalog_cache_file(),
         None => CatalogCacheFile::default(),
@@ -2207,14 +2309,14 @@ pub fn load_catalog_via_mmap_standalone() -> CatalogCacheFile {
 
 pub fn search_catalog_via_mmap(query: &str, limit: usize) -> Option<Vec<CatalogGameEntry>> {
     let _ = ensure_catalog_mapped_standalone();
-    let guard = global_catalog_slot().read().unwrap();
+    let guard = read_catalog_slot();
     guard.as_ref().map(|m| m.search(query, limit))
 }
 
 #[tauri::command]
 pub async fn get_catalog_mmap_stats() -> Result<CatalogMmapStats, String> {
     let _ = ensure_catalog_mapped_standalone();
-    let guard = global_catalog_slot().read().unwrap();
+    let guard = read_catalog_slot();
     if let Some(mapped) = guard.as_ref() {
         Ok(mapped.stats())
     } else {
@@ -2240,7 +2342,7 @@ pub async fn search_catalog_mmap(
 pub async fn query_catalog_mmap(params: CatalogQueryParams) -> Result<CatalogQueryPage, String> {
     tokio::task::spawn_blocking(move || {
         let _ = ensure_catalog_mapped_standalone();
-        let guard = global_catalog_slot().read().unwrap();
+        let guard = read_catalog_slot();
         match guard.as_ref() {
             Some(mapped) => mapped.query(&params),
             None => CatalogQueryPage {
@@ -2962,6 +3064,109 @@ mod tests {
         assert_eq!(reopened.fetched_pages(), &[0]);
 
         drop(reopened);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mapped_catalog_handles_legacy_v1_truncated_and_corrupt_files_without_panic() {
+        let dir = std::env::temp_dir().join(format!("duke_dkcat_corrupt_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // 1. Truncated (< HEADER_LEN) file must return Err cleanly and recover to valid empty DKCAT002.
+        let trunc_path = dir.join("truncated.dkcat");
+        fs::write(&trunc_path, b"DKCAT002short").unwrap();
+        assert!(MappedCatalog::open(&trunc_path).is_err());
+        open_or_rebuild_dkcat_at(&trunc_path, None).unwrap();
+        let rebuilt_trunc = MappedCatalog::open(&trunc_path).unwrap();
+        assert_eq!(rebuilt_trunc.record_count(), 0);
+        drop(rebuilt_trunc);
+
+        // 2. Corrupt DKCAT002 with integer-overflow trigram_offset (u64::MAX) and misaligned stride must not panic.
+        let hdr_sz = core::mem::size_of::<DkCatHeader>();
+        let overflow_hdr = DkCatHeader {
+            magic: DKCAT_MAGIC,
+            version: DKCAT_VERSION,
+            record_count: 1,
+            records_offset: hdr_sz as u64,
+            strings_offset: (hdr_sz + 1) as u64,
+            trigram_offset: u64::MAX,
+            checksum_blake3: [0u8; 32],
+        };
+        let mut corrupt_bytes = Vec::with_capacity(hdr_sz + 32);
+        corrupt_bytes.extend_from_slice(bytes_of_struct(&overflow_hdr));
+        corrupt_bytes.extend_from_slice(&[0u8; 32]);
+        let corrupt_path = dir.join("corrupt_overflow.dkcat");
+        fs::write(&corrupt_path, &corrupt_bytes).unwrap();
+        assert!(MappedCatalog::open(&corrupt_path).is_err());
+        open_or_rebuild_dkcat_at(&corrupt_path, None).unwrap();
+        let rebuilt_corrupt = MappedCatalog::open(&corrupt_path).unwrap();
+        assert_eq!(rebuilt_corrupt.record_count(), 0);
+        drop(rebuilt_corrupt);
+
+        // 3. Legacy DKCAT001 must fail MappedCatalog::open cleanly (zero panic), and recover via migration.
+        let rec_v1 = CatalogRecordV1 {
+            ccu: 100,
+            owners_min: 100,
+            owners_max: 200,
+            positive: 90,
+            negative: 10,
+            value_score: 75.0,
+            updated_at: 1_700_000_000,
+            genre_bits: 0,
+            appid: 440,
+            price_cents: 0,
+            initial_price_cents: 0,
+            flags: FLAG_IS_FREE,
+            name_off: 0,
+            name_len: 15,
+            tags_off: 15,
+            tags_len: 0,
+            meta_off: 15,
+            meta_len: 0,
+        };
+        let rec_v1_sz = core::mem::size_of::<CatalogRecordV1>();
+        let mut body_v1 = Vec::new();
+        body_v1.extend_from_slice(bytes_of_struct(&rec_v1));
+        body_v1.extend_from_slice(b"Team Fortress 2");
+        let tri_off_v1 = (hdr_sz + body_v1.len()) as u64;
+        body_v1.extend_from_slice(&1_700_000_123u64.to_le_bytes());
+        body_v1.extend_from_slice(&0u32.to_le_bytes());
+        body_v1.extend_from_slice(&0u32.to_le_bytes());
+        let hdr_v1 = DkCatHeader {
+            magic: DKCAT_MAGIC_V1,
+            version: 2,
+            record_count: 1,
+            records_offset: hdr_sz as u64,
+            strings_offset: (hdr_sz + rec_v1_sz) as u64,
+            trigram_offset: tri_off_v1,
+            checksum_blake3: *blake3::hash(&body_v1).as_bytes(),
+        };
+        let mut raw_v1 = Vec::with_capacity(hdr_sz + body_v1.len());
+        raw_v1.extend_from_slice(bytes_of_struct(&hdr_v1));
+        raw_v1.extend_from_slice(&body_v1);
+        let v1_path = dir.join("legacy_recover.dkcat");
+        fs::write(&v1_path, &raw_v1).unwrap();
+
+        assert!(MappedCatalog::open(&v1_path).is_err());
+        open_or_rebuild_dkcat_at(&v1_path, None).unwrap();
+        let migrated = MappedCatalog::open(&v1_path).unwrap();
+        assert_eq!(migrated.record_count(), 1);
+        assert_eq!(migrated.get_entry_by_appid(440).unwrap().name, "Team Fortress 2");
+        drop(migrated);
+
+        // 4. Truncated/corrupt DKCAT001 must not panic and must delete + rebuild cleanly.
+        let mut bad_v1 = raw_v1[..hdr_sz + 12].to_vec();
+        let bad_v1_path = dir.join("corrupt_v1.dkcat");
+        fs::write(&bad_v1_path, &bad_v1).unwrap();
+        assert!(MappedCatalog::open(&bad_v1_path).is_err());
+        open_or_rebuild_dkcat_at(&bad_v1_path, None).unwrap();
+        let rebuilt_v1 = MappedCatalog::open(&bad_v1_path).unwrap();
+        assert_eq!(rebuilt_v1.record_count(), 0);
+        drop(rebuilt_v1);
+        bad_v1.clear();
+
+        *write_catalog_slot() = None;
         let _ = fs::remove_dir_all(&dir);
     }
 }

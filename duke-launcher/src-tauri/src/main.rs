@@ -154,7 +154,9 @@ fn get_active_hotkey_cell() -> &'static Mutex<String> {
 }
 
 pub(crate) fn find_active_session_pid(game_id_or_title: &str) -> Option<u32> {
-    let guard = get_active_sessions().lock().unwrap();
+    let guard = get_active_sessions()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     guard
         .values()
         .find(|s| {
@@ -166,7 +168,9 @@ pub(crate) fn find_active_session_pid(game_id_or_title: &str) -> Option<u32> {
 }
 
 pub(crate) fn first_active_session_pid() -> Option<u32> {
-    let guard = get_active_sessions().lock().unwrap();
+    let guard = get_active_sessions()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     guard.values().next().map(|s| s.pid)
 }
 
@@ -1885,7 +1889,9 @@ pub(crate) fn atomic_write_string(path: &Path, contents: &str) -> Result<(), Str
 }
 
 pub(crate) fn load_settings_standalone() -> LauncherSettings {
-    let _guard = get_settings_io_lock().lock().unwrap();
+    let _guard = get_settings_io_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let Ok(path) = get_app_data_file_standalone("settings.json") else {
         return LauncherSettings::default();
     };
@@ -1902,7 +1908,9 @@ pub(crate) fn load_settings_standalone() -> LauncherSettings {
 }
 
 pub(crate) fn load_catalog_cache_standalone() -> CatalogCacheFile {
-    let _guard = get_catalog_io_lock().lock().unwrap();
+    let _guard = get_catalog_io_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let _ = catalog_mmap::ensure_catalog_mapped_standalone();
     let mmap_cache = catalog_mmap::load_catalog_via_mmap_standalone();
     if !mmap_cache.entries.is_empty() || mmap_cache.fetched_at > 0 {
@@ -2001,7 +2009,9 @@ fn hydrate_cover_from_disk_cache_standalone(game_id: &str, stored_cover: &str) -
 }
 
 pub(crate) fn load_library_standalone() -> Result<Vec<GameEntry>, String> {
-    let _guard = get_library_io_lock().lock().unwrap();
+    let _guard = get_library_io_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let path = get_app_data_file_standalone("library.json")?;
     if !path.exists() {
         return Ok(Vec::new());
@@ -2021,7 +2031,9 @@ pub(crate) fn load_library_standalone() -> Result<Vec<GameEntry>, String> {
 }
 
 pub(crate) fn save_library_standalone(entries: &[GameEntry]) -> Result<(), String> {
-    let _guard = get_library_io_lock().lock().unwrap();
+    let _guard = get_library_io_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let path = get_app_data_file_standalone("library.json")?;
     let mut disk_entries: Vec<GameEntry> = entries.to_vec();
     for entry in &mut disk_entries {
@@ -2035,7 +2047,9 @@ pub(crate) fn save_library_standalone(entries: &[GameEntry]) -> Result<(), Strin
 }
 
 fn load_settings_from_disk(app: &AppHandle) -> LauncherSettings {
-    let _guard = get_settings_io_lock().lock().unwrap();
+    let _guard = get_settings_io_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let Ok(path) = get_app_data_file(app, "settings.json") else {
         return LauncherSettings::default();
     };
@@ -2052,7 +2066,9 @@ fn load_settings_from_disk(app: &AppHandle) -> LauncherSettings {
 }
 
 fn save_settings_to_disk(app: &AppHandle, settings: &LauncherSettings) -> Result<(), String> {
-    let _guard = get_settings_io_lock().lock().unwrap();
+    let _guard = get_settings_io_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let path = get_app_data_file(app, "settings.json")?;
     let serialized = serde_json::to_string_pretty(settings)
         .map_err(|e| format!("Failed to serialize settings: {}", e))?;
@@ -2060,7 +2076,9 @@ fn save_settings_to_disk(app: &AppHandle, settings: &LauncherSettings) -> Result
 }
 
 pub(crate) fn save_settings_standalone(settings: &LauncherSettings) -> Result<(), String> {
-    let _guard = get_settings_io_lock().lock().unwrap();
+    let _guard = get_settings_io_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let path = get_app_data_file_standalone("settings.json")?;
     let serialized = serde_json::to_string_pretty(settings)
         .map_err(|e| format!("Failed to serialize settings: {}", e))?;
@@ -2068,11 +2086,13 @@ pub(crate) fn save_settings_standalone(settings: &LauncherSettings) -> Result<()
 }
 
 fn load_catalog_cache_from_disk(app: &AppHandle) -> CatalogCacheFile {
-    let _guard = get_catalog_io_lock().lock().unwrap();
+    let _guard = get_catalog_io_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _ = catalog_mmap::ensure_catalog_mapped_standalone();
     if let Ok(dkcat_path) = get_app_data_file(app, "catalog.dkcat") {
         if dkcat_path.is_file() {
             if let Ok(mapped) = catalog_mmap::MappedCatalog::open(&dkcat_path) {
-                let _ = catalog_mmap::ensure_catalog_mapped_standalone();
                 if let Ok(legacy_path) = get_app_data_file(app, "catalog_cache.json") {
                     if legacy_path.is_file() {
                         let _ = fs::remove_file(&legacy_path);
@@ -2106,14 +2126,18 @@ fn load_catalog_cache_from_disk(app: &AppHandle) -> CatalogCacheFile {
 }
 
 fn save_catalog_cache_to_disk(app: &AppHandle, cache: &CatalogCacheFile) -> Result<(), String> {
-    let _guard = get_catalog_io_lock().lock().unwrap();
+    let _guard = get_catalog_io_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let dkcat_path = get_app_data_file(app, "catalog.dkcat")?;
     catalog_mmap::atomic_rebuild_dkcat(&dkcat_path, cache)?;
     Ok(())
 }
 
 pub(crate) fn load_library_lightweight(app: &AppHandle) -> Result<Vec<GameEntry>, String> {
-    let _guard = get_library_io_lock().lock().unwrap();
+    let _guard = get_library_io_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let path = get_app_data_file(app, "library.json")?;
     if !path.exists() {
         return Ok(Vec::new());
@@ -2132,7 +2156,9 @@ pub(crate) fn load_library_lightweight(app: &AppHandle) -> Result<Vec<GameEntry>
 }
 
 fn load_library_from_disk(app: &AppHandle) -> Result<Vec<GameEntry>, String> {
-    let _guard = get_library_io_lock().lock().unwrap();
+    let _guard = get_library_io_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let path = get_app_data_file(app, "library.json")?;
     if !path.exists() {
         return Ok(Vec::new());
@@ -2168,7 +2194,9 @@ fn load_library_from_disk(app: &AppHandle) -> Result<Vec<GameEntry>, String> {
 }
 
 fn save_library_to_disk(app: &AppHandle, entries: &[GameEntry]) -> Result<(), String> {
-    let _guard = get_library_io_lock().lock().unwrap();
+    let _guard = get_library_io_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let path = get_app_data_file(app, "library.json")?;
     let mut disk_entries: Vec<GameEntry> = entries.to_vec();
     for entry in &mut disk_entries {
@@ -2275,14 +2303,14 @@ fn schedule_auto_clean_completed_job(app: AppHandle, download_id: String) {
         return;
     }
 
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_millis(2500)).await;
         if !load_settings_from_disk(&app).auto_clean_completed {
             return;
         }
 
         let remaining: Option<Vec<DownloadJob>> = {
-            let mut guard = get_queue_store().lock().unwrap();
+            let mut guard = get_queue_store().lock().unwrap_or_else(|p| p.into_inner());
             let before = guard.len();
             guard.retain(|j| !(j.download_id == download_id && is_job_auto_cleanable(j)));
             if guard.len() != before {
@@ -2308,7 +2336,9 @@ fn schedule_auto_clean_completed_job(app: AppHandle, download_id: String) {
 }
 
 fn persist_queue_to_disk(app: &AppHandle, jobs: &[DownloadJob]) {
-    let _io_guard = get_queue_io_lock().lock().unwrap();
+    let _io_guard = get_queue_io_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     if let Ok(serialized) = serde_json::to_string_pretty(jobs) {
         for path in get_queue_storage_paths(app) {
             let _ = atomic_write_string(&path, &serialized);
@@ -2318,7 +2348,7 @@ fn persist_queue_to_disk(app: &AppHandle, jobs: &[DownloadJob]) {
 
 fn ensure_queue_initialized(app: &AppHandle) -> Vec<DownloadJob> {
     let auto_clean = load_settings_from_disk(app).auto_clean_completed;
-    let mut guard = get_queue_store().lock().unwrap();
+    let mut guard = get_queue_store().lock().unwrap_or_else(|p| p.into_inner());
     if !guard.is_empty() {
         if prune_auto_cleanable_jobs(&mut guard, auto_clean) {
             persist_queue_to_disk(app, &guard);
@@ -2339,7 +2369,7 @@ fn ensure_queue_initialized(app: &AppHandle) -> Vec<DownloadJob> {
         }
     }
 
-    let pause_map = get_pause_map().lock().unwrap();
+    let pause_map = get_pause_map().lock().unwrap_or_else(|p| p.into_inner());
 
     for job in &mut loaded_jobs {
         reconcile_job_bytes_from_disk(job);
@@ -2368,7 +2398,7 @@ fn ensure_queue_initialized(app: &AppHandle) -> Vec<DownloadJob> {
 }
 
 fn update_job_in_memory_and_disk(app: &AppHandle, updated: &DownloadJob, write_disk: bool) {
-    let mut guard = get_queue_store().lock().unwrap();
+    let mut guard = get_queue_store().lock().unwrap_or_else(|p| p.into_inner());
     if let Some(existing) = guard
         .iter_mut()
         .find(|j| j.download_id == updated.download_id)
@@ -5441,10 +5471,10 @@ fn spawn_queue_scheduler(app: AppHandle) {
         return;
     }
 
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         loop {
             let next_job_opt = {
-                let guard = get_queue_store().lock().unwrap();
+                let guard = get_queue_store().lock().unwrap_or_else(|p| p.into_inner());
                 let any_active = guard.iter().any(|j| {
                     j.status == "DOWNLOADING"
                         || j.status == "RESOLVING"
@@ -5935,7 +5965,9 @@ fn enqueue_protocol_download_url(
         focus_main_window(&app);
     }
     if record_pending {
-        let mut guard = get_pending_protocol_urls().lock().unwrap();
+        let mut guard = get_pending_protocol_urls()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         if !guard.iter().any(|existing| existing == &clean_url) {
             guard.push(clean_url.clone());
         }
@@ -6405,7 +6437,9 @@ fn write_clipboard_text(text: String) -> Result<(), String> {
 
 #[tauri::command]
 fn take_pending_protocol_urls() -> Vec<String> {
-    let mut guard = get_pending_protocol_urls().lock().unwrap();
+    let mut guard = get_pending_protocol_urls()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     std::mem::take(&mut *guard)
 }
 
@@ -8356,7 +8390,7 @@ fn spawn_hotkey_watcher_if_needed(app: AppHandle) {
         return;
     }
 
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let mut was_pressed = false;
         let mut pause_was_pressed = false;
         let mut ticks_elapsed: u64 = 0;
@@ -11327,7 +11361,7 @@ fn spawn_cache_retro_covers_batch(app: AppHandle, targets: Vec<CoverCacheTarget>
     if targets.is_empty() {
         return;
     }
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let sem = Arc::new(tokio::sync::Semaphore::new(4));
         let mut updates: Vec<(String, String, String)> = Vec::new();
         let mut join_set = tokio::task::JoinSet::new();
@@ -13184,7 +13218,177 @@ fn shutdown_flush_downloads(app_handle: &AppHandle) {
     }
 }
 
+mod crash_guard {
+    use core::ffi::c_void;
+    use std::backtrace::Backtrace;
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const EXCEPTION_STACK_OVERFLOW: u32 = 0xC000_00FD;
+    const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
+
+    #[cfg(target_os = "windows")]
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct Win32ExceptionRecord {
+        exception_code: u32,
+        exception_flags: u32,
+        exception_record: *const Win32ExceptionRecord,
+        exception_address: *const c_void,
+        number_parameters: u32,
+    }
+
+    #[cfg(target_os = "windows")]
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct Win32ExceptionPointers {
+        exception_record: *const Win32ExceptionRecord,
+        context_record: *const c_void,
+    }
+
+    #[cfg(target_os = "windows")]
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetUnhandledExceptionFilter(
+            filter: Option<unsafe extern "system" fn(*const Win32ExceptionPointers) -> i32>,
+        ) -> *const c_void;
+    }
+
+    fn crash_log_paths() -> Vec<PathBuf> {
+        let mut paths = Vec::with_capacity(2);
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(dir) = exe_path.parent() {
+                paths.push(dir.join("duke-launcher-crash.log"));
+            }
+        }
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            if !local_app_data.is_empty() {
+                paths.push(
+                    PathBuf::from(local_app_data)
+                        .join("duke-launcher")
+                        .join("crash.log"),
+                );
+            }
+        }
+        paths
+    }
+
+    fn write_crash_entry(context: &str, detail: &str, capture_backtrace: bool) {
+        let epoch_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let pid = std::process::id();
+        let current_thread = std::thread::current();
+        let thread_name = current_thread.name().unwrap_or("<unnamed>");
+
+        let mut report = format!(
+            "=== Duke Launcher Crash Report ===\n\
+             timestamp_unix: {epoch_secs}\n\
+             version: {}\n\
+             pid: {pid}\n\
+             thread: {thread_name}\n\
+             kind: {context}\n\
+             detail: {detail}\n",
+            env!("CARGO_PKG_VERSION")
+        );
+
+        if capture_backtrace {
+            let bt = Backtrace::force_capture();
+            report.push_str(&format!("backtrace:\n{bt}\n"));
+        } else {
+            report.push_str("backtrace: <skipped on stack overflow>\n");
+        }
+        report.push('\n');
+
+        let _ = std::io::stderr().write_all(report.as_bytes());
+        let _ = std::io::stderr().flush();
+
+        for path in crash_log_paths() {
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = file.write_all(report.as_bytes());
+                let _ = file.flush();
+            }
+        }
+    }
+
+    pub fn record_fatal_error(context: &str, err: &str) {
+        write_crash_entry(context, err, true);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn exception_code_name(code: u32) -> &'static str {
+        match code {
+            0xC000_0005 => "EXCEPTION_ACCESS_VIOLATION",
+            0xC000_001D => "EXCEPTION_ILLEGAL_INSTRUCTION",
+            0xC000_0094 => "EXCEPTION_INT_DIVIDE_BY_ZERO",
+            0xC000_00FD => "EXCEPTION_STACK_OVERFLOW",
+            0xC000_0409 => "STATUS_STACK_BUFFER_OVERRUN",
+            0xE06D_7363 => "CPP_EH_EXCEPTION",
+            _ => "WIN32_SEH_EXCEPTION",
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    unsafe extern "system" fn unhandled_exception_filter(
+        info: *const Win32ExceptionPointers,
+    ) -> i32 {
+        let (code, flags, addr) = if !info.is_null() && !(*info).exception_record.is_null() {
+            let rec = &*(*info).exception_record;
+            (
+                rec.exception_code,
+                rec.exception_flags,
+                rec.exception_address as usize,
+            )
+        } else {
+            (0, 0, 0)
+        };
+        let label = exception_code_name(code);
+        let detail = format!(
+            "code=0x{code:08X} ({label}) flags=0x{flags:08X} address=0x{addr:016X}"
+        );
+        write_crash_entry(
+            "unhandled_win32_exception",
+            &detail,
+            code != EXCEPTION_STACK_OVERFLOW,
+        );
+        EXCEPTION_CONTINUE_SEARCH
+    }
+
+    pub fn install() {
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            let payload = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "non-string panic payload".to_string()
+            };
+            let location = panic_info
+                .location()
+                .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
+                .unwrap_or_else(|| "<unknown location>".to_string());
+            let detail = format!("at {location}: {payload}");
+            write_crash_entry("rust_panic", &detail, true);
+            prev_hook(panic_info);
+        }));
+
+        #[cfg(target_os = "windows")]
+        unsafe {
+            let _ = SetUnhandledExceptionFilter(Some(unhandled_exception_filter));
+        }
+    }
+}
+
 fn main() {
+    crash_guard::install();
+
     if std::env::args().any(|a| a == "--mcp") {
         mcp::run_mcp_stdio_server();
         return;
@@ -13223,7 +13427,7 @@ fn main() {
     let _ = TRAY_DAEMON.set(daemon_state.clone());
 
     let daemon_for_setup = daemon_state.clone();
-    let app = tauri::Builder::default()
+    let app = match tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
@@ -13332,7 +13536,7 @@ fn main() {
                     tick_count = tick_count.saturating_add(1);
                     let ram_mode = RAM_TRIM_MODE.load(Ordering::Relaxed);
                     let any_downloading = {
-                        let guard = get_queue_store().lock().unwrap();
+                        let guard = get_queue_store().lock().unwrap_or_else(|p| p.into_inner());
                         guard.iter().any(|j| {
                             j.status == "DOWNLOADING"
                                 || j.status == "RESOLVING"
@@ -13508,7 +13712,16 @@ fn main() {
             scan_rom_folder
         ])
         .build(tauri::generate_context!())
-        .expect("error while building Duke Launcher Tauri application");
+    {
+        Ok(app) => app,
+        Err(err) => {
+            crash_guard::record_fatal_error(
+                "tauri::Builder::build",
+                &format!("failed to build Duke Launcher Tauri application: {err}"),
+            );
+            std::process::exit(1);
+        }
+    };
 
     app.run(move |app_handle, event| {
         if let tauri::RunEvent::WindowEvent {

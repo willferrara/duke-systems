@@ -492,7 +492,7 @@ pub fn get_http_client() -> &'static Client {
             .pool_idle_timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(8))
             .build()
-            .expect("Failed to initialize shared HTTP client")
+            .unwrap_or_else(|_| Client::new())
     })
 }
 
@@ -534,7 +534,7 @@ pub fn get_burst_http_client() -> &'static Client {
             .connect_timeout(Duration::from_secs(6))
             .read_timeout(Duration::from_secs(5))
             .build()
-            .expect("Failed to initialize burst HTTP client")
+            .unwrap_or_else(|_| Client::new())
     })
 }
 
@@ -544,7 +544,7 @@ pub fn get_doh_bootstrap_client() -> &'static Client {
             .connect_timeout(Duration::from_secs(3))
             .read_timeout(Duration::from_secs(4))
             .build()
-            .expect("Failed to initialize DoH bootstrap client")
+            .unwrap_or_else(|_| Client::new())
     })
 }
 
