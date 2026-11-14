@@ -4629,3 +4629,208 @@ body.mode-overlay .window-shell {
   font-size: 12px;
 }
 
+/* ============================================================================
+ * Wave 2 (v0.7.0): ETW X-Ray, Native Swapchain Upscaler, Auto-SR,
+ *                  DirectStorage 1.4, VHDX Hot-Tier & Deep Shrink v2
+ * ========================================================================= */
+.wave2-xray-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.wave2-bottleneck-wrap {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-control);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-hairline);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wave2-ratio-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-main);
+}
+
+.wave2-ratio-track {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  display: flex;
+  background: var(--bg-input);
+  border: 1px solid var(--border-hairline);
+}
+
+.wave2-ratio-cpu {
+  height: 100%;
+  background: var(--accent-primary);
+  transition: width 0.25s ease;
+}
+
+.wave2-ratio-gpu {
+  height: 100%;
+  background: var(--accent-emerald);
+  transition: width 0.25s ease;
+}
+
+.wave2-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 165px;
+  overflow-y: auto;
+  margin-top: 10px;
+}
+
+.wave2-history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: var(--radius-control);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-hairline);
+  font-size: 11.5px;
+  color: var(--text-main);
+}
+
+.wave2-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+  align-items: end;
+}
+
+.wave2-form-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.wave2-span2 {
+  grid-column: span 2;
+}
+
+.wave2-inline-checks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.wave2-check-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: var(--radius-control);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-hairline);
+  font-size: 12px;
+  color: var(--text-main);
+  cursor: pointer;
+  user-select: none;
+}
+
+.wave2-check-chip input[type="checkbox"] {
+  accent-color: var(--accent-primary);
+}
+
+.wave2-sharpness-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-radius: var(--radius-control);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-hairline);
+  font-size: 12px;
+  color: var(--text-main);
+}
+
+.wave2-sharpness-chip input[type="range"] {
+  width: 96px;
+  accent-color: var(--accent-primary);
+}
+
+.wave2-three-col {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+  align-items: start;
+}
+
+.wave2-subpanel {
+  padding: 11px 12px;
+  border-radius: var(--radius-control);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-hairline);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.wave2-subpanel h4 {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-main);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wave2-shrink-buckets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wave2-shrink-bucket-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border-radius: var(--radius-control);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-hairline);
+  font-size: 11.5px;
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.wave2-shrink-bucket-chip input[type="checkbox"] {
+  accent-color: var(--accent-primary);
+}
+
+@media (max-width: 1120px) {
+  .wave2-three-col {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .wave2-xray-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .wave2-span2 {
+    grid-column: span 1;
+  }
+}
+

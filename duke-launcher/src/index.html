@@ -59,6 +59,8 @@
     <symbol id="icon-git-branch" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
     <symbol id="icon-rotate-ccw" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></symbol>
     <symbol id="icon-terminal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></symbol>
+    <symbol id="icon-gauge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></symbol>
+    <symbol id="icon-monitor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></symbol>
   </svg>
 
   <div class="window-shell">
@@ -70,7 +72,7 @@
         </button>
         <img src="assets/dukeflaglogo.png" alt="Duke Launcher" class="titlebar-emblem" />
         <span class="titlebar-title">Duke Launcher</span>
-        <span class="titlebar-version mono-num" id="app-version-pill">v0.6.0</span>
+        <span class="titlebar-version mono-num" id="app-version-pill">v0.7.0</span>
       </div>
 
       <div class="titlebar-center">
@@ -819,6 +821,214 @@
                   <div class="panel-sub">No save checkpoints recorded yet. Play this game or click Create Checkpoint to start your timeline.</div>
                 </div>
                 <div id="detail-tm-timeline-list" class="tm-timeline-strip"></div>
+              </div>
+
+              <!-- ETW Frame-Time & Bottleneck X-Ray Session Scorecard -->
+              <div class="panel-card" id="detail-xray-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>Session Performance Scorecard (ETW X-Ray)</h3>
+                    <p class="detail-micro-caption" id="detail-xray-source">Zero-injection kernel ETW / DWM cadence monitor (100% anti-cheat safe).</p>
+                  </div>
+                  <div class="detail-save-actions">
+                    <span class="pill mono-num" id="detail-xray-live-pill">Ready</span>
+                    <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-xray-refresh" title="Refresh X-Ray Scorecard">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-gauge"/></svg>
+                      <span>Refresh</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-xray-clear" title="Clear Recorded Scorecards">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="wave2-xray-grid">
+                  <div class="hltb-stat-tile">
+                    <span class="detail-metric-label">Avg FPS</span>
+                    <strong class="detail-metric-val mono-num" id="detail-xray-avg-fps">--</strong>
+                  </div>
+                  <div class="hltb-stat-tile">
+                    <span class="detail-metric-label">1% Low</span>
+                    <strong class="detail-metric-val mono-num" id="detail-xray-1pct-fps">--</strong>
+                  </div>
+                  <div class="hltb-stat-tile">
+                    <span class="detail-metric-label">0.1% Low</span>
+                    <strong class="detail-metric-val mono-num" id="detail-xray-01pct-fps">--</strong>
+                  </div>
+                  <div class="hltb-stat-tile">
+                    <span class="detail-metric-label">GPU Present Latency</span>
+                    <strong class="detail-metric-val mono-num" id="detail-xray-latency-ms">--</strong>
+                  </div>
+                </div>
+                <div class="wave2-bottleneck-wrap">
+                  <div class="detail-field-head">
+                    <span class="field-label" id="detail-xray-bottleneck-text">No gameplay session recorded yet</span>
+                    <span class="mono-num panel-sub" id="detail-xray-stutters">0 spikes</span>
+                  </div>
+                  <div class="wave2-ratio-track">
+                    <div class="wave2-ratio-cpu" id="detail-xray-cpu-bar" style="width:50%"></div>
+                    <div class="wave2-ratio-gpu" id="detail-xray-gpu-bar" style="width:50%"></div>
+                  </div>
+                </div>
+                <div class="wave2-history-list mono-num" id="detail-xray-history-list"></div>
+              </div>
+
+              <!-- Display, Swapchain Upscaler, Hybrid Frame Pacer & Win11 Auto-SR / Auto-HDR -->
+              <div class="panel-card" id="detail-upscale-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>Display, Upscaler &amp; Auto-SR Lab</h3>
+                    <p class="detail-micro-caption">Flip-Model Borderless promotion, spatial scaling, spin+NT frame pacer, Auto-HDR &amp; Driver-Guarded Auto-SR.</p>
+                  </div>
+                  <span class="pill mono-num" id="detail-upscale-emu-pill">PC Native</span>
+                </div>
+                <div class="wave2-form-grid">
+                  <label class="detail-toggle-row wave2-span2" for="detail-upscale-borderless">
+                    <div class="setting-toggle-copy">
+                      <div class="setting-toggle-title">Flip-Model Borderless Fullscreen Promotion</div>
+                      <div class="setting-toggle-desc">Automatically strips windowed borders cleanly for DXGI Flip-Model &amp; emulator frames.</div>
+                    </div>
+                    <input type="checkbox" id="detail-upscale-borderless" class="setting-checkbox" />
+                  </label>
+                  <div class="detail-field-block">
+                    <label class="field-label" for="detail-upscale-mode">Spatial Upscaling Profile</label>
+                    <select id="detail-upscale-mode" class="select-control">
+                      <option value="off">Native (No Spatial Upscale)</option>
+                      <option value="integerScaling">Integer Scaling (Nearest Exact)</option>
+                      <option value="anime4k">Anime4K Line-Art Restore</option>
+                      <option value="amdFsr1">AMD FSR 1 (EASU + RCAS)</option>
+                    </select>
+                  </div>
+                  <div class="detail-field-block">
+                    <label class="field-label" for="detail-upscale-fps-cap">Hybrid Spin+NT FPS Cap (0 = Off)</label>
+                    <input type="number" id="detail-upscale-fps-cap" class="input-control mono-num" min="0" max="1000" step="1" placeholder="0 (Uncapped)" />
+                  </div>
+                  <div class="detail-field-block">
+                    <label class="field-label" for="detail-latency-gpu-pref">Win11 UserGpuPreferences Adapter</label>
+                    <select id="detail-latency-gpu-pref" class="select-control">
+                      <option value="2">High Performance Discrete GPU (2)</option>
+                      <option value="0">Let Windows Decide (0)</option>
+                      <option value="1">Power Saving / Integrated (1)</option>
+                    </select>
+                  </div>
+                  <div class="detail-field-block">
+                    <label class="field-label" for="detail-latency-autosr">Windows 11 Auto-SR Profile</label>
+                    <select id="detail-latency-autosr" class="select-control">
+                      <option value="off">Auto-SR Disabled</option>
+                      <option value="1080p">Auto-SR 1080p Profile</option>
+                      <option value="undocked">Auto-SR Undocked / Handheld</option>
+                      <option value="native_auto">Auto-SR Native Auto</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="wave2-inline-checks">
+                  <label class="wave2-check-chip" for="detail-upscale-autohdr">
+                    <input type="checkbox" id="detail-upscale-autohdr" class="setting-checkbox" />
+                    <span>Win11 Auto-HDR</span>
+                  </label>
+                  <label class="wave2-check-chip" for="detail-latency-flip-upgrade">
+                    <input type="checkbox" id="detail-latency-flip-upgrade" class="setting-checkbox" />
+                    <span>SwapEffectUpgrade</span>
+                  </label>
+                  <label class="wave2-check-chip wave2-sharpness-chip" for="detail-upscale-sharpness">
+                    <span>FSR Sharpness</span>
+                    <input type="range" id="detail-upscale-sharpness" min="0" max="1" step="0.05" value="0.75" />
+                  </label>
+                </div>
+                <div class="detail-save-actions">
+                  <button type="button" class="btn btn-primary btn-xs" id="btn-detail-save-display-tuning">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-monitor"/></svg>
+                    <span>Save &amp; Apply Windows Profile</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-promote-borderless">
+                    <span>Promote Running Window</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-reset-latency-reg">
+                    <span>Clear Registry</span>
+                  </button>
+                </div>
+                <p class="panel-sub mono-num" id="detail-upscale-plan-readout">Viewport &amp; Registry Guard standing by.</p>
+              </div>
+
+              <!-- DirectStorage 1.4, VHDX Hot-Tier Staging & Deep Shrink v2 -->
+              <div class="panel-card detail-card-span2" id="detail-storage-v2-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>DirectStorage Zstd, VHDX Hot-Tier &amp; Deep Shrink v2</h3>
+                    <p class="detail-micro-caption">GPU-ready Zstd archive repacking, VirtDisk `.vhdx` + IoRing NVMe hot staging, and CAS-backed foreign voiceover stripping.</p>
+                  </div>
+                  <span class="pill mono-num" id="detail-ds-backend-pill">Probing...</span>
+                </div>
+                <div class="wave2-three-col">
+                  <div class="wave2-subpanel">
+                    <div class="detail-field-head">
+                      <strong>DirectStorage 1.4 Repacker</strong>
+                      <span class="mono-num panel-sub" id="detail-ds-status">Unscanned</span>
+                    </div>
+                    <p class="panel-sub mono-num" id="detail-ds-readout">Probes dstorage.dll / dstoragecore.dll / gacl.dll &amp; repacks uncompressed .pak/.ba2/.forge into 64 KiB Zstd streams.</p>
+                    <div class="detail-save-actions">
+                      <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-ds-scan">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg>
+                        <span>Scan Archives</span>
+                      </button>
+                      <button type="button" class="btn btn-primary btn-xs" id="btn-detail-ds-repack">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-zap"/></svg>
+                        <span>Repack Zstd</span>
+                      </button>
+                      <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-ds-verify">
+                        <span>Verify Streams</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="wave2-subpanel">
+                    <div class="detail-field-head">
+                      <strong>VirtDisk .vhdx + IoRing Hot-Tier</strong>
+                      <span class="mono-num panel-sub" id="detail-vhdx-status">Unstaged</span>
+                    </div>
+                    <p class="panel-sub mono-num" id="detail-vhdx-readout">Eliminates secondary-drive small-file seek thrashing with compressed VHDX containers &amp; IoRing NVMe hot staging.</p>
+                    <label class="wave2-check-chip" for="detail-vhdx-autostage">
+                      <input type="checkbox" id="detail-vhdx-autostage" class="setting-checkbox" />
+                      <span>Auto-Stage Hot Blocks Before Launch</span>
+                    </label>
+                    <div class="detail-save-actions">
+                      <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-vhdx-containerize">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-box"/></svg>
+                        <span>Containerize .vhdx</span>
+                      </button>
+                      <button type="button" class="btn btn-primary btn-xs" id="btn-detail-vhdx-stage">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-hard-drive"/></svg>
+                        <span>Stage Hot-Tier</span>
+                      </button>
+                      <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-vhdx-unstage">
+                        <span>Unstage</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="wave2-subpanel">
+                    <div class="detail-field-head">
+                      <strong>Deep Shrink v2 (Languages)</strong>
+                      <span class="mono-num panel-sub" id="detail-shrink-status">Ready</span>
+                    </div>
+                    <div id="detail-shrink-buckets" class="wave2-shrink-buckets">
+                      <span class="panel-sub">Click Scan Languages to detect foreign voiceovers (*_french.*, *_german.*, *_japanese.*, *_spanish.*, *_russian.*) &amp; duplicate .wem/.bik media.</span>
+                    </div>
+                    <label class="wave2-check-chip" for="detail-shrink-dedup-media">
+                      <input type="checkbox" id="detail-shrink-dedup-media" class="setting-checkbox" checked />
+                      <span>Hardlink Duplicate .wem / .bik Media</span>
+                    </label>
+                    <div class="detail-save-actions">
+                      <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-shrink-scan">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg>
+                        <span>Scan Languages</span>
+                      </button>
+                      <button type="button" class="btn btn-primary btn-xs" id="btn-detail-shrink-apply">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
+                        <span>Strip Selected + CAS</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </section>
@@ -2063,6 +2273,77 @@
                     </div>
                   </div>
                   <div id="frontier-owned-titles-list" class="frontier-owned-grid"></div>
+                </div>
+              </div>
+
+              <!-- Wave 2 (v0.7.0) DirectStorage, Latency Lab, Driver Guard & Library Deduplicator -->
+              <div class="panel-card" id="settings-wave2-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>Wave 2 Engine (DirectStorage 1.4, Latency Lab &amp; Deep Shrink)</h3>
+                    <p class="panel-sub">Hardware GPU decompression probe, MPO Flip-Queue status, automatic Driver Profile Guard (Auto-SR / Auto-HDR), vendor shader-cache caps, and library-wide BLAKE3 hardlink deduplication.</p>
+                  </div>
+                  <div class="settings-btn-group">
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-wave2-refresh-diag">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-gauge"/></svg>
+                      <span>Refresh Wave 2 Telemetry</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-wave2-driver-guard-sync">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-shield-check"/></svg>
+                      <span>Re-Apply Driver Profiles</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="frontier-telemetry-grid">
+                  <div class="frontier-stat-tile">
+                    <span class="frontier-stat-label">DirectStorage GPU Decompression</span>
+                    <span class="frontier-stat-val mono-num" id="wave2-ds-capability">Checking...</span>
+                  </div>
+                  <div class="frontier-stat-tile">
+                    <span class="frontier-stat-label">Runtime DLLs (dstorage / gacl)</span>
+                    <span class="frontier-stat-val mono-num" id="wave2-ds-dlls">Probing...</span>
+                  </div>
+                  <div class="frontier-stat-tile">
+                    <span class="frontier-stat-label">Windows 11 MPO &amp; ETW X-Ray</span>
+                    <span class="frontier-stat-val mono-num" id="wave2-mpo-status">Checking...</span>
+                  </div>
+                  <div class="frontier-stat-tile">
+                    <span class="frontier-stat-label">Driver Profile Guard</span>
+                    <span class="frontier-stat-val mono-num" id="wave2-driver-guard-status">Standing By</span>
+                  </div>
+                </div>
+
+                <div class="frontier-store-card">
+                  <div class="panel-head">
+                    <div>
+                      <h4>Vendor Shader-Cache Size Cap (NVIDIA / AMD / Intel / DirectX)</h4>
+                      <p class="panel-sub mono-num" id="wave2-shader-cap-status">Measuring vendor shader cache footprint...</p>
+                    </div>
+                    <div class="settings-inline-form">
+                      <input type="number" id="input-wave2-shader-cap-mb" class="input-control select-compact mono-num" min="512" max="32768" step="512" value="4096" aria-label="Shader Cache Cap (MB)" />
+                      <button type="button" class="btn btn-secondary btn-sm" id="btn-wave2-enforce-shader-cap">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>
+                        <span>Enforce Cap (MB)</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="frontier-store-card">
+                  <div class="panel-head">
+                    <div>
+                      <h4>Library-Wide BLAKE3 Hardlink Deduplicator</h4>
+                      <p class="panel-sub mono-num" id="wave2-dedup-status">Zero-duplication NTFS hardlinks across shared movies, redistributables, and cross-title archives (&ge;512 KiB).</p>
+                    </div>
+                    <div class="settings-inline-form">
+                      <input type="text" id="input-wave2-dedup-root" class="input-control mono-num" placeholder="Optional extra library root folder..." />
+                      <button type="button" class="btn btn-primary btn-sm" id="btn-wave2-library-blake3-dedup">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-layers"/></svg>
+                        <span>Deduplicate Library</span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
 

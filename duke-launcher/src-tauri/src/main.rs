@@ -5,11 +5,16 @@ mod achievements;
 mod artwork;
 mod bench;
 mod catalog_mmap;
+mod deep_shrink;
 mod delta_patch;
+mod direct_storage;
 mod duke_link;
+mod duke_upscale;
 mod emulators;
+mod etw_xray;
 mod friends;
 mod importers;
+mod latency_lab;
 mod ludusavi;
 mod mcp;
 mod metadata_ext;
@@ -32,6 +37,7 @@ mod store_direct;
 mod stream_extract;
 mod swarm;
 mod time_machine;
+mod vhdx_stage;
 
 use duke_core::pipe_ipc::{DukeBus, DukeEvent};
 use duke_core::shm_bus::{DukeShmBus, ShmEventType, ShmSourceApp};
@@ -8204,6 +8210,19 @@ async fn launch_game_internal(
         }
     }
 
+    if let Some(ref stage_gid) = game_id {
+        if let Some(stage_msg) = vhdx_stage::ensure_game_hot_staged_before_launch(stage_gid, &game_root_dir) {
+            let _ = app.emit(
+                "vhdx-hot-tier-staged",
+                serde_json::json!({ "gameId": stage_gid, "message": stage_msg }),
+            );
+        }
+    }
+    latency_lab::apply_saved_profile_if_present(&trimmed);
+    for (k, v) in latency_lab::shader_cache_launch_env() {
+        cmd.env(k, v);
+    }
+
     let mut child = cmd.spawn().map_err(|e| {
         restore_normal_priority_mode();
         let _ = window.show();
@@ -8281,6 +8300,28 @@ async fn launch_game_internal(
             achievements::start_achievement_watcher(app.clone(), matched);
             time_machine::start_save_watcher(app.clone(), matched);
         }
+    }
+
+    if game_pid > 0 {
+        let emu_hint = if resolved_emu_id.is_empty() {
+            item_emulator_id.clone()
+        } else {
+            Some(resolved_emu_id.clone())
+        };
+        etw_xray::start_session_xray(
+            &app,
+            &session_key,
+            &game_title,
+            game_pid,
+            job_handle_opt.clone(),
+        );
+        duke_upscale::spawn_window_orchestrator(
+            session_key.clone(),
+            trimmed.clone(),
+            emu_hint,
+            game_pid,
+            job_handle_opt.clone(),
+        );
     }
 
     let launch_exe_hash = duke_core::shm_bus::fnv1a_hash64(trimmed.to_ascii_lowercase().as_bytes());
@@ -8457,6 +8498,14 @@ async fn launch_game_internal(
         }
         quick_resume::unregister_slot(&session_key_after);
         let _ = app_after.emit("quick-resume-updated", quick_resume::build_summary_snapshot());
+
+        duke_upscale::stop_game_upscale_runtime(&session_key_after);
+        etw_xray::stop_and_persist_scorecard(
+            &app_after,
+            &session_key_after,
+            &game_title_after,
+            raw_elapsed.as_secs_f64(),
+        );
 
         if frame_pacing_enabled_exit {
             let fp = duke_core::win32_ffi::end_frame_pacing_runtime();
@@ -8957,6 +9006,14 @@ pub(crate) async fn launch_game_detached_headless(
                 cmd.env(k, v);
             }
         }
+    }
+
+    if let Some(stage_gid) = game_id {
+        let _ = vhdx_stage::ensure_game_hot_staged_before_launch(stage_gid, &game_root_dir);
+    }
+    latency_lab::apply_saved_profile_if_present(&effective_target);
+    for (k, v) in latency_lab::shader_cache_launch_env() {
+        cmd.env(k, v);
     }
 
     let child = cmd
@@ -13833,6 +13890,9 @@ fn main() {
             // Run non-blocking startup self-healing (.bak JSON recovery, paused download reset, orphan tmp & dkcat verification).
             self_heal::spawn_startup_self_heal(app.handle().clone());
 
+            // Non-blocking Driver Profile Guard: detects DXGI driver updates and re-applies UserGpuPreferences & Auto-SR profiles.
+            latency_lab::spawn_startup_driver_profile_guard(app.handle().clone());
+
             // Non-blocking background sync of Nintendo & retro Libretro RDB catalog into `catalog.dkcat` if empty
             retro_catalog::spawn_background_retro_catalog_sync_if_needed(app.handle().clone());
 
@@ -14123,7 +14183,30 @@ fn main() {
             time_machine::create_time_machine_branch,
             time_machine::switch_time_machine_branch,
             time_machine::restore_time_machine_checkpoint,
-            time_machine::delete_time_machine_checkpoint
+            time_machine::delete_time_machine_checkpoint,
+            direct_storage::probe_direct_storage_capability,
+            direct_storage::scan_direct_storage_assets,
+            direct_storage::repack_game_direct_storage_assets,
+            direct_storage::verify_direct_storage_streams,
+            vhdx_stage::get_vhdx_stage_status,
+            vhdx_stage::containerize_game_to_vhdx,
+            vhdx_stage::stage_game_hot_tier,
+            vhdx_stage::unstage_or_detach_vhdx,
+            duke_upscale::get_game_upscale_profile,
+            duke_upscale::save_game_upscale_profile,
+            duke_upscale::promote_game_window_borderless,
+            latency_lab::get_latency_lab_status,
+            latency_lab::get_game_latency_profile,
+            latency_lab::apply_game_latency_profile,
+            latency_lab::remove_game_latency_profile,
+            latency_lab::run_driver_profile_guard,
+            latency_lab::enforce_shader_cache_cap,
+            etw_xray::probe_etw_xray_capability,
+            etw_xray::get_game_xray_scorecards,
+            etw_xray::clear_game_xray_scorecards,
+            deep_shrink::scan_game_deep_shrink,
+            deep_shrink::apply_game_deep_shrink,
+            deep_shrink::deduplicate_library_blake3
         ])
         .build(tauri::generate_context!())
     {

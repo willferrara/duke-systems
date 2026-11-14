@@ -153,6 +153,18 @@ type BuildIoRingReadFileFn = unsafe extern "system" fn(
 ) -> i32;
 
 #[cfg(target_os = "windows")]
+type BuildIoRingWriteFileFn = unsafe extern "system" fn(
+    io_ring: *mut core::ffi::c_void,
+    file_ref: IoringHandleRef,
+    data_ref: IoringBufferRef,
+    number_of_bytes_to_write: u32,
+    file_offset: u64,
+    write_flags: u32,
+    user_data: usize,
+    sqe_flags: u32,
+) -> i32;
+
+#[cfg(target_os = "windows")]
 type SubmitIoRingFn = unsafe extern "system" fn(
     io_ring: *mut core::ffi::c_void,
     wait_operations: u32,
@@ -172,6 +184,7 @@ type CloseIoRingFn = unsafe extern "system" fn(io_ring: *mut core::ffi::c_void) 
 struct IoRingProcs {
     create_io_ring: CreateIoRingFn,
     build_read_file: BuildIoRingReadFileFn,
+    build_write_file: Option<BuildIoRingWriteFileFn>,
     submit_io_ring: SubmitIoRingFn,
     pop_completion: PopIoRingCompletionFn,
     close_io_ring: CloseIoRingFn,
@@ -194,12 +207,18 @@ fn get_ioring_procs() -> Option<IoRingProcs> {
                 .ok()?;
             let create = GetProcAddress(hmod, s!("CreateIoRing"))?;
             let build = GetProcAddress(hmod, s!("BuildIoRingReadFile"))?;
+            let build_write = GetProcAddress(hmod, s!("BuildIoRingWriteFile")).map(|p| {
+                std::mem::transmute::<unsafe extern "system" fn() -> isize, BuildIoRingWriteFileFn>(
+                    p,
+                )
+            });
             let submit = GetProcAddress(hmod, s!("SubmitIoRing"))?;
             let pop = GetProcAddress(hmod, s!("PopIoRingCompletion"))?;
             let close = GetProcAddress(hmod, s!("CloseIoRing"))?;
             Some(IoRingProcs {
                 create_io_ring: std::mem::transmute::<unsafe extern "system" fn() -> isize, CreateIoRingFn>(create),
                 build_read_file: std::mem::transmute::<unsafe extern "system" fn() -> isize, BuildIoRingReadFileFn>(build),
+                build_write_file: build_write,
                 submit_io_ring: std::mem::transmute::<unsafe extern "system" fn() -> isize, SubmitIoRingFn>(submit),
                 pop_completion: std::mem::transmute::<unsafe extern "system" fn() -> isize, PopIoRingCompletionFn>(pop),
                 close_io_ring: std::mem::transmute::<unsafe extern "system" fn() -> isize, CloseIoRingFn>(close),
@@ -964,6 +983,289 @@ pub fn warm_single_file_with_options(
     })
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IoRingTransferReport {
+    pub bytes_transferred: u64,
+    pub used_ioring_api: bool,
+    pub elapsed_ms: u64,
+    pub backend: String,
+}
+
+#[cfg(target_os = "windows")]
+fn try_ioring_copy_file_windows(src: &Path, dst: &Path, size_bytes: u64) -> Result<u64, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Storage::FileSystem::{
+        CREATE_ALWAYS, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_SEQUENTIAL_SCAN,
+        FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::core::PCWSTR;
+
+    let procs = get_ioring_procs().ok_or_else(|| "IoRing APIs unavailable".to_string())?;
+    let write_fn = procs
+        .build_write_file
+        .ok_or_else(|| "BuildIoRingWriteFile unavailable".to_string())?;
+    if windows_build_number() < IORING_MIN_WIN11_BUILD {
+        return Err("Windows build below 22621".to_string());
+    }
+    if size_bytes == 0 {
+        std::fs::write(dst, []).map_err(|e| format!("Failed creating empty destination: {e}"))?;
+        return Ok(0);
+    }
+
+    let src_w: Vec<u16> = src
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let dst_w: Vec<u16> = dst
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let src_h = unsafe {
+        CreateFileW(
+            PCWSTR(src_w.as_ptr()),
+            FILE_GENERIC_READ.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+            None,
+        )
+    }
+    .map_err(|e| format!("Open source failed: {e}"))?;
+
+    let dst_h = match unsafe {
+        CreateFileW(
+            PCWSTR(dst_w.as_ptr()),
+            FILE_GENERIC_WRITE.0,
+            FILE_SHARE_READ,
+            None,
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+            None,
+        )
+    } {
+        Ok(h) => h,
+        Err(e) => {
+            unsafe {
+                let _ = CloseHandle(src_h);
+            }
+            return Err(format!("Create destination failed: {e}"));
+        }
+    };
+
+    let mut ring: *mut core::ffi::c_void = std::ptr::null_mut();
+    let flags = IoringCreateFlags::default();
+    let mut create_hr = -1i32;
+    for ver in [3u32, 2u32] {
+        create_hr = unsafe { (procs.create_io_ring)(ver, flags, 64, 64, &mut ring) };
+        if create_hr >= 0 && !ring.is_null() {
+            break;
+        }
+    }
+    if create_hr < 0 || ring.is_null() {
+        unsafe {
+            let _ = CloseHandle(src_h);
+            let _ = CloseHandle(dst_h);
+        }
+        return Err(format!("CreateIoRing v2/v3 failed: 0x{:08X}", create_hr as u32));
+    }
+
+    let mut slot_buffers: Vec<Vec<u8>> = (0..IORING_BATCH_SLOTS)
+        .map(|_| vec![0u8; IORING_SLOT_BYTES])
+        .collect();
+    let src_ref = IoringHandleRef {
+        kind: 0,
+        handle: src_h.0 as isize,
+    };
+    let dst_ref = IoringHandleRef {
+        kind: 0,
+        handle: dst_h.0 as isize,
+    };
+
+    let mut offset = 0u64;
+    let mut total_written = 0u64;
+    let mut io_err: Option<String> = None;
+
+    while offset < size_bytes {
+        let mut batch_spans: Vec<(usize, u64, u32)> = Vec::with_capacity(IORING_BATCH_SLOTS);
+        for (slot_idx, buf) in slot_buffers.iter_mut().enumerate() {
+            if offset >= size_bytes {
+                break;
+            }
+            let chunk = (size_bytes - offset).min(IORING_SLOT_BYTES as u64) as u32;
+            let data_ref = IoringBufferRef {
+                kind: 0,
+                address: buf.as_mut_ptr().cast::<core::ffi::c_void>(),
+            };
+            let hr = unsafe {
+                (procs.build_read_file)(ring, src_ref, data_ref, chunk, offset, slot_idx, 0)
+            };
+            if hr < 0 {
+                io_err = Some(format!("BuildIoRingReadFile failed: 0x{:08X}", hr as u32));
+                break;
+            }
+            batch_spans.push((slot_idx, offset, chunk));
+            offset = offset.saturating_add(chunk as u64);
+        }
+        if io_err.is_some() || batch_spans.is_empty() {
+            break;
+        }
+        let queued = batch_spans.len() as u32;
+        let mut submitted = 0u32;
+        let submit_hr = unsafe { (procs.submit_io_ring)(ring, queued, 15_000, &mut submitted) };
+        if submit_hr < 0 {
+            io_err = Some(format!("SubmitIoRing read failed: 0x{:08X}", submit_hr as u32));
+            break;
+        }
+        let mut read_sizes = [0u32; IORING_BATCH_SLOTS];
+        let mut drained = 0u32;
+        while drained < queued {
+            let mut cqe = IoringCqe::default();
+            if unsafe { (procs.pop_completion)(ring, &mut cqe) } != 0 {
+                break;
+            }
+            drained += 1;
+            if cqe.result_code < 0 {
+                io_err = Some(format!(
+                    "IoRing read CQE failed: 0x{:08X}",
+                    cqe.result_code as u32
+                ));
+                break;
+            }
+            if cqe.user_data < read_sizes.len() {
+                read_sizes[cqe.user_data] = cqe.information as u32;
+            }
+        }
+        if io_err.is_some() {
+            break;
+        }
+
+        let mut write_queued = 0u32;
+        for &(slot_idx, span_off, _req_len) in &batch_spans {
+            let actual = read_sizes[slot_idx];
+            if actual == 0 {
+                continue;
+            }
+            let data_ref = IoringBufferRef {
+                kind: 0,
+                address: slot_buffers[slot_idx].as_mut_ptr().cast::<core::ffi::c_void>(),
+            };
+            let hr = unsafe {
+                write_fn(ring, dst_ref, data_ref, actual, span_off, 0, slot_idx, 0)
+            };
+            if hr < 0 {
+                io_err = Some(format!("BuildIoRingWriteFile failed: 0x{:08X}", hr as u32));
+                break;
+            }
+            write_queued += 1;
+        }
+        if io_err.is_some() {
+            break;
+        }
+        if write_queued > 0 {
+            let mut w_submitted = 0u32;
+            let w_hr = unsafe { (procs.submit_io_ring)(ring, write_queued, 15_000, &mut w_submitted) };
+            if w_hr < 0 {
+                io_err = Some(format!("SubmitIoRing write failed: 0x{:08X}", w_hr as u32));
+                break;
+            }
+            let mut w_drained = 0u32;
+            while w_drained < write_queued {
+                let mut cqe = IoringCqe::default();
+                if unsafe { (procs.pop_completion)(ring, &mut cqe) } != 0 {
+                    break;
+                }
+                w_drained += 1;
+                if cqe.result_code < 0 {
+                    io_err = Some(format!(
+                        "IoRing write CQE failed: 0x{:08X}",
+                        cqe.result_code as u32
+                    ));
+                    break;
+                }
+                total_written = total_written.saturating_add(cqe.information as u64);
+            }
+            if io_err.is_some() {
+                break;
+            }
+        }
+    }
+
+    unsafe {
+        let _ = (procs.close_io_ring)(ring);
+        let _ = CloseHandle(src_h);
+        let _ = CloseHandle(dst_h);
+    }
+
+    if let Some(err) = io_err {
+        return Err(err);
+    }
+    Ok(total_written)
+}
+
+/// Copies `src` to `dst` using Windows 11 Kernel `IoRing` (`ReadFile` + `WriteFile`) when available,
+/// falling back cleanly to 64 KiB streaming buffered copy.
+pub fn ioring_copy_file(src: &Path, dst: &Path) -> Result<IoRingTransferReport, String> {
+    use std::io::{Read, Write};
+
+    let started = Instant::now();
+    let meta = fs::metadata(src)
+        .map_err(|e| format!("Failed reading source metadata {}: {e}", src.display()))?;
+    let size_bytes = meta.len();
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed creating destination parent {}: {e}", parent.display()))?;
+    }
+
+    #[cfg(target_os = "windows")]
+    if size_bytes >= 64 * 1024
+        && let Ok(written) = try_ioring_copy_file_windows(src, dst, size_bytes)
+        && written == size_bytes
+    {
+        return Ok(IoRingTransferReport {
+            bytes_transferred: written,
+            used_ioring_api: true,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            backend: format!("Win11 Kernel IoRing (Build {})", windows_build_number()),
+        });
+    }
+
+    let mut reader = fs::File::open(src)
+        .map_err(|e| format!("Failed opening source {}: {e}", src.display()))?;
+    let mut writer = fs::File::create(dst)
+        .map_err(|e| format!("Failed creating destination {}: {e}", dst.display()))?;
+    let mut buf = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| format!("Stream read failed on {}: {e}", src.display()))?;
+        if n == 0 {
+            break;
+        }
+        writer
+            .write_all(&buf[..n])
+            .map_err(|e| format!("Stream write failed on {}: {e}", dst.display()))?;
+        total = total.saturating_add(n as u64);
+    }
+    writer
+        .flush()
+        .map_err(|e| format!("Stream flush failed on {}: {e}", dst.display()))?;
+
+    Ok(IoRingTransferReport {
+        bytes_transferred: total,
+        used_ioring_api: false,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        backend: "64 KiB Streaming Fallback".to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1053,6 +1355,11 @@ mod tests {
         assert_eq!(report.warmed_bytes, 768 * 1024);
         #[cfg(target_os = "windows")]
         assert_eq!(report.used_ioring_api, cap.supported);
+
+        let dst = dir.join("chunk_copy.pak");
+        let xfer = ioring_copy_file(&pak, &dst).unwrap();
+        assert_eq!(xfer.bytes_transferred, 768 * 1024);
+        assert_eq!(fs::read(&dst).unwrap(), fs::read(&pak).unwrap());
 
         let _ = fs::remove_dir_all(&dir);
     }

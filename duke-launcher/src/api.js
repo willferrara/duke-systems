@@ -946,7 +946,7 @@ export async function getAppVersion() {
     // Fall back to explicit Rust compile-time CARGO_PKG_VERSION IPC
   }
   const backendVer = await invokeCommand("get_app_version");
-  return String(backendVer || "0.5.0").trim().replace(/^v/i, "");
+  return String(backendVer || "0.7.0").trim().replace(/^v/i, "");
 }
 
 export async function resolveCatalogCover(req = {}) {
@@ -1251,5 +1251,169 @@ export async function deleteTimeMachineCheckpoint(gameId, checkpointId) {
     checkpointId: String(checkpointId || "")
   });
 }
+
+// =========================================================================
+// Wave 2 (v0.7.0) DirectStorage, VHDX Hot-Tier, Upscaler, Latency Lab, ETW X-Ray & Deep Shrink
+// =========================================================================
+
+export async function probeDirectStorageCapability(gameId = null) {
+  return invokeCommand("probe_direct_storage_capability", {
+    gameId: gameId ? String(gameId) : null
+  });
+}
+
+export async function scanDirectStorageAssets(gameId, minFileMb = null) {
+  return invokeCommand("scan_direct_storage_assets", {
+    gameId: String(gameId || ""),
+    minFileMb: minFileMb != null ? Number(minFileMb) : null
+  });
+}
+
+export async function repackGameDirectStorageAssets(gameId, zstdLevel = 3, minFileMb = null, maxArchives = null) {
+  return invokeCommand("repack_game_direct_storage_assets", {
+    gameId: String(gameId || ""),
+    zstdLevel: zstdLevel != null ? Number(zstdLevel) : null,
+    minFileMb: minFileMb != null ? Number(minFileMb) : null,
+    maxArchives: maxArchives != null ? Number(maxArchives) : null
+  });
+}
+
+export async function verifyDirectStorageStreams(gameId) {
+  return invokeCommand("verify_direct_storage_streams", {
+    gameId: String(gameId || "")
+  });
+}
+
+export async function getVhdxStageStatus(gameId = null) {
+  return invokeCommand("get_vhdx_stage_status", {
+    gameId: gameId ? String(gameId) : null
+  });
+}
+
+export async function containerizeGameToVhdx(gameId, customContainerDir = null) {
+  return invokeCommand("containerize_game_to_vhdx", {
+    gameId: String(gameId || ""),
+    customContainerDir: customContainerDir ? String(customContainerDir) : null
+  });
+}
+
+export async function stageGameHotTier(gameId, budgetMb = 4096, autoStageOnLaunch = null) {
+  return invokeCommand("stage_game_hot_tier", {
+    gameId: String(gameId || ""),
+    budgetMb: budgetMb != null ? Number(budgetMb) : null,
+    autoStageOnLaunch: autoStageOnLaunch != null ? Boolean(autoStageOnLaunch) : null
+  });
+}
+
+export async function unstageOrDetachVhdx(gameId) {
+  return invokeCommand("unstage_or_detach_vhdx", {
+    gameId: String(gameId || "")
+  });
+}
+
+export async function getGameUpscaleProfile(gameId, exePath, emulatorId = null) {
+  return invokeCommand("get_game_upscale_profile", {
+    gameId: String(gameId || ""),
+    exePath: String(exePath || ""),
+    emulatorId: emulatorId ? String(emulatorId) : null
+  });
+}
+
+export async function saveGameUpscaleProfile(req = {}) {
+  return invokeCommand("save_game_upscale_profile", {
+    gameId: String(req.gameId || ""),
+    exePath: String(req.exePath || ""),
+    borderlessFlipPromote: Boolean(req.borderlessFlipPromote),
+    upscaleMode: String(req.upscaleMode || "off"),
+    fsrSharpness: Number(req.fsrSharpness ?? 0.75),
+    fpsCap: Number(req.fpsCap ?? 0),
+    autoHdr: Boolean(req.autoHdr),
+    emulatorId: req.emulatorId ? String(req.emulatorId) : null
+  });
+}
+
+export async function promoteGameWindowBorderless(pids = []) {
+  return invokeCommand("promote_game_window_borderless", {
+    pids: Array.isArray(pids) ? pids.map((p) => Number(p)) : []
+  });
+}
+
+export async function getLatencyLabStatus() {
+  return invokeCommand("get_latency_lab_status");
+}
+
+export async function getGameLatencyProfile(exePath) {
+  return invokeCommand("get_game_latency_profile", {
+    exePath: String(exePath || "")
+  });
+}
+
+export async function applyGameLatencyProfile(req = {}) {
+  return invokeCommand("apply_game_latency_profile", {
+    exePath: String(req.exePath || ""),
+    gpuPreference: Number(req.gpuPreference ?? 2),
+    flipModelUpgrade: Boolean(req.flipModelUpgrade),
+    autoHdrEnable: Boolean(req.autoHdrEnable),
+    autoSrMode: String(req.autoSrMode || "off")
+  });
+}
+
+export async function removeGameLatencyProfile(exePath) {
+  return invokeCommand("remove_game_latency_profile", {
+    exePath: String(exePath || "")
+  });
+}
+
+export async function runDriverProfileGuard(forceReapply = false) {
+  return invokeCommand("run_driver_profile_guard", {
+    forceReapply: Boolean(forceReapply)
+  });
+}
+
+export async function enforceShaderCacheCap(capMb = 4096) {
+  return invokeCommand("enforce_shader_cache_cap", {
+    capMb: Number(capMb || 4096)
+  });
+}
+
+export async function probeEtwXrayCapability() {
+  return invokeCommand("probe_etw_xray_capability");
+}
+
+export async function getGameXrayScorecards(gameId) {
+  return invokeCommand("get_game_xray_scorecards", {
+    gameId: String(gameId || "")
+  });
+}
+
+export async function clearGameXrayScorecards(gameId) {
+  return invokeCommand("clear_game_xray_scorecards", {
+    gameId: String(gameId || "")
+  });
+}
+
+export async function scanGameDeepShrink(gameId, keepLanguages = ["english"]) {
+  return invokeCommand("scan_game_deep_shrink", {
+    gameId: String(gameId || ""),
+    keepLanguages: Array.isArray(keepLanguages) ? keepLanguages : ["english"]
+  });
+}
+
+export async function applyGameDeepShrink(gameId, stripLanguages = [], dedupInternalMedia = true, keepLanguages = ["english"]) {
+  return invokeCommand("apply_game_deep_shrink", {
+    gameId: String(gameId || ""),
+    stripLanguages: Array.isArray(stripLanguages) ? stripLanguages : [],
+    dedupInternalMedia: Boolean(dedupInternalMedia),
+    keepLanguages: Array.isArray(keepLanguages) ? keepLanguages : ["english"]
+  });
+}
+
+export async function deduplicateLibraryBlake3(extraLibraryRoot = null, minFileKb = 512) {
+  return invokeCommand("deduplicate_library_blake3", {
+    extraLibraryRoot: extraLibraryRoot ? String(extraLibraryRoot) : null,
+    minFileKb: minFileKb != null ? Number(minFileKb) : null
+  });
+}
+
 
 

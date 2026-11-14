@@ -599,13 +599,38 @@ mod ext_ffi {
     type NtSetTimerResolutionFn = unsafe extern "system" fn(u32, u8, *mut u32) -> i32;
     type NtQueryTimerResolutionFn =
         unsafe extern "system" fn(*mut u32, *mut u32, *mut u32) -> i32;
+    type NtDelayExecutionFn = unsafe extern "system" fn(u8, *const i64) -> i32;
     type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XInputStateRaw) -> u32;
     type GetAsyncKeyStateFn = unsafe extern "system" fn(i32) -> i16;
     type RegOpenKeyExWFn =
         unsafe extern "system" fn(*mut c_void, *const u16, u32, u32, *mut *mut c_void) -> i32;
+    type RegCreateKeyExWFn = unsafe extern "system" fn(
+        *mut c_void,
+        *const u16,
+        u32,
+        *const u16,
+        u32,
+        u32,
+        *const c_void,
+        *mut *mut c_void,
+        *mut u32,
+    ) -> i32;
     type RegQueryValueExWFn = unsafe extern "system" fn(
         *mut c_void,
         *const u16,
+        *mut u32,
+        *mut u32,
+        *mut u8,
+        *mut u32,
+    ) -> i32;
+    type RegSetValueExWFn =
+        unsafe extern "system" fn(*mut c_void, *const u16, u32, u32, *const u8, u32) -> i32;
+    type RegDeleteValueWFn = unsafe extern "system" fn(*mut c_void, *const u16) -> i32;
+    type RegEnumValueWFn = unsafe extern "system" fn(
+        *mut c_void,
+        u32,
+        *mut u16,
+        *mut u32,
         *mut u32,
         *mut u32,
         *mut u8,
@@ -634,6 +659,7 @@ mod ext_ffi {
     static NT_RESUME_PROCESS: OnceLock<Option<NtProcessFn>> = OnceLock::new();
     static NT_SET_TIMER_RESOLUTION: OnceLock<Option<NtSetTimerResolutionFn>> = OnceLock::new();
     static NT_QUERY_TIMER_RESOLUTION: OnceLock<Option<NtQueryTimerResolutionFn>> = OnceLock::new();
+    static NT_DELAY_EXECUTION: OnceLock<Option<NtDelayExecutionFn>> = OnceLock::new();
     static XINPUT_GET_STATE: OnceLock<Option<XInputGetStateFn>> = OnceLock::new();
     static GET_ASYNC_KEY_STATE: OnceLock<Option<GetAsyncKeyStateFn>> = OnceLock::new();
     static ADVAPI_REG: OnceLock<Option<AdvapiRegProcs>> = OnceLock::new();
@@ -651,7 +677,11 @@ mod ext_ffi {
     #[derive(Clone, Copy)]
     struct AdvapiRegProcs {
         open_key: RegOpenKeyExWFn,
+        create_key: RegCreateKeyExWFn,
         query_value: RegQueryValueExWFn,
+        set_value: RegSetValueExWFn,
+        delete_value: RegDeleteValueWFn,
+        enum_value: RegEnumValueWFn,
         enum_key: RegEnumKeyExWFn,
         close_key: RegCloseKeyFn,
     }
@@ -725,6 +755,25 @@ mod ext_ffi {
         Ok(current)
     }
 
+    pub fn nt_delay_execution_100ns(relative_100ns: i64) -> Result<(), String> {
+        let delay_fn = (*NT_DELAY_EXECUTION.get_or_init(|| {
+            resolve_ntdll_raw(b"NtDelayExecution\0").map(|proc| unsafe {
+                std::mem::transmute::<unsafe extern "system" fn() -> isize, NtDelayExecutionFn>(proc)
+            })
+        }))
+        .ok_or_else(|| "NtDelayExecution unavailable in ntdll.dll".to_string())?;
+        let interval = if relative_100ns > 0 {
+            -relative_100ns
+        } else {
+            relative_100ns
+        };
+        let status = unsafe { delay_fn(0, &interval) };
+        if status < 0 {
+            return Err(format!("NtDelayExecution returned NTSTATUS 0x{:08X}", status as u32));
+        }
+        Ok(())
+    }
+
     fn resolve_xinput() -> Option<XInputGetStateFn> {
         unsafe {
             let hmod: HMODULE =
@@ -758,8 +807,15 @@ mod ext_ffi {
         unsafe {
             let hmod = LoadLibraryA(PCSTR::from_raw(c"advapi32.dll".as_ptr().cast())).ok()?;
             let open_p = GetProcAddress(hmod, PCSTR::from_raw(c"RegOpenKeyExW".as_ptr().cast()))?;
+            let create_p =
+                GetProcAddress(hmod, PCSTR::from_raw(c"RegCreateKeyExW".as_ptr().cast()))?;
             let query_p =
                 GetProcAddress(hmod, PCSTR::from_raw(c"RegQueryValueExW".as_ptr().cast()))?;
+            let set_p = GetProcAddress(hmod, PCSTR::from_raw(c"RegSetValueExW".as_ptr().cast()))?;
+            let del_p =
+                GetProcAddress(hmod, PCSTR::from_raw(c"RegDeleteValueW".as_ptr().cast()))?;
+            let enum_val_p =
+                GetProcAddress(hmod, PCSTR::from_raw(c"RegEnumValueW".as_ptr().cast()))?;
             let enum_p = GetProcAddress(hmod, PCSTR::from_raw(c"RegEnumKeyExW".as_ptr().cast()))?;
             let close_p = GetProcAddress(hmod, PCSTR::from_raw(c"RegCloseKey".as_ptr().cast()))?;
             Some(AdvapiRegProcs {
@@ -767,10 +823,26 @@ mod ext_ffi {
                     unsafe extern "system" fn() -> isize,
                     RegOpenKeyExWFn,
                 >(open_p),
+                create_key: std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    RegCreateKeyExWFn,
+                >(create_p),
                 query_value: std::mem::transmute::<
                     unsafe extern "system" fn() -> isize,
                     RegQueryValueExWFn,
                 >(query_p),
+                set_value: std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    RegSetValueExWFn,
+                >(set_p),
+                delete_value: std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    RegDeleteValueWFn,
+                >(del_p),
+                enum_value: std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    RegEnumValueWFn,
+                >(enum_val_p),
                 enum_key: std::mem::transmute::<
                     unsafe extern "system" fn() -> isize,
                     RegEnumKeyExWFn,
@@ -1042,6 +1114,219 @@ mod ext_ffi {
             }
             out.push(String::from_utf16_lossy(&name_buf[..name_len as usize]));
             idx += 1;
+        }
+
+        unsafe {
+            let _ = (procs.close_key)(hkey);
+        }
+        out
+    }
+
+    /// Writes or updates a `REG_SZ` string value under `HKCU` (`use_hklm = false`) or `HKLM` (`true`).
+    pub fn reg_write_string(
+        use_hklm: bool,
+        subkey: &str,
+        value_name: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        const HKEY_CURRENT_USER: usize = 0x8000_0001;
+        const HKEY_LOCAL_MACHINE: usize = 0x8000_0002;
+        const KEY_WRITE: u32 = 0x20006;
+        const REG_SZ: u32 = 1;
+
+        let procs = (*ADVAPI_REG.get_or_init(resolve_advapi_reg))
+            .ok_or_else(|| "advapi32 registry APIs unavailable".to_string())?;
+        let root = if use_hklm { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
+        let sub_w = to_wide_null(subkey);
+        let mut hkey: *mut c_void = core::ptr::null_mut();
+        let rc_open = unsafe {
+            (procs.create_key)(
+                root as *mut c_void,
+                sub_w.as_ptr(),
+                0,
+                core::ptr::null(),
+                0,
+                KEY_WRITE,
+                core::ptr::null(),
+                &mut hkey,
+                core::ptr::null_mut(),
+            )
+        };
+        if rc_open != 0 || hkey.is_null() {
+            return Err(format!("RegCreateKeyExW('{subkey}') failed: error {rc_open}"));
+        }
+        let val_w = to_wide_null(value_name);
+        let data_w = to_wide_null(value);
+        let byte_len = (data_w.len() * 2) as u32;
+        let rc_set = unsafe {
+            (procs.set_value)(
+                hkey,
+                val_w.as_ptr(),
+                0,
+                REG_SZ,
+                data_w.as_ptr().cast::<u8>(),
+                byte_len,
+            )
+        };
+        unsafe {
+            let _ = (procs.close_key)(hkey);
+        }
+        if rc_set != 0 {
+            return Err(format!("RegSetValueExW('{value_name}') failed: error {rc_set}"));
+        }
+        Ok(())
+    }
+
+    /// Writes or updates a 32-bit `REG_DWORD` value under `HKCU` (`use_hklm = false`) or `HKLM` (`true`).
+    pub fn reg_write_dword(
+        use_hklm: bool,
+        subkey: &str,
+        value_name: &str,
+        value: u32,
+    ) -> Result<(), String> {
+        const HKEY_CURRENT_USER: usize = 0x8000_0001;
+        const HKEY_LOCAL_MACHINE: usize = 0x8000_0002;
+        const KEY_WRITE: u32 = 0x20006;
+        const REG_DWORD: u32 = 4;
+
+        let procs = (*ADVAPI_REG.get_or_init(resolve_advapi_reg))
+            .ok_or_else(|| "advapi32 registry APIs unavailable".to_string())?;
+        let root = if use_hklm { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
+        let sub_w = to_wide_null(subkey);
+        let mut hkey: *mut c_void = core::ptr::null_mut();
+        let rc_open = unsafe {
+            (procs.create_key)(
+                root as *mut c_void,
+                sub_w.as_ptr(),
+                0,
+                core::ptr::null(),
+                0,
+                KEY_WRITE,
+                core::ptr::null(),
+                &mut hkey,
+                core::ptr::null_mut(),
+            )
+        };
+        if rc_open != 0 || hkey.is_null() {
+            return Err(format!("RegCreateKeyExW('{subkey}') failed: error {rc_open}"));
+        }
+        let val_w = to_wide_null(value_name);
+        let bytes = value.to_le_bytes();
+        let rc_set = unsafe {
+            (procs.set_value)(
+                hkey,
+                val_w.as_ptr(),
+                0,
+                REG_DWORD,
+                bytes.as_ptr(),
+                4,
+            )
+        };
+        unsafe {
+            let _ = (procs.close_key)(hkey);
+        }
+        if rc_set != 0 {
+            return Err(format!("RegSetValueExW('{value_name}') failed: error {rc_set}"));
+        }
+        Ok(())
+    }
+
+    /// Deletes a named value from a Windows Registry key (`Ok(false)` if key/value did not exist).
+    pub fn reg_delete_value(
+        use_hklm: bool,
+        subkey: &str,
+        value_name: &str,
+    ) -> Result<bool, String> {
+        const HKEY_CURRENT_USER: usize = 0x8000_0001;
+        const HKEY_LOCAL_MACHINE: usize = 0x8000_0002;
+        const KEY_SET_VALUE: u32 = 0x0002;
+        const ERROR_FILE_NOT_FOUND: i32 = 2;
+
+        let procs = (*ADVAPI_REG.get_or_init(resolve_advapi_reg))
+            .ok_or_else(|| "advapi32 registry APIs unavailable".to_string())?;
+        let root = if use_hklm { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
+        let sub_w = to_wide_null(subkey);
+        let mut hkey: *mut c_void = core::ptr::null_mut();
+        let rc_open = unsafe {
+            (procs.open_key)(
+                root as *mut c_void,
+                sub_w.as_ptr(),
+                0,
+                KEY_SET_VALUE,
+                &mut hkey,
+            )
+        };
+        if rc_open == ERROR_FILE_NOT_FOUND {
+            return Ok(false);
+        }
+        if rc_open != 0 || hkey.is_null() {
+            return Err(format!("RegOpenKeyExW('{subkey}') failed: error {rc_open}"));
+        }
+        let val_w = to_wide_null(value_name);
+        let rc_del = unsafe { (procs.delete_value)(hkey, val_w.as_ptr()) };
+        unsafe {
+            let _ = (procs.close_key)(hkey);
+        }
+        if rc_del == ERROR_FILE_NOT_FOUND {
+            Ok(false)
+        } else if rc_del != 0 {
+            Err(format!("RegDeleteValueW('{value_name}') failed: error {rc_del}"))
+        } else {
+            Ok(true)
+        }
+    }
+
+    /// Enumerates all `REG_SZ` / `REG_EXPAND_SZ` `(name, value)` pairs inside a Windows Registry key.
+    pub fn reg_enum_string_values(use_hklm: bool, subkey: &str) -> Vec<(String, String)> {
+        const HKEY_CURRENT_USER: usize = 0x8000_0001;
+        const HKEY_LOCAL_MACHINE: usize = 0x8000_0002;
+        const REG_SZ: u32 = 1;
+        const REG_EXPAND_SZ: u32 = 2;
+
+        let root = if use_hklm { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
+        let Some((hkey, procs)) = open_reg_key(root, subkey) else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        let mut idx = 0u32;
+        let mut name_buf = vec![0u16; 1024];
+        let mut data_buf = vec![0u8; 4096];
+
+        loop {
+            let mut name_len = name_buf.len() as u32;
+            let mut data_len = data_buf.len() as u32;
+            let mut reg_type = 0u32;
+            let rc = unsafe {
+                (procs.enum_value)(
+                    hkey,
+                    idx,
+                    name_buf.as_mut_ptr(),
+                    &mut name_len,
+                    core::ptr::null_mut(),
+                    &mut reg_type,
+                    data_buf.as_mut_ptr(),
+                    &mut data_len,
+                )
+            };
+            if rc != 0 {
+                break;
+            }
+            idx += 1;
+            if reg_type != REG_SZ && reg_type != REG_EXPAND_SZ {
+                continue;
+            }
+            let name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+            let u16_count = (data_len as usize) / 2;
+            let mut wide = Vec::with_capacity(u16_count);
+            for chunk in data_buf[..u16_count * 2].as_chunks::<2>().0 {
+                let ch = u16::from_le_bytes([chunk[0], chunk[1]]);
+                if ch == 0 {
+                    break;
+                }
+                wide.push(ch);
+            }
+            out.push((name, String::from_utf16_lossy(&wide)));
         }
 
         unsafe {
@@ -1549,7 +1834,36 @@ mod ext_ffi {
     pub fn nt_set_timer_resolution(_desired_100ns: u32, _enable: bool) -> Result<u32, String> {
         Err("NtSetTimerResolution is only supported on Windows".to_string())
     }
+    pub fn nt_delay_execution_100ns(_relative_100ns: i64) -> Result<(), String> {
+        Err("NtDelayExecution is only supported on Windows".to_string())
+    }
     pub fn reg_enum_subkeys(_use_hklm: bool, _subkey: &str) -> Vec<String> {
+        Vec::new()
+    }
+    pub fn reg_write_string(
+        _use_hklm: bool,
+        _subkey: &str,
+        _value_name: &str,
+        _value: &str,
+    ) -> Result<(), String> {
+        Err("Registry write is only supported on Windows".to_string())
+    }
+    pub fn reg_write_dword(
+        _use_hklm: bool,
+        _subkey: &str,
+        _value_name: &str,
+        _value: u32,
+    ) -> Result<(), String> {
+        Err("Registry write is only supported on Windows".to_string())
+    }
+    pub fn reg_delete_value(
+        _use_hklm: bool,
+        _subkey: &str,
+        _value_name: &str,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
+    pub fn reg_enum_string_values(_use_hklm: bool, _subkey: &str) -> Vec<(String, String)> {
         Vec::new()
     }
     pub fn find_pid_by_exe_name(_exe_name: &str) -> Option<u32> {
@@ -1666,9 +1980,10 @@ pub fn is_hotkey_pressed(spec: &HotkeySpec) -> bool {
 
 pub use ext_ffi::{
     create_hard_link, create_process_tree_job, find_pid_by_exe_name, is_process_tree_minimized,
-    is_vk_down, poll_xinput_state, reg_enum_subkeys, reg_read_dword, reg_read_string,
-    resume_external_pid, resume_process_tree, suspend_external_pid, suspend_process_tree,
-    ProcessTreeJob,
+    is_vk_down, nt_delay_execution_100ns, poll_xinput_state, reg_delete_value,
+    reg_enum_string_values, reg_enum_subkeys, reg_read_dword, reg_read_string, reg_write_dword,
+    reg_write_string, resume_external_pid, resume_process_tree, suspend_external_pid,
+    suspend_process_tree, ProcessTreeJob,
 };
 
 /// `0.5 ms` Windows kernel timer resolution target (`5000` × 100 ns units).
@@ -2267,5 +2582,24 @@ mod tests {
         assert!(!nv_dir.join("old_cache.bin").exists());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn nt_delay_and_registry_roundtrip_work() {
+        assert!(nt_delay_execution_100ns(-1_000).is_ok());
+        let subkey = format!("Software\\DukeSystems\\UnitTest_{}", std::process::id());
+        let val_name = "C:\\Games\\Sample\\game.exe";
+        reg_write_string(false, &subkey, val_name, "GpuPreference=2;AutoHDREnable=1;").unwrap();
+        assert_eq!(
+            reg_read_string(false, &subkey, val_name).as_deref(),
+            Some("GpuPreference=2;AutoHDREnable=1;")
+        );
+        let listed = reg_enum_string_values(false, &subkey);
+        assert!(listed.iter().any(|(k, v)| k == val_name && v.contains("GpuPreference=2;")));
+        reg_write_dword(false, &subkey, "TestDword", 42).unwrap();
+        assert_eq!(reg_read_dword(false, &subkey, "TestDword"), Some(42));
+        assert!(reg_delete_value(false, &subkey, val_name).unwrap());
+        assert!(reg_delete_value(false, &subkey, "TestDword").unwrap());
     }
 }

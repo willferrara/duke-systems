@@ -161,7 +161,30 @@ import {
   createTimeMachineBranch,
   switchTimeMachineBranch,
   restoreTimeMachineCheckpoint,
-  deleteTimeMachineCheckpoint
+  deleteTimeMachineCheckpoint,
+  probeDirectStorageCapability,
+  scanDirectStorageAssets,
+  repackGameDirectStorageAssets,
+  verifyDirectStorageStreams,
+  getVhdxStageStatus,
+  containerizeGameToVhdx,
+  stageGameHotTier,
+  unstageOrDetachVhdx,
+  getGameUpscaleProfile,
+  saveGameUpscaleProfile,
+  promoteGameWindowBorderless,
+  getLatencyLabStatus,
+  getGameLatencyProfile,
+  applyGameLatencyProfile,
+  removeGameLatencyProfile,
+  runDriverProfileGuard,
+  enforceShaderCacheCap,
+  probeEtwXrayCapability,
+  getGameXrayScorecards,
+  clearGameXrayScorecards,
+  scanGameDeepShrink,
+  applyGameDeepShrink,
+  deduplicateLibraryBlake3
 } from "./api.js";
 
 const BOOKMARKLET_HREF =
@@ -268,6 +291,14 @@ const state = {
   detailModGraph: null,
   detailTimeMachine: null,
   detailTimeMachineSelectedIdx: 0,
+  detailXrayHistory: null,
+  detailXrayLiveTick: null,
+  detailUpscaleStatus: null,
+  detailLatencyProfile: null,
+  detailDirectStorageScan: null,
+  detailVhdxState: null,
+  detailDeepShrinkScan: null,
+  latencyLabStatus: null,
   suiteAutonomyStatus: null,
   dukeLinkStatus: null,
   dukeLinkInviteUri: "",
@@ -2019,6 +2050,366 @@ async function refreshFrontierDiagnostics() {
   } catch {
     // Non-critical telemetry refresh.
   }
+  refreshWave2Diagnostics().catch(() => {});
+}
+
+function setSelectValueSafe(selectEl, rawVal) {
+  if (!selectEl) return;
+  const target = String(rawVal ?? "");
+  const opts = Array.from(selectEl.options || []);
+  const exact = opts.find((o) => o.value === target);
+  if (exact) {
+    selectEl.value = exact.value;
+    return;
+  }
+  const norm = target.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const fuzzy = opts.find((o) => o.value.toLowerCase().replace(/[^a-z0-9]/g, "") === norm);
+  if (fuzzy) selectEl.value = fuzzy.value;
+}
+
+function applyWave2XrayMetrics(m, isLive, cap) {
+  const avgEl = el("detail-xray-avg-fps");
+  const p1El = el("detail-xray-1pct-fps");
+  const p01El = el("detail-xray-01pct-fps");
+  const latEl = el("detail-xray-latency-ms");
+  const verdictEl = el("detail-xray-bottleneck-text");
+  const stutterEl = el("detail-xray-stutters");
+  const cpuBar = el("detail-xray-cpu-bar");
+  const gpuBar = el("detail-xray-gpu-bar");
+  const sourceEl = el("detail-xray-source");
+  const livePill = el("detail-xray-live-pill");
+
+  if (livePill) {
+    livePill.textContent = isLive
+      ? `Live X-Ray · PID ${Number(m?.pid || 0)}`
+      : cap?.modeLabel || "Anti-Cheat Safe (Zero DLL Injection)";
+  }
+
+  if (!m) {
+    if (avgEl) avgEl.textContent = "—";
+    if (p1El) p1El.textContent = "—";
+    if (p01El) p01El.textContent = "—";
+    if (latEl) latEl.textContent = "—";
+    if (verdictEl) verdictEl.textContent = "No gameplay session captured yet";
+    if (stutterEl) stutterEl.textContent = "0 Spikes";
+    if (cpuBar) cpuBar.style.width = "50%";
+    if (gpuBar) gpuBar.style.width = "50%";
+    if (sourceEl) sourceEl.textContent = cap?.modeLabel || "ETW Consumer Ready (Zero Injection)";
+    return;
+  }
+
+  const low01 = m.low01pctFps ?? m.low0_1pctFps ?? 0;
+  if (avgEl) avgEl.textContent = `${Number(m.avgFps || 0).toFixed(1)} FPS`;
+  if (p1El) p1El.textContent = `${Number(m.low1pctFps || 0).toFixed(1)} FPS`;
+  if (p01El) p01El.textContent = `${Number(low01 || 0).toFixed(1)} FPS`;
+  if (latEl) latEl.textContent = `${Number(m.gpuPresentLatencyMs || 0).toFixed(2)} ms`;
+
+  let cpuPct = Number(m.cpuBoundPct);
+  let gpuPct = Number(m.gpuBoundPct);
+  if (!Number.isFinite(cpuPct) || !Number.isFinite(gpuPct) || cpuPct + gpuPct <= 0) {
+    const ratio = Math.max(0.05, Number(m.cpuGpuBottleneckRatio || 1.0));
+    cpuPct = Math.max(5, Math.min(95, (100 * ratio) / (1 + ratio)));
+    gpuPct = 100 - cpuPct;
+  }
+  if (cpuBar) cpuBar.style.width = `${cpuPct.toFixed(0)}%`;
+  if (gpuBar) gpuBar.style.width = `${gpuPct.toFixed(0)}%`;
+  if (verdictEl) {
+    verdictEl.textContent = `${m.bottleneckVerdict || "Balanced"} (${cpuPct.toFixed(0)}% CPU / ${gpuPct.toFixed(0)}% GPU)`;
+  }
+  if (stutterEl) stutterEl.textContent = `${Number(m.shaderStutterSpikes || 0)} Stutter Spikes`;
+  if (sourceEl) {
+    sourceEl.textContent = `${m.telemetrySource || "ETW / DWM"} · ${Number(
+      m.totalFramesSampled || m.sampleCount || 0
+    )} frames`;
+  }
+}
+
+function renderDetailXrayScorecards(report, cap, game) {
+  state.detailXrayHistory = report || null;
+  const activeTick =
+    state.detailXrayLiveTick && game && state.detailXrayLiveTick.gameId === game.id
+      ? state.detailXrayLiveTick
+      : null;
+  applyWave2XrayMetrics(activeTick || report?.latest || null, Boolean(activeTick), cap);
+
+  const histEl = el("detail-xray-history-list");
+  if (!histEl) return;
+  const history = Array.isArray(report?.history) ? report.history : [];
+  if (history.length === 0) {
+    histEl.innerHTML = "";
+    return;
+  }
+  histEl.innerHTML = history
+    .slice(0, 6)
+    .map((card) => {
+      const when = card.recordedAtEpochSec
+        ? new Date(card.recordedAtEpochSec * 1000).toLocaleString()
+        : "Recent Session";
+      const low01 = card.low01pctFps ?? card.low0_1pctFps ?? 0;
+      return `
+        <div class="wave2-history-item">
+          <span>${escapeHtml(when)} · ${Number(card.durationSec || 0).toFixed(0)}s · ${escapeHtml(
+        card.bottleneckVerdict || "Balanced"
+      )}</span>
+          <span class="mono-num">Avg ${Number(card.avgFps || 0).toFixed(1)} · 1% ${Number(
+        card.low1pctFps || 0
+      ).toFixed(1)} · 0.1% ${Number(low01 || 0).toFixed(1)} FPS · ${Number(
+        card.shaderStutterSpikes || 0
+      )} spikes</span>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+async function loadDetailXrayScorecards(game, requestId) {
+  if (!game?.id) return;
+  try {
+    const [report, cap] = await Promise.all([
+      getGameXrayScorecards(game.id),
+      probeEtwXrayCapability().catch(() => null)
+    ]);
+    if (state.activeDetailRequestId !== requestId || state.selectedDetailId !== game.id) return;
+    renderDetailXrayScorecards(report, cap, game);
+  } catch (err) {
+    if (el("detail-xray-source")) el("detail-xray-source").textContent = String(err);
+  }
+}
+
+function renderDetailDisplayTuning(upscaleStatus, latencyProfile) {
+  state.detailUpscaleStatus = upscaleStatus || null;
+  state.detailLatencyProfile = latencyProfile || null;
+  const prof = upscaleStatus?.profile || {};
+  const plan = upscaleStatus?.viewportPlan || {};
+
+  const emuPill = el("detail-upscale-emu-pill");
+  if (emuPill) {
+    const fam = prof.detectedEmulatorFamily;
+    emuPill.textContent = fam ? `Emulator Detected: ${fam}` : "Native PC Title";
+  }
+
+  if (el("detail-upscale-borderless")) {
+    el("detail-upscale-borderless").checked = Boolean(prof.borderlessFlipPromote);
+  }
+  setSelectValueSafe(el("detail-upscale-mode"), prof.upscaleMode || "off");
+  if (el("detail-upscale-fps-cap")) {
+    el("detail-upscale-fps-cap").value = String(Number(prof.fpsCap || 0));
+  }
+  if (el("detail-upscale-autohdr")) {
+    el("detail-upscale-autohdr").checked = Boolean(
+      prof.autoHdr || latencyProfile?.autoHdrEnable
+    );
+  }
+  const sharpEl = el("detail-upscale-sharpness");
+  if (sharpEl) {
+    const rawSharp = Number.isFinite(Number(prof.fsrSharpness)) ? Number(prof.fsrSharpness) : 0.75;
+    sharpEl.value = Number(sharpEl.max || 1) > 1.5 ? String(Math.round(rawSharp * 100)) : rawSharp.toFixed(2);
+  }
+
+  setSelectValueSafe(
+    el("detail-latency-gpu-pref"),
+    latencyProfile?.gpuPreference !== undefined ? String(latencyProfile.gpuPreference) : "2"
+  );
+  setSelectValueSafe(el("detail-latency-autosr"), latencyProfile?.autoSrMode || "off");
+  if (el("detail-latency-flip-upgrade")) {
+    el("detail-latency-flip-upgrade").checked = latencyProfile?.flipModelUpgrade ?? true;
+  }
+
+  const readout = el("detail-upscale-plan-readout");
+  if (readout) {
+    const capTxt = Number(prof.fpsCap || 0) > 0 ? `${Number(prof.fpsCap)} FPS Cap` : "Uncapped";
+    const factorTxt = Number(plan.integerFactor || 1) > 1 ? ` · ${plan.integerFactor}x Integer` : "";
+    const pacerTxt = upscaleStatus?.pacerActive
+      ? ` · Pacer Active (${Number(upscaleStatus.timerResolutionMs || 0.5).toFixed(2)} ms)`
+      : "";
+    readout.textContent = `${plan.modeLabel || "Native"} · ${Number(plan.sourceWidth || 1280)}x${Number(
+      plan.sourceHeight || 720
+    )} -> ${Number(plan.scaledWidth || 1920)}x${Number(plan.scaledHeight || 1080)}${factorTxt} · ${capTxt}${pacerTxt}`;
+  }
+}
+
+async function loadDetailDisplayTuning(game, requestId) {
+  if (!game?.id) return;
+  try {
+    const [upscale, lat] = await Promise.all([
+      getGameUpscaleProfile(game.id, game.exePath || "", game.emulatorId || null),
+      game.exePath ? getGameLatencyProfile(game.exePath).catch(() => null) : Promise.resolve(null)
+    ]);
+    if (state.activeDetailRequestId !== requestId || state.selectedDetailId !== game.id) return;
+    renderDetailDisplayTuning(upscale, lat);
+  } catch (err) {
+    if (el("detail-upscale-plan-readout")) el("detail-upscale-plan-readout").textContent = String(err);
+  }
+}
+
+function renderDetailDirectStorage(scan) {
+  state.detailDirectStorageScan = scan || null;
+  const pill = el("detail-ds-backend-pill");
+  const status = el("detail-ds-status");
+  const readout = el("detail-ds-readout");
+  const cap = scan?.capability;
+  if (pill) {
+    pill.textContent = cap?.gpuDecompressionReady
+      ? `DS GPU Ready (${cap.activeBackend || "DirectStorage"})`
+      : cap?.activeBackend || "CPU Zstd Fallback";
+  }
+  if (!scan) {
+    if (status) status.textContent = "DirectStorage 1.4 / Zstd Stream Scanner Ready";
+    if (readout) readout.textContent = "Inspects .pak, .ba2, and .forge archives before repacking.";
+    return;
+  }
+  const candCount = Array.isArray(scan.candidates) ? scan.candidates.length : 0;
+  if (status) {
+    status.textContent = `${candCount} asset archive${candCount === 1 ? "" : "s"} · ${formatBytesJs(
+      scan.eligibleUncompressedBytes || 0
+    )} eligible for Zstd stream repack`;
+  }
+  if (readout) {
+    readout.textContent = `${Number(scan.existingPackedStreams || 0)} .dkds streams (${formatBytesJs(
+      scan.existingPackedBytes || 0
+    )}) · ${cap?.summary || ""}`;
+  }
+}
+
+function renderDetailVhdxStage(resp) {
+  state.detailVhdxState = resp || null;
+  const [cap, entry] = Array.isArray(resp) ? resp : [null, null];
+  const statusEl = el("detail-vhdx-status");
+  const readoutEl = el("detail-vhdx-readout");
+  const autoEl = el("detail-vhdx-autostage");
+
+  if (autoEl) autoEl.checked = Boolean(entry?.autoStageOnLaunch);
+  if (!entry) {
+    if (statusEl) {
+      statusEl.textContent = cap?.virtdiskDllLoaded
+        ? "VirtDisk.dll + IoRing Ready for Containerization"
+        : "VirtDisk Fallback Archive Mode Ready";
+    }
+    if (readoutEl) {
+      readoutEl.textContent = cap?.hotTierRoot ? `Hot-Tier Root: ${cap.hotTierRoot}` : "";
+    }
+    return;
+  }
+  if (statusEl) {
+    statusEl.textContent = entry.hotStaged
+      ? `Hot-Tier Staged (${entry.hotStagedFiles} files · ${formatBytesJs(entry.hotStagedBytes || 0)})`
+      : entry.vhdxPath
+      ? `Containerized (${entry.attachMode || "VHDX"}) · ${formatBytesJs(entry.vhdxFileBytes || 0)}`
+      : `${entry.totalFiles} files (${entry.smallFilesUnder1Mb} < 1 MiB) on ${entry.sourceVolume || "Drive"}`;
+  }
+  if (readoutEl) {
+    const tierNote = entry.sourceOnHdd ? "Secondary/HDD candidate" : "NVMe source";
+    readoutEl.textContent = `${tierNote} · IoRing ${cap?.ioringAvailable ? "Active" : "Fallback"} · ${
+      entry.vhdxPath || cap?.hotTierRoot || ""
+    }`;
+  }
+}
+
+function renderDetailDeepShrink(report) {
+  state.detailDeepShrinkScan = report || null;
+  const statusEl = el("detail-shrink-status");
+  const bucketsEl = el("detail-shrink-buckets");
+  if (!report) {
+    if (statusEl) {
+      statusEl.textContent = "Scan unused foreign voiceover & cutscene banks before creating a .duke-cas restore point.";
+    }
+    if (bucketsEl) bucketsEl.innerHTML = "";
+    return;
+  }
+  const buckets = Array.isArray(report.languageBuckets) ? report.languageBuckets : [];
+  if (statusEl) {
+    statusEl.textContent = `${report.totalReclaimableFormatted || "0 B"} reclaimable (${
+      buckets.length
+    } non-English packs · ${Number(report.duplicateMediaFiles || 0)} duplicate media files / ${
+      report.duplicateMediaFormatted || "0 B"
+    })`;
+  }
+  if (!bucketsEl) return;
+  if (buckets.length === 0) {
+    bucketsEl.innerHTML = `<span class="detail-micro-caption">No foreign voiceover packs detected in this folder.</span>`;
+    return;
+  }
+  bucketsEl.innerHTML = buckets
+    .map(
+      (b) => `
+      <label class="wave2-shrink-bucket-chip" title="${escapeHtml((b.sampleFiles || []).slice(0, 3).join(", "))}">
+        <input type="checkbox" data-shrink-lang="${escapeHtml(b.language)}" checked />
+        <span>${escapeHtml(b.language)}</span>
+        <span class="mono-num">(${escapeHtml(b.totalFormatted || formatBytesJs(b.totalBytes || 0))})</span>
+      </label>
+    `
+    )
+    .join("");
+}
+
+async function loadDetailStorageV2(game, requestId) {
+  if (!game?.id) return;
+  renderDetailDeepShrink(
+    state.detailDeepShrinkScan?.gameId === game.id ? state.detailDeepShrinkScan : null
+  );
+  try {
+    const [dsScan, vhdxResp] = await Promise.all([
+      scanDirectStorageAssets(game.id, null).catch(() => null),
+      getVhdxStageStatus(game.id).catch(() => null)
+    ]);
+    if (state.activeDetailRequestId !== requestId || state.selectedDetailId !== game.id) return;
+    if (dsScan) renderDetailDirectStorage(dsScan);
+    else renderDetailDirectStorage(null);
+    renderDetailVhdxStage(vhdxResp);
+  } catch {
+    // Non-critical storage v2 probe.
+  }
+}
+
+async function refreshWave2Diagnostics() {
+  try {
+    const [dsCap, latStatus, etwCap] = await Promise.all([
+      probeDirectStorageCapability(null).catch(() => null),
+      getLatencyLabStatus().catch(() => null),
+      probeEtwXrayCapability().catch(() => null)
+    ]);
+    state.latencyLabStatus = latStatus || null;
+
+    if (el("wave2-ds-capability") && dsCap) {
+      el("wave2-ds-capability").textContent = `${dsCap.activeBackend} · ${dsCap.gpuName} (${
+        dsCap.d3d12DeviceReady ? "D3D12 Ready" : "D3D12 Fallback"
+      })`;
+    }
+    if (el("wave2-ds-dlls") && dsCap) {
+      const ds = dsCap.dstorageDll?.loaded ? "dstorage.dll OK" : "dstorage.dll Absent";
+      const dsc = dsCap.dstorageCoreDll?.loaded ? "dstoragecore.dll OK" : "core Absent";
+      const gacl = dsCap.gaclDll?.loaded ? "gacl.dll OK" : "gacl.dll Absent";
+      const etwTxt = etwCap ? ` · ETW: ${etwCap.modeLabel}` : "";
+      el("wave2-ds-dlls").textContent = `${ds} · ${dsc} · ${gacl}${etwTxt}`;
+    }
+    if (el("wave2-mpo-status") && latStatus?.mpo) {
+      const mpo = latStatus.mpo;
+      el("wave2-mpo-status").textContent = `${
+        mpo.mpoEnabled ? "MPO Active" : "MPO Disabled"
+      } (${Number(mpo.dxgiOutputsDetected || 0)} outputs) · ${mpo.recommendation || ""}`;
+    }
+    if (el("wave2-driver-guard-status") && latStatus) {
+      el("wave2-driver-guard-status").textContent = `Driver ${
+        latStatus.driverVersion || "Unknown"
+      } · ${Number(latStatus.savedProfileCount || 0)} guarded .exe profiles (${Number(
+        latStatus.registryEntryCount || 0
+      )} HKCU entries, ${Number(latStatus.guardReapplyCount || 0)} re-applies)`;
+    }
+    if (el("wave2-shader-cap-status") && latStatus) {
+      el("wave2-shader-cap-status").textContent = `${
+        latStatus.shaderCacheTotalFormatted || "0 B"
+      } across vendor caches (Cap: ${Number(latStatus.shaderCacheCapMb || 4096)} MB)`;
+    }
+    if (
+      el("input-wave2-shader-cap-mb") &&
+      latStatus?.shaderCacheCapMb &&
+      document.activeElement !== el("input-wave2-shader-cap-mb")
+    ) {
+      el("input-wave2-shader-cap-mb").value = String(latStatus.shaderCacheCapMb);
+    }
+  } catch {
+    // Non-critical Wave 2 Settings diagnostics.
+  }
 }
 
 function loadAllDetailPanels(game, requestId) {
@@ -2031,6 +2422,9 @@ function loadAllDetailPanels(game, requestId) {
   loadDetailWofStorage(game, requestId);
   loadDetailModGraph(game, requestId);
   loadDetailTimeMachine(game, requestId);
+  loadDetailXrayScorecards(game, requestId);
+  loadDetailDisplayTuning(game, requestId);
+  loadDetailStorageV2(game, requestId);
 }
 
 function renderSelectedTimeMachineCheckpoint() {
@@ -8010,6 +8404,373 @@ function wireEvents() {
       btn.disabled = false;
     }
   });
+
+  // ============================================================================
+  // Wave 2 (v0.7.0) Detail & Settings Handlers
+  // ============================================================================
+  el("btn-detail-xray-refresh")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      await loadDetailXrayScorecards(g, state.activeDetailRequestId);
+      showToast("ETW X-Ray session scorecards refreshed.", "success", 2200);
+    })
+  );
+
+  el("btn-detail-xray-clear")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      try {
+        const msg = await clearGameXrayScorecards(g.id);
+        if (state.detailXrayLiveTick?.gameId === g.id) state.detailXrayLiveTick = null;
+        await loadDetailXrayScorecards(g, state.activeDetailRequestId);
+        showToast(msg || "Cleared X-Ray session scorecards.", "success", 2600);
+      } catch (err) {
+        showToast(String(err), "error");
+      }
+    })
+  );
+
+  el("btn-detail-save-display-tuning")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-detail-save-display-tuning");
+      if (btn) btn.disabled = true;
+      try {
+        const borderlessFlipPromote = Boolean(el("detail-upscale-borderless")?.checked);
+        const upscaleMode = el("detail-upscale-mode")?.value || "off";
+        const fpsCap = Math.max(0, Number(el("detail-upscale-fps-cap")?.value || 0) || 0);
+        const autoHdr = Boolean(el("detail-upscale-autohdr")?.checked);
+        const sharpEl = el("detail-upscale-sharpness");
+        const rawSharp = Number(sharpEl?.value ?? 0.75);
+        const fsrSharpness = Number(sharpEl?.max || 1) > 1.5 ? rawSharp / 100 : rawSharp;
+        const gpuPreference = Number(el("detail-latency-gpu-pref")?.value ?? 2);
+        const flipModelUpgrade = Boolean(el("detail-latency-flip-upgrade")?.checked);
+        const autoSrMode = el("detail-latency-autosr")?.value || "off";
+
+        await saveGameUpscaleProfile({
+          gameId: g.id,
+          exePath: g.exePath || "",
+          borderlessFlipPromote,
+          upscaleMode,
+          fsrSharpness,
+          fpsCap,
+          autoHdr,
+          emulatorId: g.emulatorId || null
+        });
+        if (g.exePath) {
+          await applyGameLatencyProfile({
+            exePath: g.exePath,
+            gpuPreference,
+            flipModelUpgrade,
+            autoHdrEnable: autoHdr,
+            autoSrMode
+          });
+        }
+        await loadDetailDisplayTuning(g, state.activeDetailRequestId);
+        refreshWave2Diagnostics().catch(() => {});
+        showToast("Display upscaler, frame pacer & HKCU Auto-SR profile saved.", "success", 3200);
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
+
+  el("btn-detail-promote-borderless")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-detail-promote-borderless");
+      if (btn) btn.disabled = true;
+      try {
+        const pids = (state.activeSessions || [])
+          .filter((s) => s.gameId === g.id || (g.exePath && s.exePath === g.exePath))
+          .map((s) => Number(s.pid))
+          .filter((pid) => Number.isFinite(pid) && pid > 0);
+        const res = await promoteGameWindowBorderless(pids);
+        showToast(res?.notes || `Promoted ${res?.promotedWindows || 0} window(s).`, "success", 3200);
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
+
+  el("btn-detail-reset-latency-reg")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      if (!g.exePath) return;
+      try {
+        const msg = await removeGameLatencyProfile(g.exePath);
+        await loadDetailDisplayTuning(g, state.activeDetailRequestId);
+        refreshWave2Diagnostics().catch(() => {});
+        showToast(msg || "Reset per-exe Windows DirectX registry overrides.", "success", 3000);
+      } catch (err) {
+        showToast(String(err), "error");
+      }
+    })
+  );
+
+  el("btn-detail-ds-scan")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-detail-ds-scan");
+      if (btn) btn.disabled = true;
+      try {
+        const scan = await scanDirectStorageAssets(g.id, null);
+        renderDetailDirectStorage(scan);
+        showToast(
+          `Found ${scan?.candidates?.length || 0} asset candidates (${formatBytesJs(
+            scan?.eligibleUncompressedBytes || 0
+          )} uncompressed).`,
+          "success",
+          3000
+        );
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
+
+  el("btn-detail-ds-repack")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-detail-ds-repack");
+      if (btn) btn.disabled = true;
+      showToast("Creating .duke-cas restore point & repacking Zstd DirectStorage streams...", "info", 3200);
+      try {
+        const rep = await repackGameDirectStorageAssets(g.id, 3, null, null);
+        const scan = await scanDirectStorageAssets(g.id, null).catch(() => null);
+        if (scan) renderDetailDirectStorage(scan);
+        showToast(
+          `Packed ${rep?.filesPacked || 0} stream(s), saved ${rep?.savedFormatted || "0 B"} (${rep?.activeBackend || "DirectStorage"}).`,
+          "success",
+          4200
+        );
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
+
+  el("btn-detail-ds-verify")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-detail-ds-verify");
+      if (btn) btn.disabled = true;
+      try {
+        const rep = await verifyDirectStorageStreams(g.id);
+        if (el("detail-ds-readout")) {
+          el("detail-ds-readout").textContent = `Verified ${rep?.streamsValid || 0}/${
+            rep?.streamsChecked || 0
+          } streams (${rep?.chunksVerified || 0} chunks · ${rep?.elapsedMs || 0} ms)`;
+        }
+        showToast(
+          rep?.allValid
+            ? `All ${rep?.streamsChecked || 0} DirectStorage Zstd streams verified OK.`
+            : `${rep?.streamsCorrupt?.length || 0} stream(s) failed verification.`,
+          rep?.allValid ? "success" : "error",
+          3400
+        );
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
+
+  el("btn-detail-vhdx-containerize")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-detail-vhdx-containerize");
+      if (btn) btn.disabled = true;
+      showToast("Packing multi-file assets into .vhdx container with IoRing...", "info", 3200);
+      try {
+        const rep = await containerizeGameToVhdx(g.id, null);
+        const st = await getVhdxStageStatus(g.id).catch(() => null);
+        if (st) renderDetailVhdxStage(st);
+        showToast(
+          rep?.notes || `Containerized ${rep?.smallFilesConsolidated || 0} small files into VHDX.`,
+          "success",
+          4200
+        );
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
+
+  el("btn-detail-vhdx-stage")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-detail-vhdx-stage");
+      if (btn) btn.disabled = true;
+      try {
+        const autoStage = Boolean(el("detail-vhdx-autostage")?.checked);
+        const rep = await stageGameHotTier(g.id, 4096, autoStage);
+        const st = await getVhdxStageStatus(g.id).catch(() => null);
+        if (st) renderDetailVhdxStage(st);
+        showToast(
+          rep?.statusMessage || `Staged ${rep?.filesTransferred || 0} files (${rep?.bytesFormatted || "0 B"}).`,
+          "success",
+          3800
+        );
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
+
+  el("btn-detail-vhdx-unstage")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-detail-vhdx-unstage");
+      if (btn) btn.disabled = true;
+      try {
+        const msg = await unstageOrDetachVhdx(g.id);
+        const st = await getVhdxStageStatus(g.id).catch(() => null);
+        if (st) renderDetailVhdxStage(st);
+        showToast(msg || "Detached VHDX & cleared hot-tier stage.", "success", 3200);
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
+
+  el("detail-vhdx-autostage")?.addEventListener("change", () =>
+    withSelectedGame(async (g) => {
+      if (!state.detailVhdxState?.[1]?.hotStaged) return;
+      try {
+        await stageGameHotTier(g.id, 4096, Boolean(el("detail-vhdx-autostage")?.checked));
+      } catch (err) {
+        showToast(String(err), "error");
+      }
+    })
+  );
+
+  el("btn-detail-shrink-scan")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-detail-shrink-scan");
+      if (btn) btn.disabled = true;
+      try {
+        const rep = await scanGameDeepShrink(g.id, ["english"]);
+        renderDetailDeepShrink(rep);
+        showToast(
+          `Deep Shrink found ${rep?.totalReclaimableFormatted || "0 B"} reclaimable.`,
+          "success",
+          3200
+        );
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
+
+  el("btn-detail-shrink-apply")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-detail-shrink-apply");
+      if (btn) btn.disabled = true;
+      const stripLanguages = Array.from(
+        document.querySelectorAll('#detail-shrink-buckets input[type="checkbox"][data-shrink-lang]:checked')
+      ).map((inp) => inp.dataset.shrinkLang);
+      const dedupInternalMedia = Boolean(el("detail-shrink-dedup-media")?.checked);
+      showToast("Saving .duke-cas restore point & stripping selected language packs...", "info", 3200);
+      try {
+        const rep = await applyGameDeepShrink(g.id, stripLanguages, dedupInternalMedia, ["english"]);
+        await refreshAllData().catch(() => {});
+        const rescan = await scanGameDeepShrink(g.id, ["english"]).catch(() => null);
+        if (rescan) renderDetailDeepShrink(rescan);
+        loadDetailWofStorage(g, state.activeDetailRequestId);
+        showToast(
+          rep?.message || `Reclaimed ${rep?.reclaimedFormatted || "0 B"} cleanly.`,
+          "success",
+          4400
+        );
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
+
+  el("btn-wave2-refresh-diag")?.addEventListener("click", async () => {
+    await refreshWave2Diagnostics();
+    showToast("Wave 2 engine diagnostics refreshed.", "success", 2200);
+  });
+
+  el("btn-wave2-driver-guard-sync")?.addEventListener("click", async () => {
+    const btn = el("btn-wave2-driver-guard-sync");
+    if (btn) btn.disabled = true;
+    try {
+      const rep = await runDriverProfileGuard(true);
+      await refreshWave2Diagnostics();
+      showToast(
+        `Driver Profile Guard synced ${rep?.reappliedCount || 0} .exe profile(s) on driver ${
+          rep?.currentDriver || "current"
+        }.`,
+        "success",
+        3400
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  el("btn-wave2-enforce-shader-cap")?.addEventListener("click", async () => {
+    const btn = el("btn-wave2-enforce-shader-cap");
+    if (btn) btn.disabled = true;
+    try {
+      const capMb = Math.max(256, Number(el("input-wave2-shader-cap-mb")?.value || 4096) || 4096);
+      const rep = await enforceShaderCacheCap(capMb);
+      await refreshWave2Diagnostics();
+      showToast(
+        `Enforced ${rep?.capMb || capMb} MB shader cache cap · freed ${rep?.freedFormatted || "0 B"} (${
+          rep?.filesPruned || 0
+        } files).`,
+        "success",
+        3800
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  el("btn-wave2-library-blake3-dedup")?.addEventListener("click", async () => {
+    const btn = el("btn-wave2-library-blake3-dedup");
+    if (btn) btn.disabled = true;
+    showToast("Scanning game folders for cross-folder BLAKE3 duplicates...", "info", 3200);
+    try {
+      const extraRoot = (el("input-wave2-dedup-root")?.value || "").trim() || null;
+      const rep = await deduplicateLibraryBlake3(extraRoot, 512);
+      if (el("wave2-dedup-status")) {
+        el("wave2-dedup-status").textContent = `Scanned ${rep?.foldersScanned || 0} folders (${
+          rep?.filesInspected || 0
+        } files) · ${rep?.filesHardlinked || 0} hardlinks created · reclaimed ${
+          rep?.reclaimedFormatted || "0 B"
+        }`;
+      }
+      await refreshAllData().catch(() => {});
+      showToast(
+        `BLAKE3 hardlink deduplication reclaimed ${rep?.reclaimedFormatted || "0 B"} across ${
+          rep?.filesHardlinked || 0
+        } file(s).`,
+        "success",
+        4400
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
 }
 
 function startGamepadControllerLoop() {
@@ -8671,6 +9432,45 @@ async function init() {
 
   await listenEvent("duke-link-frame", (frameEv) => {
     if (state.coopModalOpen) renderCoopFrameOnCanvas(frameEv);
+  });
+
+  await listenEvent("etw-xray-tick", (tick) => {
+    if (!tick) return;
+    state.detailXrayLiveTick = tick;
+    if (tick.gameId && tick.gameId === state.selectedDetailId) {
+      applyWave2XrayMetrics(tick, true, null);
+    }
+  });
+
+  await listenEvent("etw-xray-scorecard", (card) => {
+    if (!card) return;
+    if (state.detailXrayLiveTick?.gameId === card.gameId) {
+      state.detailXrayLiveTick = null;
+    }
+    if (card.gameId && card.gameId === state.selectedDetailId) {
+      const g = state.library.find((x) => x.id === card.gameId);
+      if (g) loadDetailXrayScorecards(g, state.activeDetailRequestId);
+    }
+    showToast(
+      `X-Ray Scorecard (${card.gameTitle || "Session"}): ${Number(card.avgFps || 0).toFixed(
+        1
+      )} FPS avg · 1% Low ${Number(card.low1pctFps || 0).toFixed(1)} FPS`,
+      "info",
+      4200
+    );
+  });
+
+  await listenEvent("latency-driver-guard", (rep) => {
+    refreshWave2Diagnostics().catch(() => {});
+    if (rep?.driverChanged) {
+      showToast(
+        `GPU driver changed (${rep.previousDriver || "old"} -> ${
+          rep.currentDriver || "new"
+        }): re-applied ${Number(rep.reappliedCount || 0)} Auto-SR/latency profile(s).`,
+        "info",
+        4800
+      );
+    }
   });
 
   getDukeLinkStatus().then(renderDukeLinkUi).catch(() => {});
