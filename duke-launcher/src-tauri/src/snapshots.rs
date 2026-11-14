@@ -331,11 +331,40 @@ fn load_manifest(manifest_path: &Path) -> Result<GameSnapshotManifest, String> {
 }
 
 fn resolve_game_dir_by_id(game_id: &str) -> Result<PathBuf, String> {
+    let (dir, _) = resolve_snapshot_scope_by_id(game_id)?;
+    Ok(dir)
+}
+
+fn rel_matches_subdirs(rel_path: &str, include_subdirs: Option<&[&str]>) -> bool {
+    let Some(subs) = include_subdirs else {
+        return true;
+    };
+    let rel_norm = rel_path.trim_matches('/').to_ascii_lowercase();
+    subs.iter().any(|s| {
+        let s_norm = s.trim_matches(['/', '\\']).to_ascii_lowercase();
+        rel_norm == s_norm || rel_norm.starts_with(&format!("{}/", s_norm))
+    })
+}
+
+fn resolve_snapshot_scope_by_id(game_id: &str) -> Result<(PathBuf, Option<Vec<&'static str>>), String> {
     let library = load_library_standalone()?;
     let entry = library
         .into_iter()
         .find(|g| g.id == game_id)
         .ok_or_else(|| format!("Game '{}' not found in library.", game_id))?;
+
+    if entry.platform_id > 0 {
+        if let Some((emu_base, save_subdirs, _)) =
+            crate::emulators::resolve_console_save_dirs_for_game(entry.platform_id, &entry.emulator_id)
+        {
+            fs::create_dir_all(&emu_base)
+                .map_err(|e| format!("Failed creating console save root {}: {}", emu_base.display(), e))?;
+            for sub in &save_subdirs {
+                let _ = fs::create_dir_all(emu_base.join(sub));
+            }
+            return Ok((emu_base, Some(save_subdirs)));
+        }
+    }
 
     let candidate = if !entry.install_dir.trim().is_empty() {
         PathBuf::from(entry.install_dir.trim())
@@ -348,7 +377,7 @@ fn resolve_game_dir_by_id(game_id: &str) -> Result<PathBuf, String> {
             candidate.display()
         ));
     }
-    Ok(candidate)
+    Ok((candidate, None))
 }
 
 pub fn create_snapshot_in_dir(
@@ -356,6 +385,16 @@ pub fn create_snapshot_in_dir(
     game_dir: &Path,
     cas_dir: &Path,
     label: Option<&str>,
+) -> Result<GameSnapshotManifest, String> {
+    create_snapshot_in_dir_filtered(game_id, game_dir, cas_dir, label, None)
+}
+
+pub fn create_snapshot_in_dir_filtered(
+    game_id: &str,
+    game_dir: &Path,
+    cas_dir: &Path,
+    label: Option<&str>,
+    include_subdirs: Option<&[&str]>,
 ) -> Result<GameSnapshotManifest, String> {
     if !game_dir.is_dir() {
         return Err(format!(
@@ -389,7 +428,7 @@ pub fn create_snapshot_in_dir(
             Err(_) => continue,
         };
         let rel_path = normalize_rel_path(game_dir, entry.path())?;
-        if rel_path.is_empty() {
+        if rel_path.is_empty() || !rel_matches_subdirs(&rel_path, include_subdirs) {
             continue;
         }
         work_items.push((
@@ -576,10 +615,20 @@ pub fn list_snapshots_in_cas(cas_dir: &Path) -> Result<Vec<GameSnapshotSummary>,
     Ok(items)
 }
 
+#[allow(dead_code)]
 pub fn restore_snapshot_in_dir(
     game_dir: &Path,
     cas_dir: &Path,
     snapshot_id: &str,
+) -> Result<SnapshotRestoreReport, String> {
+    restore_snapshot_in_dir_filtered(game_dir, cas_dir, snapshot_id, None)
+}
+
+pub fn restore_snapshot_in_dir_filtered(
+    game_dir: &Path,
+    cas_dir: &Path,
+    snapshot_id: &str,
+    include_subdirs: Option<&[&str]>,
 ) -> Result<SnapshotRestoreReport, String> {
     let started = Instant::now();
     let manifest_path = cas_dir
@@ -618,14 +667,17 @@ pub fn restore_snapshot_in_dir(
             continue;
         }
         if entry.file_type().is_dir() {
-            dirs_to_prune.push(entry.path().to_path_buf());
+            let rel_dir = normalize_rel_path(game_dir, entry.path()).unwrap_or_default();
+            if rel_matches_subdirs(&rel_dir, include_subdirs) {
+                dirs_to_prune.push(entry.path().to_path_buf());
+            }
             continue;
         }
         if !entry.file_type().is_file() {
             continue;
         }
         let rel_path = normalize_rel_path(game_dir, entry.path())?;
-        if !target_map.contains_key(&rel_path) {
+        if rel_matches_subdirs(&rel_path, include_subdirs) && !target_map.contains_key(&rel_path) {
             clear_readonly_if_present(entry.path());
             if fs::remove_file(entry.path()).is_ok() {
                 removed_files += 1;
@@ -758,15 +810,21 @@ pub async fn create_game_snapshot(
     game_id: String,
     label: Option<String>,
 ) -> Result<GameSnapshotSummary, String> {
-    let game_dir = resolve_game_dir_by_id(&game_id)?;
+    let (game_dir, include_subdirs) = resolve_snapshot_scope_by_id(&game_id)?;
     let cas_dir = game_dir.join(CAS_DIR_NAME);
     let max_keep = crate::load_settings_standalone()
         .max_restore_points
         .clamp(1, 50) as usize;
     let label_owned = label;
     tokio::task::spawn_blocking(move || {
-        let manifest =
-            create_snapshot_in_dir(&game_id, &game_dir, &cas_dir, label_owned.as_deref())?;
+        let sub_slice: Option<&[&str]> = include_subdirs.as_deref();
+        let manifest = create_snapshot_in_dir_filtered(
+            &game_id,
+            &game_dir,
+            &cas_dir,
+            label_owned.as_deref(),
+            sub_slice,
+        )?;
         if prune_snapshots_to_limit(&cas_dir, max_keep).unwrap_or(0) > 0 {
             let _ = gc_cas_blobs(&cas_dir);
         }
@@ -837,11 +895,18 @@ pub async fn restore_game_snapshot(
     game_id: String,
     snapshot_id: String,
 ) -> Result<SnapshotRestoreReport, String> {
-    let game_dir = resolve_game_dir_by_id(&game_id)?;
+    let (game_dir, include_subdirs) = resolve_snapshot_scope_by_id(&game_id)?;
     let cas_dir = game_dir.join(CAS_DIR_NAME);
-    tokio::task::spawn_blocking(move || restore_snapshot_in_dir(&game_dir, &cas_dir, &snapshot_id))
-        .await
-        .map_err(|e| format!("Snapshot restore worker failed: {}", e))?
+    tokio::task::spawn_blocking(move || {
+        restore_snapshot_in_dir_filtered(
+            &game_dir,
+            &cas_dir,
+            &snapshot_id,
+            include_subdirs.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("Snapshot restore worker failed: {}", e))?
 }
 
 #[tauri::command]

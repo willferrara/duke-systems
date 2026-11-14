@@ -837,3 +837,85 @@ export async function runSubsystemBenchmark() {
   return invokeCommand("run_subsystem_benchmark");
 }
 
+export async function syncRetroCatalog(forceRefresh = false) {
+  return invokeCommand("sync_retro_catalog", { forceRefresh: Boolean(forceRefresh) });
+}
+
+export async function getRetroPlatforms() {
+  return invokeCommand("get_retro_platforms");
+}
+
+export async function getEmulatorStatuses() {
+  return invokeCommand("get_emulator_statuses");
+}
+
+export async function installEmulatorForConsole(consoleId) {
+  return invokeCommand("install_emulator_for_console", { consoleId: String(consoleId || "") });
+}
+
+export async function setCustomEmulatorPath(consoleId, exePath = "") {
+  return invokeCommand("set_custom_emulator_path", {
+    consoleId: String(consoleId || ""),
+    exePath: String(exePath || "")
+  });
+}
+
+export async function checkGameEmulatorReady(gameId) {
+  return invokeCommand("check_game_emulator_ready", { gameId: String(gameId || "") });
+}
+
+export async function inspectRomPath(path) {
+  return invokeCommand("inspect_rom_path", { path: String(path || "") });
+}
+
+export async function addRetroGameFromCatalog({ appId, romPath = null }) {
+  return invokeCommand("add_retro_game_from_catalog", {
+    appId: Number(appId),
+    romPath: romPath || null
+  });
+}
+
+export async function linkGameRom({ gameId, romPath }) {
+  return invokeCommand("link_game_rom", {
+    gameId: String(gameId || ""),
+    romPath: String(romPath || "")
+  });
+}
+
+export async function scanRomFolder(folderPath) {
+  return invokeCommand("scan_rom_folder", { folderPath: String(folderPath || "") });
+}
+
+export async function pickRomFile() {
+  if (window.__TAURI__?.dialog?.open) {
+    const selected = await window.__TAURI__.dialog.open({
+      multiple: false,
+      directory: false,
+      title: "Select Console ROM, Disc Image, or Archive",
+      filters: [
+        {
+          name: "Console ROMs & Disc Images",
+          extensions: [
+            "nes", "unf", "sfc", "smc", "z64", "v64", "n64",
+            "iso", "gcm", "rvz", "wbfs", "wia", "wux", "wua", "wud", "rpx",
+            "nsp", "xci", "nro", "gb", "gbc", "gba", "nds", "3ds", "cci", "cxi", "cia", "vb",
+            "bin", "cue", "chd", "cso", "pbp", "md", "gen", "smd", "sms", "cdi", "gdi", "a26", "pce", "sgx",
+            "zip"
+          ]
+        },
+        { name: "All Files", extensions: ["*"] }
+      ]
+    });
+    return typeof selected === "string" ? selected : null;
+  }
+  return null;
+}
+
+export function listenEmulatorInstallProgress(callback) {
+  return listenEvent("emulator-install-progress", callback);
+}
+
+export function listenRetroCatalogSyncProgress(callback) {
+  return listenEvent("retro-catalog-sync-progress", callback);
+}
+

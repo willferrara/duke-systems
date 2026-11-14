@@ -3290,7 +3290,17 @@ fn main() {
                             match frame.kind() {
                                 ShmEventType::GameLaunched => {
                                     let tag = frame.tag_str();
-                                    handle_game_launched_tag(&shm_app, frame.pid, tag, tag);
+                                    let console_label = duke_core::shm_bus::unpack_game_launch_platform_id(frame.payload_b)
+                                        .and_then(duke_core::shm_bus::console_label_for_platform_id);
+                                    let trimmed = tag.trim();
+                                    let enriched_title = match console_label {
+                                        Some(sys) if !trimmed.is_empty() && !trimmed.to_ascii_lowercase().starts_with(&sys.to_ascii_lowercase()) => {
+                                            format!("{} - {}", sys, trimmed)
+                                        }
+                                        Some(sys) if trimmed.is_empty() => sys.to_string(),
+                                        _ => trimmed.to_string(),
+                                    };
+                                    handle_game_launched_tag(&shm_app, frame.pid, &enriched_title, tag);
                                 }
                                 ShmEventType::GameExited => {
                                     handle_game_exited_tag(&shm_app, frame.pid);

@@ -102,6 +102,68 @@ pub const fn unpack_gpu_telemetry(payload_a: u64) -> (Option<u32>, Option<u32>) 
     (temp, load)
 }
 
+/// Packs `sandbox_enabled` (bit 0) and `platform_id` (`u16` at bits 16..31) into `GameLaunched::payload_b`.
+/// Preserves bit 0 backwards-compatibility with legacy readers checking `payload_b & 1`.
+#[inline]
+pub const fn pack_game_launch_payload_b(sandbox_enabled: bool, platform_id: u16) -> u64 {
+    ((platform_id as u64) << 16) | (sandbox_enabled as u64)
+}
+
+/// Unpacks whether sandbox mode was requested from `GameLaunched::payload_b`.
+#[inline]
+pub const fn unpack_game_launch_sandbox(payload_b: u64) -> bool {
+    (payload_b & 1) != 0
+}
+
+/// Unpacks the canonical non-PC `platform_id` (`1..=24`) from `GameLaunched::payload_b`, returning `None` for PC (`0`).
+#[inline]
+pub const fn unpack_game_launch_platform_id(payload_b: u64) -> Option<u16> {
+    let id = ((payload_b >> 16) & 0xFFFF) as u16;
+    if id == 0 {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+/// Canonical console display label for shared-memory `platform_id` (`1..=24`).
+#[inline]
+pub const fn console_label_for_platform_id(platform_id: u16) -> Option<&'static str> {
+    match platform_id {
+        1 => Some("NES"),
+        2 => Some("SNES"),
+        3 => Some("N64"),
+        4 => Some("GameCube"),
+        5 => Some("Wii"),
+        6 => Some("Wii U"),
+        7 => Some("Switch"),
+        8 => Some("Game Boy"),
+        9 => Some("Game Boy Color"),
+        10 => Some("Game Boy Advance"),
+        11 => Some("Nintendo DS"),
+        12 => Some("Nintendo 3DS"),
+        13 => Some("Virtual Boy"),
+        14 => Some("PS1"),
+        15 => Some("PS2"),
+        16 => Some("PSP"),
+        17 => Some("PS3"),
+        18 => Some("Sega Genesis"),
+        19 => Some("Sega Master System"),
+        20 => Some("Sega Saturn"),
+        21 => Some("Sega Dreamcast"),
+        22 => Some("Atari 2600"),
+        23 => Some("Arcade"),
+        24 => Some("PC Engine"),
+        _ => None,
+    }
+}
+
+/// Returns `true` when the console natively uses motion/gyro controls (Wii, Wii U, Switch, 3DS, PS3).
+#[inline]
+pub const fn console_has_motion_gyro(platform_id: u16) -> bool {
+    matches!(platform_id, 5 | 6 | 7 | 12 | 17)
+}
+
 /// Fixed 64-byte cache-line-aligned IPC event frame (`#[repr(C, align(64))]`).
 #[repr(C, align(64))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -780,5 +842,19 @@ mod tests {
         bus.unregister_app();
         // `unregister_app` clears the last registered slot (`DukeSystems`)
         assert!(!bus.active_apps().contains(&ShmSourceApp::DukeSystems));
+    }
+
+    #[test]
+    fn game_launch_payload_b_packs_sandbox_and_platform_id() {
+        let pc_normal = pack_game_launch_payload_b(false, 0);
+        assert!(!unpack_game_launch_sandbox(pc_normal));
+        assert_eq!(unpack_game_launch_platform_id(pc_normal), None);
+
+        let wii_sandbox = pack_game_launch_payload_b(true, 5);
+        assert!(unpack_game_launch_sandbox(wii_sandbox));
+        assert_eq!(unpack_game_launch_platform_id(wii_sandbox), Some(5));
+        assert_eq!(console_label_for_platform_id(5), Some("Wii"));
+        assert!(console_has_motion_gyro(5));
+        assert!(!console_has_motion_gyro(1));
     }
 }

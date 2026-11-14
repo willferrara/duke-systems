@@ -835,6 +835,31 @@ pub(crate) fn build_save_report_for_entry(
         }
     }
 
+    if entry.platform_id > 0 {
+        if let Some((_, _, emu_save_dirs)) =
+            crate::emulators::resolve_console_save_dirs_for_game(entry.platform_id, &entry.emulator_id)
+        {
+            for emu_dir in emu_save_dirs {
+                let norm_key = emu_dir.to_string_lossy().trim_end_matches('\\').to_lowercase();
+                if norm_key.is_empty() || !seen.insert(norm_key) {
+                    continue;
+                }
+                let exists = emu_dir.exists();
+                let item = SavePathCandidate {
+                    path: emu_dir.to_string_lossy().to_string(),
+                    exists,
+                    source: "emulator".to_string(),
+                    pattern: Some(format!("{} save/state storage", entry.platform)),
+                };
+                if exists {
+                    existing_paths.push(item);
+                } else {
+                    candidate_paths.push(item);
+                }
+            }
+        }
+    }
+
     let now = now_unix_secs();
     let cache_age_secs = if cache.fetched_at > 0 {
         Some(now.saturating_sub(cache.fetched_at))

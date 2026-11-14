@@ -15,7 +15,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 pub const DEFAULT_MIN_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024;
-const PREFETCH_EXTENSIONS: &[&str] = &["pak", "vpk", "bsa", "ba2", "forge", "rpf", "bin", "dat"];
+const PREFETCH_EXTENSIONS: &[&str] = &[
+    "pak", "vpk", "bsa", "ba2", "forge", "rpf", "bin", "dat",
+    // Console ROM / disc images (> 32 MiB) for emulator Standby RAM warming
+    "rvz", "chd", "iso", "xci", "nsp", "wua", "wux", "cso", "pbp", "gcm", "wbfs", "cci", "3ds", "nds",
+];
 const MAX_VIEW_WINDOW_BYTES: usize = 64 * 1024 * 1024;
 const PREFETCH_BATCH_STRIDE_BYTES: usize = 4 * 1024 * 1024;
 const OVERLAPPED_READ_CHUNK_BYTES: usize = 1024 * 1024;
@@ -553,6 +557,73 @@ pub fn warm_game_assets_with_options(
     })
 }
 
+/// Warms a single game archive or console ROM/ISO image (> 32 MiB) into Windows Standby RAM
+/// up to `budget_pct` (`0..=40`) of currently available physical RAM.
+pub fn warm_single_file_with_budget_pct(
+    file_path: &Path,
+    budget_pct: u8,
+) -> Result<PrefetchReport, String> {
+    warm_single_file_with_options(file_path, DEFAULT_MIN_ARCHIVE_BYTES, budget_pct)
+}
+
+/// Configurable single-file Standby RAM prefetcher respecting minimum size and RAM percentage cap.
+pub fn warm_single_file_with_options(
+    file_path: &Path,
+    min_file_bytes: u64,
+    budget_pct: u8,
+) -> Result<PrefetchReport, String> {
+    if budget_pct == 0 || !file_path.exists() || !file_path.is_file() {
+        return Ok(PrefetchReport::default());
+    }
+
+    let started = Instant::now();
+    let avail_phys = query_available_physical_ram_bytes();
+    let size_bytes = fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
+    if size_bytes < min_file_bytes {
+        return Ok(PrefetchReport {
+            warmed_bytes: 0,
+            warmed_mb: 0.0,
+            throughput_gbps: 0.0,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            files_warmed: 0,
+            budget_bytes: (avail_phys.saturating_mul(budget_pct.clamp(0, 40) as u64)) / 100,
+            available_phys_mb: avail_phys / (1024 * 1024),
+            used_prefetch_api: false,
+            files: Vec::new(),
+        });
+    }
+
+    let candidates = vec![(file_path.to_path_buf(), size_bytes)];
+    let (budget_bytes, plan) = plan_prefetch_slices_with_pct(&candidates, avail_phys, budget_pct);
+    if plan.is_empty() {
+        return Ok(PrefetchReport::default());
+    }
+
+    let (_, total_size, target_bytes) = plan[0];
+    let (warmed_bytes, used_prefetch_api) = warm_single_file_windows(file_path, target_bytes)?;
+    let elapsed = started.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64().max(0.000_1);
+    let warmed_mb = (warmed_bytes as f64 / (1024.0 * 1024.0) * 10.0).round() / 10.0;
+    let throughput_gbps =
+        ((warmed_bytes as f64 / 1_000_000_000.0) / elapsed_secs * 100.0).round() / 100.0;
+
+    Ok(PrefetchReport {
+        warmed_bytes,
+        warmed_mb,
+        throughput_gbps,
+        elapsed_ms: elapsed.as_millis() as u64,
+        files_warmed: usize::from(warmed_bytes > 0),
+        budget_bytes,
+        available_phys_mb: avail_phys / (1024 * 1024),
+        used_prefetch_api,
+        files: vec![PrefetchFileStat {
+            path: file_path.to_string_lossy().to_string(),
+            file_size_bytes: total_size,
+            warmed_bytes,
+        }],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,6 +686,12 @@ mod tests {
         assert!(report.throughput_gbps > 0.0);
         #[cfg(target_os = "windows")]
         assert!(report.used_prefetch_api);
+
+        let rvz_path = dir.join("metroid_prime.rvz");
+        fs::write(&rvz_path, &payload_vpk).unwrap();
+        let single = warm_single_file_with_options(&rvz_path, 64 * 1024, 25).unwrap();
+        assert_eq!(single.files_warmed, 1);
+        assert_eq!(single.warmed_bytes, 256 * 1024);
 
         let _ = fs::remove_dir_all(&dir);
     }

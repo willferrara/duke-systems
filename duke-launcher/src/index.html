@@ -335,6 +335,10 @@
                   <svg class="icon" aria-hidden="true"><use href="#icon-pause"/></svg>
                   <span>Suspend</span>
                 </button>
+                <button type="button" class="btn btn-primary hidden" id="btn-detail-link-rom">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-link"/></svg>
+                  <span>Link ROM / ISO</span>
+                </button>
                 <button type="button" class="btn btn-secondary" id="btn-detail-folder">
                   <svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg>
                   <span>Folder</span>
@@ -718,6 +722,10 @@
                     <svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg>
                     <span>Clear Filters</span>
                   </button>
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-catalog-sync-retro">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-gamepad-2"/></svg>
+                    <span>Sync Console Catalog</span>
+                  </button>
                   <button type="button" class="btn btn-secondary btn-sm" id="btn-catalog-refresh">
                     <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
                     <span>Refresh Catalog</span>
@@ -804,6 +812,23 @@
                 <button type="button" class="filter-pill catalog-hide-installed-btn" id="btn-catalog-hide-installed" aria-pressed="false">
                   Hide Already Installed
                 </button>
+              </div>
+
+              <div class="catalog-platform-bar" id="catalog-platform-pills" role="group" aria-label="Filter by System or Console">
+                <button type="button" class="filter-pill catalog-platform-pill active" data-catalog-platform="all" aria-pressed="true">All</button>
+                <button type="button" class="filter-pill catalog-platform-pill" data-catalog-platform="pc" aria-pressed="false">PC</button>
+                <button type="button" class="filter-pill catalog-platform-pill" data-catalog-platform="nintendo" aria-pressed="false">Nintendo</button>
+                <button type="button" class="filter-pill catalog-platform-pill" data-catalog-platform="switch" aria-pressed="false">Switch</button>
+                <button type="button" class="filter-pill catalog-platform-pill" data-catalog-platform="wiiu" aria-pressed="false">Wii U</button>
+                <button type="button" class="filter-pill catalog-platform-pill" data-catalog-platform="3ds" aria-pressed="false">3DS</button>
+                <button type="button" class="filter-pill catalog-platform-pill" data-catalog-platform="nds" aria-pressed="false">DS</button>
+                <button type="button" class="filter-pill catalog-platform-pill" data-catalog-platform="gc-wii" aria-pressed="false">GC / Wii</button>
+                <button type="button" class="filter-pill catalog-platform-pill" data-catalog-platform="n64" aria-pressed="false">N64</button>
+                <button type="button" class="filter-pill catalog-platform-pill" data-catalog-platform="snes-nes" aria-pressed="false">SNES / NES</button>
+                <button type="button" class="filter-pill catalog-platform-pill" data-catalog-platform="gameboy" aria-pressed="false">Game Boy</button>
+                <button type="button" class="filter-pill catalog-platform-pill" data-catalog-platform="playstation" aria-pressed="false">PlayStation</button>
+                <button type="button" class="filter-pill catalog-platform-pill" data-catalog-platform="sega" aria-pressed="false">Sega</button>
+                <button type="button" class="filter-pill catalog-platform-pill" data-catalog-platform="arcade" aria-pressed="false">Arcade</button>
               </div>
 
               <div class="catalog-genres-drawer" id="catalog-genres-drawer">
@@ -1781,6 +1806,32 @@
 
                 <pre id="settings-bench-output" class="bench-output hidden mono-num"></pre>
               </div>
+
+              <!-- Card 9: Consoles & Emulators (Portable Provisioner & ROM Scanner) -->
+              <div class="panel-card" id="settings-consoles-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>Consoles &amp; Emulators</h3>
+                    <p class="panel-sub">Automatic 1-click portable emulator setup, folder ROM detection, and custom player paths. Keeps everything neatly inside your launcher folder.</p>
+                  </div>
+                  <div class="settings-btn-group">
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-settings-scan-rom-folder">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg>
+                      <span>Scan ROM Folder</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-settings-sync-retro-catalog">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                      <span>Sync Console Catalog</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-settings-refresh-emus">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-gamepad-2"/></svg>
+                      <span>Refresh Status</span>
+                    </button>
+                  </div>
+                </div>
+                <p class="panel-sub mono-num" id="settings-retro-sync-status">Checking portable console players...</p>
+                <div id="settings-emulators-list" class="emu-settings-grid"></div>
+              </div>
             </div>
           </section>
         </div>
@@ -1916,13 +1967,17 @@
           <svg class="icon" aria-hidden="true"><use href="#icon-external-link"/></svg>
           <span>SteamDB</span>
         </button>
+        <button type="button" class="btn btn-primary btn-sm hidden" id="btn-catalog-add-library">
+          <svg class="icon" aria-hidden="true"><use href="#icon-plus"/></svg>
+          <span>Add to Library</span>
+        </button>
         <button type="button" class="btn btn-primary btn-sm" id="btn-catalog-find-sources">
           <svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg>
           <span>Find &amp; Download</span>
         </button>
         <button type="button" class="btn btn-steam-green btn-sm" id="btn-catalog-link-exe">
           <svg class="icon" aria-hidden="true"><use href="#icon-link"/></svg>
-          <span>Link Local Exe</span>
+          <span id="btn-catalog-link-exe-label">Link Local Exe</span>
         </button>
       </div>
     </div>
@@ -2055,6 +2110,41 @@
     </div>
   </div>
 
+  <!-- MODAL: 1-CLICK PORTABLE EMULATOR INSTALL & PLAY PROMPT -->
+  <div id="emu-install-prompt-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="emu-install-prompt-title">
+    <div class="modal-card modal-card-narrow">
+      <div class="modal-head">
+        <h3 id="emu-install-prompt-title">Download Emulator &amp; Play</h3>
+        <button type="button" class="win-btn modal-close" id="btn-close-emu-install-modal" aria-label="Close">
+          <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p class="panel-sub" id="emu-install-prompt-desc">This console game needs a portable player before it can start.</p>
+        <div id="emu-install-progress-wrap" class="emu-progress-wrap hidden">
+          <div class="detail-field-head">
+            <span class="field-label" id="emu-install-progress-label">Preparing portable package...</span>
+            <span class="mono-num panel-sub" id="emu-install-progress-pct">0%</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" id="emu-install-progress-fill" style="width:0%"></div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-steam-green btn-sm" id="btn-emu-install-and-play">
+          <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
+          <span>Download Emulator &amp; Play</span>
+        </button>
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-emu-open-settings">
+          <svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>
+          <span>Choose Custom Path</span>
+        </button>
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-emu-install-cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Quick In-Game Guide / Alt+G Overlay HUD (?mode=overlay) -->
   <section id="overlay-hud-shell" class="overlay-hud-shell hidden" aria-label="Duke Quick In-Game Overlay">
     <div class="overlay-hud-head" data-tauri-drag-region>
@@ -2103,7 +2193,7 @@
         <svg class="icon drop-ingest-icon" aria-hidden="true"><use href="#icon-folder-open"/></svg>
       </div>
       <h2 class="drop-ingest-title">Drop &amp; Play</h2>
-      <p class="drop-ingest-sub">Drop any game folder, .exe, or Desktop shortcut here to add &amp; play</p>
+      <p class="drop-ingest-sub">Drop any game folder, .exe, Desktop shortcut, or console ROM / ISO here to add &amp; play</p>
     </div>
   </div>
 

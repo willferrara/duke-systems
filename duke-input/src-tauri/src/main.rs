@@ -83,6 +83,7 @@ fn handle_game_launched_auto_switch(
     pid: u32,
     title: &str,
     exe_name: &str,
+    platform_id: Option<u16>,
 ) {
     let resolved_exe = if exe_name.trim().to_ascii_lowercase().ends_with(".exe") {
         exe_name.trim().to_string()
@@ -105,7 +106,7 @@ fn handle_game_launched_auto_switch(
             .clone();
         let switched = {
             let mut guard = state.store.write().unwrap_or_else(|e| e.into_inner());
-            select_profile_for_game(&guard, title, &resolved_exe, &tel_snap).and_then(
+            select_profile_for_game(&guard, title, &resolved_exe, platform_id, &tel_snap).and_then(
                 |(target_id, target_name)| {
                     if guard.settings.active_profile_id != target_id {
                         guard.settings.active_profile_id = target_id.clone();
@@ -183,7 +184,9 @@ fn poll_shm_events(app: &AppHandle, state: &AppState, shm_rx: Option<&mut DukeSh
         match frame.kind() {
             ShmEventType::GameLaunched => {
                 let tag = frame.tag_str().to_string();
-                handle_game_launched_auto_switch(app, state, frame.pid, &tag, &tag);
+                let platform_id =
+                    duke_core::shm_bus::unpack_game_launch_platform_id(frame.payload_b);
+                handle_game_launched_auto_switch(app, state, frame.pid, &tag, &tag, platform_id);
             }
             ShmEventType::GameExited => {
                 handle_game_exited_auto_revert(app, state, frame.pid);
@@ -233,6 +236,7 @@ fn select_profile_for_game(
     store: &ProfileStore,
     title: &str,
     exe_name: &str,
+    platform_id: Option<u16>,
     tel: &LiveTelemetrySnapshot,
 ) -> Option<(String, String)> {
     if !exe_name.trim().is_empty() {
@@ -242,6 +246,49 @@ fn select_profile_for_game(
             .find(|p| p.linked_exes.iter().any(|rule| exe_matches_rule(exe_name, rule)))
         {
             return Some((matched.id.clone(), matched.name.clone()));
+        }
+    }
+
+    if let Some(pid) = platform_id {
+        if let Some(sys_label) = duke_core::shm_bus::console_label_for_platform_id(pid) {
+            let sys_lower = sys_label.to_ascii_lowercase();
+            // 1. User-created or explicitly named profile targeting this console (by name or linked rule)
+            if let Some(console_prof) = store.profiles.iter().find(|p| {
+                p.name.to_ascii_lowercase().contains(&sys_lower)
+                    || p.id.to_ascii_lowercase().contains(&sys_lower)
+                    || p.linked_exes
+                        .iter()
+                        .any(|r| r.to_ascii_lowercase().contains(&sys_lower))
+            }) {
+                return Some((console_prof.id.clone(), console_prof.name.clone()));
+            }
+            // 2. Motion/Gyro consoles (Wii, Wii U, Switch, 3DS, PS3) prefer Gyro profile when present
+            if duke_core::shm_bus::console_has_motion_gyro(pid) {
+                if let Some(gyro_prof) = store
+                    .profiles
+                    .iter()
+                    .find(|p| p.id == "fps_gyro" || p.name.to_ascii_lowercase().contains("gyro"))
+                {
+                    return Some((gyro_prof.id.clone(), gyro_prof.name.clone()));
+                }
+            }
+            // 3. Classic/Standard consoles prefer generic controller / emulator / retro profile
+            if let Some(pad_prof) = store
+                .profiles
+                .iter()
+                .find(|p| p.id == "comp_pad")
+                .or_else(|| {
+                    store.profiles.iter().find(|p| {
+                        let lower = p.name.to_ascii_lowercase();
+                        lower.contains("retro")
+                            || lower.contains("emulator")
+                            || lower.contains("controller")
+                            || lower.contains("console")
+                    })
+                })
+            {
+                return Some((pad_prof.id.clone(), pad_prof.name.clone()));
+            }
         }
     }
 
@@ -1445,7 +1492,9 @@ fn main() {
                         exe_name,
                         pid,
                     } => {
-                        handle_game_launched_auto_switch(&bus_app, &bus_state, pid, &title, &exe_name);
+                        handle_game_launched_auto_switch(
+                            &bus_app, &bus_state, pid, &title, &exe_name, None,
+                        );
                     }
                     DukeEvent::GameStopped { pid, .. } => {
                         handle_game_exited_auto_revert(&bus_app, &bus_state, pid);

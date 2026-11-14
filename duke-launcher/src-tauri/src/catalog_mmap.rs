@@ -8,8 +8,9 @@ use std::time::Instant;
 
 use crate::{get_app_data_file_standalone, CatalogCacheFile, CatalogGameEntry};
 
-pub const DKCAT_MAGIC: [u8; 8] = *b"DKCAT001";
-pub const DKCAT_VERSION: u32 = 2;
+pub const DKCAT_MAGIC_V1: [u8; 8] = *b"DKCAT001";
+pub const DKCAT_MAGIC: [u8; 8] = *b"DKCAT002";
+pub const DKCAT_VERSION: u32 = 3;
 const FLAG_IS_FREE: u32 = 1 << 0;
 const FLAG_SINGLEPLAYER: u32 = 1 << 1;
 const FLAG_COOP: u32 = 1 << 2;
@@ -373,7 +374,31 @@ pub struct DkCatHeader {
     pub checksum_blake3: [u8; 32],
 }
 
-/// Packed fixed-stride `#[repr(C)]` catalog entry stored sequentially in `catalog.dkcat`.
+/// Legacy 104-byte fixed-stride record layout used in `DKCAT001` archives (kept for migration).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct CatalogRecordV1 {
+    pub ccu: u64,
+    pub owners_min: u64,
+    pub owners_max: u64,
+    pub positive: u64,
+    pub negative: u64,
+    pub value_score: f64,
+    pub updated_at: u64,
+    pub genre_bits: u64,
+    pub appid: u32,
+    pub price_cents: u32,
+    pub initial_price_cents: u32,
+    pub flags: u32,
+    pub name_off: u32,
+    pub name_len: u32,
+    pub tags_off: u32,
+    pub tags_len: u32,
+    pub meta_off: u32,
+    pub meta_len: u32,
+}
+
+/// Packed fixed-stride `#[repr(C)]` catalog entry (112 bytes) stored sequentially in `catalog.dkcat` (`DKCAT002`).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct CatalogRecord {
@@ -395,6 +420,9 @@ pub struct CatalogRecord {
     pub tags_len: u32,
     pub meta_off: u32,
     pub meta_len: u32,
+    pub platform_id: u16,
+    pub console_group: u8,
+    pub _pad: [u8; 5],
 }
 
 #[repr(C)]
@@ -438,6 +466,9 @@ pub struct CatalogQueryParams {
     pub player_mode: String,
     pub min_ccu: u64,
     pub genres: Vec<String>,
+    pub platform: String,
+    pub platform_id: Option<u16>,
+    pub console_group: String,
     pub offset: usize,
     pub limit: usize,
 }
@@ -753,9 +784,20 @@ pub fn serialize_dkcat(cache: &CatalogCacheFile) -> Result<Vec<u8>, String> {
         for dev in &entry.developers {
             push_trigrams(dev, &mut unique_tri);
         }
+        if entry.platform_id > 0 {
+            let plat = crate::platforms::platform_by_id(entry.platform_id);
+            push_trigrams(plat.short_name, &mut unique_tri);
+            push_trigrams(plat.slug, &mut unique_tri);
+        }
         for tri in unique_tri {
             trigrams.entry(tri).or_default().push(rec_idx);
         }
+
+        let console_group = if entry.console_group != 0 {
+            entry.console_group
+        } else {
+            crate::platforms::console_group_for_platform(entry.platform_id)
+        };
 
         records.push(CatalogRecord {
             ccu: entry.ccu,
@@ -776,6 +818,9 @@ pub fn serialize_dkcat(cache: &CatalogCacheFile) -> Result<Vec<u8>, String> {
             tags_len,
             meta_off,
             meta_len,
+            platform_id: entry.platform_id,
+            console_group,
+            _pad: [0u8; 5],
         });
     }
 
@@ -1031,9 +1076,20 @@ impl MappedCatalog {
             0.0
         };
 
+        let plat = crate::platforms::platform_by_id(rec.platform_id);
+        let console_group = if rec.console_group != 0 {
+            rec.console_group
+        } else {
+            plat.console_group
+        };
+
         CatalogGameEntry {
             app_id: rec.appid,
             name,
+            platform_id: rec.platform_id,
+            console_group,
+            platform_name: plat.short_name.to_string(),
+            platform_slug: plat.slug.to_string(),
             price_cents: rec.price_cents,
             initial_price_cents: rec.initial_price_cents,
             discount_percent: (rec.flags >> 8) & 0xFF,
@@ -1234,6 +1290,17 @@ impl MappedCatalog {
         };
 
         let sort_mode = params.sort_by.trim();
+        let explicit_platform_id = params.platform_id;
+        let platform_filter_key = if !params.platform.trim().is_empty() {
+            params.platform.trim()
+        } else {
+            params.console_group.trim()
+        };
+        let has_platform_filter = explicit_platform_id.is_some()
+            || (!platform_filter_key.is_empty()
+                && !platform_filter_key.eq_ignore_ascii_case("all")
+                && !platform_filter_key.eq_ignore_ascii_case("all_systems"));
+
         let initial_cap = match &trigram_candidates {
             Some(vec) => vec.len(),
             None => 1024.min(total_indexed),
@@ -1255,6 +1322,20 @@ impl MappedCatalog {
             let Ok(rec) = self.read_record(rec_idx as usize) else {
                 continue;
             };
+
+            if has_platform_filter {
+                if let Some(pid) = explicit_platform_id {
+                    if rec.platform_id != pid {
+                        continue;
+                    }
+                } else if !crate::platforms::record_matches_platform_filter(
+                    rec.platform_id,
+                    rec.console_group,
+                    platform_filter_key,
+                ) {
+                    continue;
+                }
+            }
 
             let is_free_rec = rec.price_cents == 0 || (rec.flags & FLAG_IS_FREE) != 0;
             match price_tier {
@@ -1399,12 +1480,16 @@ impl MappedCatalog {
                         (g, d)
                     };
                 let appid_str = format_u32_stack(rec.appid, &mut id_buf);
+                let plat_spec = crate::platforms::platform_by_id(rec.platform_id);
                 let all_toks_match = q_tokens.iter().all(|&tok| {
                     contains_ignore_ascii_case(name_str, tok)
                         || contains_ignore_ascii_case(appid_str, tok)
                         || contains_ignore_ascii_case(genres_str, tok)
                         || contains_ignore_ascii_case(tags_str, tok)
                         || contains_ignore_ascii_case(devs_str, tok)
+                        || (rec.platform_id > 0
+                            && (contains_ignore_ascii_case(plat_spec.short_name, tok)
+                                || contains_ignore_ascii_case(plat_spec.display_name, tok)))
                 });
                 if !all_toks_match {
                     continue;
@@ -1457,8 +1542,13 @@ impl MappedCatalog {
                 }
                 "trending" => {
                     let ccu_pts = (((rec.ccu as f64) + 1.0).log10() * 1400.0) as u64;
-                    let recency_pts =
-                        (((rec.appid as f64).min(4_000_000.0) / 4_000_000.0) * 3200.0) as u64;
+                    let recency_pts = if rec.platform_id == 0
+                        && !crate::platforms::is_synthetic_retro_appid(rec.appid)
+                    {
+                        (((rec.appid as f64).min(4_000_000.0) / 4_000_000.0) * 3200.0) as u64
+                    } else {
+                        0
+                    };
                     let discount_pts = if ((rec.flags >> 8) & 0xFF) >= 20 { 450 } else { 0 };
                     let rating_pts = if total_reviews >= 20 {
                         rating_tenths * 2
@@ -1483,7 +1573,13 @@ impl MappedCatalog {
                     rec.ccu,
                 ),
                 "newest_appid" => (
-                    rec.appid as u64,
+                    if rec.platform_id == 0
+                        && !crate::platforms::is_synthetic_retro_appid(rec.appid)
+                    {
+                        rec.appid as u64
+                    } else {
+                        0
+                    },
                     rec.ccu,
                     f64_to_sortable_u64(rec.value_score),
                 ),
@@ -1718,6 +1814,162 @@ pub fn atomic_rebuild_dkcat(dkcat_path: &Path, cache: &CatalogCacheFile) -> Resu
     Ok(stats)
 }
 
+fn pool_str_slice(bytes: &[u8], strings_offset: usize, tri_offset: usize, off: u32, len: u32) -> &str {
+    let start = strings_offset.saturating_add(off as usize);
+    let end = start.saturating_add(len as usize);
+    if start <= end && end <= tri_offset && end <= bytes.len() {
+        std::str::from_utf8(&bytes[start..end]).unwrap_or("")
+    } else {
+        ""
+    }
+}
+
+/// Automatically upgrades a legacy `DKCAT001` archive (`CatalogRecordV1` 104B) into `DKCAT002` (`112B`)
+/// preserving every existing PC entry (`platform_id = 0`) and fetched page cursor.
+pub fn try_migrate_dkcat_v1_to_v2(dkcat_path: &Path) -> Result<bool, String> {
+    if !dkcat_path.is_file() {
+        return Ok(false);
+    }
+    let cache_opt = {
+        let file = File::open(dkcat_path)
+            .map_err(|e| format!("Failed to open legacy catalog {}: {}", dkcat_path.display(), e))?;
+        let mmap = unsafe { Mmap::map(&file) }
+            .map_err(|e| format!("Mmap failed during V1 migration: {}", e))?;
+        let bytes: &[u8] = &mmap;
+        let header: DkCatHeader = unsafe { read_struct_unaligned(bytes, 0)? };
+        if header.magic != DKCAT_MAGIC_V1 || header.version != 2 {
+            None
+        } else {
+            let rec_size = core::mem::size_of::<CatalogRecordV1>();
+            let rec_start = header.records_offset as usize;
+            let str_start = header.strings_offset as usize;
+            let tri_start = header.trigram_offset as usize;
+            let rec_bytes = (header.record_count as usize)
+                .checked_mul(rec_size)
+                .ok_or_else(|| "Corrupt V1 record count".to_string())?;
+            if rec_start < core::mem::size_of::<DkCatHeader>()
+                || rec_start.saturating_add(rec_bytes) > str_start
+                || str_start > tri_start
+                || tri_start + 16 > bytes.len()
+            {
+                return Err("Corrupt section bounds in legacy DKCAT001 header".to_string());
+            }
+
+            let fetched_at = u64::from_le_bytes(
+                bytes[tri_start..tri_start + 8]
+                    .try_into()
+                    .map_err(|_| "Truncated V1 fetched_at".to_string())?,
+            );
+            let pages_count = u32::from_le_bytes(
+                bytes[tri_start + 12..tri_start + 16]
+                    .try_into()
+                    .map_err(|_| "Truncated V1 pages_count".to_string())?,
+            ) as usize;
+            let pages_start = tri_start + 16;
+            let pages_end = pages_start
+                .checked_add(pages_count.saturating_mul(4))
+                .ok_or_else(|| "Corrupt V1 page table".to_string())?;
+            let mut fetched_pages = Vec::new();
+            if pages_end <= bytes.len() {
+                for chunk in bytes[pages_start..pages_end].chunks_exact(4) {
+                    fetched_pages.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                }
+            }
+
+            let pc_spec = crate::platforms::platform_by_id(crate::platforms::PLATFORM_PC);
+            let mut entries = Vec::with_capacity(header.record_count as usize);
+            for idx in 0..header.record_count as usize {
+                let off = rec_start + idx * rec_size;
+                let v1: CatalogRecordV1 = unsafe { read_struct_unaligned(bytes, off)? };
+                let name = pool_str_slice(bytes, str_start, tri_start, v1.name_off, v1.name_len)
+                    .to_string();
+                let tags_raw =
+                    pool_str_slice(bytes, str_start, tri_start, v1.tags_off, v1.tags_len);
+                let tags: Vec<String> = if tags_raw.is_empty() {
+                    Vec::new()
+                } else {
+                    tags_raw
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                };
+                let meta_raw =
+                    pool_str_slice(bytes, str_start, tri_start, v1.meta_off, v1.meta_len);
+                let mut meta_parts = meta_raw.split(FIELD_SEP);
+                let price_formatted = meta_parts.next().unwrap_or("").to_string();
+                let owners_label = meta_parts.next().unwrap_or("").to_string();
+                let genres = split_safe(meta_parts.next().unwrap_or(""));
+                let categories = split_safe(meta_parts.next().unwrap_or(""));
+                let short_description = meta_parts.next().unwrap_or("").to_string();
+                let developers = split_safe(meta_parts.next().unwrap_or(""));
+                let publishers = split_safe(meta_parts.next().unwrap_or(""));
+                let release_date = meta_parts.next().unwrap_or("").to_string();
+                let cover_url = meta_parts.next().unwrap_or("").to_string();
+                let header_url = meta_parts.next().unwrap_or("").to_string();
+                let hero_url = meta_parts.next().unwrap_or("").to_string();
+
+                let total_reviews = v1.positive.saturating_add(v1.negative);
+                let review_pct = if total_reviews > 0 {
+                    ((v1.positive as f64 / total_reviews as f64) * 1000.0).round() / 10.0
+                } else {
+                    0.0
+                };
+
+                entries.push(CatalogGameEntry {
+                    app_id: v1.appid,
+                    name,
+                    platform_id: crate::platforms::PLATFORM_PC,
+                    console_group: pc_spec.console_group,
+                    platform_name: pc_spec.short_name.to_string(),
+                    platform_slug: pc_spec.slug.to_string(),
+                    price_cents: v1.price_cents,
+                    initial_price_cents: v1.initial_price_cents,
+                    discount_percent: (v1.flags >> 8) & 0xFF,
+                    price_formatted,
+                    is_free: (v1.flags & FLAG_IS_FREE) != 0,
+                    ccu: v1.ccu,
+                    owners_min: v1.owners_min,
+                    owners_max: v1.owners_max,
+                    owners_label,
+                    positive: v1.positive,
+                    negative: v1.negative,
+                    review_pct,
+                    is_singleplayer: (v1.flags & FLAG_SINGLEPLAYER) != 0,
+                    is_coop: (v1.flags & FLAG_COOP) != 0,
+                    is_multiplayer: (v1.flags & FLAG_MULTIPLAYER) != 0,
+                    is_online_only_pvp: (v1.flags & FLAG_ONLINE_ONLY_PVP) != 0,
+                    genres,
+                    tags,
+                    categories,
+                    short_description,
+                    developers,
+                    publishers,
+                    release_date,
+                    cover_url,
+                    header_url,
+                    hero_url,
+                    value_score: v1.value_score,
+                    details_enriched: (v1.flags & FLAG_DETAILS_ENRICHED) != 0,
+                    updated_at: v1.updated_at,
+                });
+            }
+            Some(CatalogCacheFile {
+                fetched_at,
+                fetched_pages,
+                entries,
+            })
+        }
+    };
+
+    if let Some(cache) = cache_opt {
+        atomic_rebuild_dkcat(dkcat_path, &cache)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 pub fn ensure_catalog_mapped_standalone() -> Result<(), String> {
     let json_path = get_app_data_file_standalone("catalog_cache.json")?;
     {
@@ -1734,6 +1986,12 @@ pub fn ensure_catalog_mapped_standalone() -> Result<(), String> {
         if let Ok(mapped) = MappedCatalog::open(&dkcat_path) {
             let mut write_guard = global_catalog_slot().write().unwrap();
             *write_guard = Some(mapped);
+            if json_path.is_file() {
+                let _ = fs::remove_file(&json_path);
+            }
+            return Ok(());
+        }
+        if matches!(try_migrate_dkcat_v1_to_v2(&dkcat_path), Ok(true)) {
             if json_path.is_file() {
                 let _ = fs::remove_file(&json_path);
             }
@@ -1832,6 +2090,59 @@ pub fn lookup_entry_by_title_or_appid_via_mmap(
                 && query_tokens.iter().all(|t| cand_key.contains(t.as_str()))
                 && cand_key.len() <= target_key.len() + 8)
     })
+}
+
+/// Resolves a retro console title or serial/ROM ID from `catalog.dkcat` filtered to `platform_id`.
+pub fn lookup_retro_entry_by_title_or_id(
+    platform_id: u16,
+    rom_id: &str,
+    title: &str,
+) -> Option<CatalogGameEntry> {
+    if platform_id == 0 {
+        return None;
+    }
+    let _ = ensure_catalog_mapped_standalone();
+    let guard = global_catalog_slot().read().unwrap();
+    let mapped = guard.as_ref()?;
+
+    let clean_serial = rom_id.trim();
+    if !clean_serial.is_empty() {
+        let page = mapped.query(&CatalogQueryParams {
+            query: clean_serial.to_string(),
+            platform_id: Some(platform_id),
+            limit: 8,
+            ..CatalogQueryParams::default()
+        });
+        if let Some(hit) = page.items.into_iter().next() {
+            return Some(hit);
+        }
+    }
+
+    let cleaned = crate::clean_game_title(title);
+    let q = if cleaned.trim().is_empty() {
+        title.trim().to_string()
+    } else {
+        cleaned
+    };
+    if q.is_empty() {
+        return None;
+    }
+    let page = mapped.query(&CatalogQueryParams {
+        query: q.clone(),
+        platform_id: Some(platform_id),
+        sort_by: "relevancy".to_string(),
+        limit: 12,
+        ..CatalogQueryParams::default()
+    });
+    let target_key = normalize_catalog_lookup_key(&q);
+    if let Some(exact) = page
+        .items
+        .iter()
+        .find(|c| normalize_catalog_lookup_key(&crate::clean_game_title(&c.name)) == target_key)
+    {
+        return Some(exact.clone());
+    }
+    page.items.into_iter().next()
 }
 
 pub fn upsert_entries_dkcat(
@@ -1958,7 +2269,8 @@ mod tests {
     #[test]
     fn dkcat_structs_have_zero_unexpected_layout_issues() {
         assert_eq!(core::mem::size_of::<DkCatHeader>(), 72);
-        assert_eq!(core::mem::size_of::<CatalogRecord>(), 104);
+        assert_eq!(core::mem::size_of::<CatalogRecordV1>(), 104);
+        assert_eq!(core::mem::size_of::<CatalogRecord>(), 112);
         assert_eq!(core::mem::size_of::<TrigramIndexEntry>(), 12);
     }
 
@@ -2005,6 +2317,7 @@ mod tests {
                     value_score: 97.5,
                     details_enriched: true,
                     updated_at: 1_700_000_000,
+                    ..CatalogGameEntry::default()
                 },
                 CatalogGameEntry {
                     app_id: 413150,
@@ -2038,6 +2351,7 @@ mod tests {
                     value_score: 99.1,
                     details_enriched: true,
                     updated_at: 1_700_000_001,
+                    ..CatalogGameEntry::default()
                 },
             ],
         };
@@ -2137,6 +2451,7 @@ mod tests {
                 value_score: (i % 10_000) as f64 / 100.0,
                 details_enriched: false,
                 updated_at: 1_700_000_000,
+                ..CatalogGameEntry::default()
             });
         }
 
@@ -2274,6 +2589,7 @@ mod tests {
                 value_score,
                 details_enriched: true,
                 updated_at: 1_700_000_000,
+                ..CatalogGameEntry::default()
             }
         };
 
@@ -2483,6 +2799,169 @@ mod tests {
         );
 
         drop(mapped);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dkcat002_filters_retro_platforms_and_migrates_v1_automatically() {
+        let dir = std::env::temp_dir().join(format!("duke_dkcat_v2_plat_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dkcat_path = dir.join("catalog.dkcat");
+
+        let mut cache = CatalogCacheFile {
+            fetched_at: 1_700_000_555,
+            fetched_pages: vec![0, 1],
+            entries: vec![
+                CatalogGameEntry {
+                    app_id: 730,
+                    name: "Counter-Strike 2".to_string(),
+                    platform_id: crate::platforms::PLATFORM_PC,
+                    console_group: crate::platforms::GROUP_PC,
+                    platform_name: "PC".to_string(),
+                    platform_slug: "pc".to_string(),
+                    is_free: true,
+                    price_formatted: "Free".to_string(),
+                    value_score: 90.0,
+                    ..CatalogGameEntry::default()
+                },
+                CatalogGameEntry {
+                    app_id: crate::platforms::synthetic_retro_catalog_id(
+                        crate::platforms::PLATFORM_GAMECUBE,
+                        "Metroid Prime (USA)",
+                        "GM8E01",
+                    ),
+                    name: "Metroid Prime (USA)".to_string(),
+                    platform_id: crate::platforms::PLATFORM_GAMECUBE,
+                    console_group: crate::platforms::GROUP_GC_WII,
+                    platform_name: "GameCube".to_string(),
+                    platform_slug: "gamecube".to_string(),
+                    genres: vec!["Action".to_string(), "Adventure".to_string()],
+                    tags: vec!["Nintendo".to_string(), "GM8E01".to_string()],
+                    value_score: 96.0,
+                    ..CatalogGameEntry::default()
+                },
+                CatalogGameEntry {
+                    app_id: crate::platforms::synthetic_retro_catalog_id(
+                        crate::platforms::PLATFORM_3DS,
+                        "The Legend of Zelda: Ocarina of Time 3D",
+                        "AQEE",
+                    ),
+                    name: "The Legend of Zelda: Ocarina of Time 3D".to_string(),
+                    platform_id: crate::platforms::PLATFORM_3DS,
+                    console_group: crate::platforms::GROUP_3DS,
+                    platform_name: "Nintendo 3DS".to_string(),
+                    platform_slug: "3ds".to_string(),
+                    genres: vec!["Adventure".to_string()],
+                    tags: vec!["Nintendo".to_string(), "3DS".to_string()],
+                    value_score: 97.0,
+                    ..CatalogGameEntry::default()
+                },
+                CatalogGameEntry {
+                    app_id: crate::platforms::synthetic_retro_catalog_id(
+                        crate::platforms::PLATFORM_PS2,
+                        "Shadow of the Colossus (USA)",
+                        "SCUS-97472",
+                    ),
+                    name: "Shadow of the Colossus (USA)".to_string(),
+                    platform_id: crate::platforms::PLATFORM_PS2,
+                    console_group: crate::platforms::GROUP_PLAYSTATION,
+                    platform_name: "PS2".to_string(),
+                    platform_slug: "ps2".to_string(),
+                    genres: vec!["Adventure".to_string()],
+                    tags: vec!["PS2".to_string(), "SCUS-97472".to_string()],
+                    value_score: 95.0,
+                    ..CatalogGameEntry::default()
+                },
+            ],
+        };
+
+        let bytes = serialize_dkcat(&cache).unwrap();
+        assert_eq!(&bytes[0..8], b"DKCAT002");
+        fs::write(&dkcat_path, &bytes).unwrap();
+        let mapped = MappedCatalog::open(&dkcat_path).unwrap();
+
+        // Filter by explicit platform_id
+        let gc = mapped.query(&CatalogQueryParams {
+            platform_id: Some(crate::platforms::PLATFORM_GAMECUBE),
+            ..CatalogQueryParams::default()
+        });
+        assert_eq!(gc.total_matches, 1);
+        assert_eq!(gc.items[0].platform_id, crate::platforms::PLATFORM_GAMECUBE);
+        assert_eq!(gc.items[0].platform_name, "GameCube");
+
+        // Filter by Nintendo umbrella console_group (matches GC + 3DS)
+        let nintendo = mapped.query(&CatalogQueryParams {
+            platform: "nintendo".to_string(),
+            ..CatalogQueryParams::default()
+        });
+        assert_eq!(nintendo.total_matches, 2);
+
+        // Filter by PlayStation group + query
+        let ps = mapped.query(&CatalogQueryParams {
+            query: "Colossus".to_string(),
+            platform: "playstation".to_string(),
+            ..CatalogQueryParams::default()
+        });
+        assert_eq!(ps.total_matches, 1);
+        assert_eq!(ps.items[0].platform_slug, "ps2");
+
+        // Verify DKCAT001 -> DKCAT002 transparent migration
+        drop(mapped);
+        cache.entries.truncate(1);
+        let rec_v1 = CatalogRecordV1 {
+            ccu: 900,
+            owners_min: 1000,
+            owners_max: 2000,
+            positive: 500,
+            negative: 10,
+            value_score: 88.0,
+            updated_at: 1_700_000_111,
+            genre_bits: 0,
+            appid: 730,
+            price_cents: 0,
+            initial_price_cents: 0,
+            flags: FLAG_IS_FREE,
+            name_off: 0,
+            name_len: 16,
+            tags_off: 16,
+            tags_len: 0,
+            meta_off: 16,
+            meta_len: 0,
+        };
+        let hdr_sz = core::mem::size_of::<DkCatHeader>();
+        let rec_v1_sz = core::mem::size_of::<CatalogRecordV1>();
+        let mut body_v1 = Vec::new();
+        body_v1.extend_from_slice(bytes_of_struct(&rec_v1));
+        body_v1.extend_from_slice(b"Counter-Strike 2");
+        let tri_off_v1 = (hdr_sz + body_v1.len()) as u64;
+        body_v1.extend_from_slice(&1_700_000_555u64.to_le_bytes()); // fetched_at
+        body_v1.extend_from_slice(&0u32.to_le_bytes()); // trigram_count
+        body_v1.extend_from_slice(&1u32.to_le_bytes()); // pages_count
+        body_v1.extend_from_slice(&0u32.to_le_bytes()); // page 0
+        let hdr_v1 = DkCatHeader {
+            magic: DKCAT_MAGIC_V1,
+            version: 2,
+            record_count: 1,
+            records_offset: hdr_sz as u64,
+            strings_offset: (hdr_sz + rec_v1_sz) as u64,
+            trigram_offset: tri_off_v1,
+            checksum_blake3: *blake3::hash(&body_v1).as_bytes(),
+        };
+        let mut raw_v1 = Vec::with_capacity(hdr_sz + body_v1.len());
+        raw_v1.extend_from_slice(bytes_of_struct(&hdr_v1));
+        raw_v1.extend_from_slice(&body_v1);
+        let v1_path = dir.join("legacy_v1.dkcat");
+        fs::write(&v1_path, &raw_v1).unwrap();
+
+        let migrated = try_migrate_dkcat_v1_to_v2(&v1_path).unwrap();
+        assert!(migrated);
+        let reopened = MappedCatalog::open(&v1_path).unwrap();
+        assert_eq!(reopened.record_count(), 1);
+        assert_eq!(reopened.get_entry_by_appid(730).unwrap().name, "Counter-Strike 2");
+        assert_eq!(reopened.fetched_pages(), &[0]);
+
+        drop(reopened);
         let _ = fs::remove_dir_all(&dir);
     }
 }

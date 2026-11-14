@@ -439,7 +439,12 @@ async fn build_symbolic_save_staging(game_key: &str) -> Result<Option<(PathBuf, 
         source_roots.push(sandbox_dir);
     }
 
-    let roots: [(&str, String); 4] = [
+    let emus_root = crate::emulators::emulators_root_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let roots: [(&str, String); 5] = [
+        ("__DUKE_EMUS__", emus_root),
         ("__GAME__", game_dir.clone()),
         ("__APPDATA__", appdata.clone()),
         ("__LOCALAPPDATA__", localappdata.clone()),
@@ -517,7 +522,12 @@ fn materialize_staged_saves_to_live_paths(staging_dir: &Path, entry: &GameEntry)
             .into_owned()
     };
 
-    let mappings: [(&str, &str); 4] = [
+    let emus_root = crate::emulators::emulators_root_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let mappings: [(&str, &str); 5] = [
+        ("__DUKE_EMUS__", &emus_root),
         ("__GAME__", &game_dir),
         ("__APPDATA__", &appdata),
         ("__LOCALAPPDATA__", &localappdata),

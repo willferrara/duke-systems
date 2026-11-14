@@ -67,6 +67,15 @@ import {
   pickGameFolder,
   pickJsonSourceFile,
   pollGamepadState,
+  addRetroGameFromCatalog,
+  checkGameEmulatorReady,
+  getEmulatorStatuses,
+  getRetroPlatforms,
+  installEmulatorForConsole,
+  linkGameRom,
+  listenEmulatorInstallProgress,
+  listenRetroCatalogSyncProgress,
+  pickRomFile,
   preflightCheckExe,
   probeSwarmPeers,
   purgeSuiteRamIpc,
@@ -83,8 +92,10 @@ import {
   restoreGameSnapshot,
   runSubsystemBenchmark,
   scanAndCleanDesktopShortcuts,
+  scanRomFolder,
   searchImportedSources,
   searchSteamGridDbArtwork,
+  setCustomEmulatorPath,
   setGameAchievementsPath,
   setGameLaunchArgs,
   setGameLaunchProfile,
@@ -92,6 +103,7 @@ import {
   suspendOrResumeGame,
   syncGameSavesMesh,
   syncLudusaviManifest,
+  syncRetroCatalog,
   syncStorefrontPlaytime,
   takePendingProtocolUrls,
   toggleGameDxvkWrapper,
@@ -119,6 +131,7 @@ const SUPPORTED_ARCHIVE_EXT_RE = /\.(zip|rar|7z|exe|msi|iso)$/i;
 
 const DEFAULT_CATALOG_FILTERS = Object.freeze({
   searchQuery: "",
+  platform: "all",
   sortBy: "value_score",
   priceTier: "all",
   minRatingPct: 0,
@@ -270,6 +283,16 @@ function svgIcon(name) {
   return `<svg class="icon" aria-hidden="true"><use href="#${name}"/></svg>`;
 }
 
+function resolveMediaUrl(rawUrl) {
+  const s = String(rawUrl || "").trim();
+  if (!s) return "";
+  if (/^(https?:|data:|blob:|asset:)/i.test(s)) return s;
+  if (/^[A-Za-z]:[\\/]/.test(s) || s.startsWith("\\\\")) {
+    return convertFileSrc(s);
+  }
+  return s;
+}
+
 function showToast(msg, tone = "info", durationMs = 3800) {
   const c = el("toast-container");
   if (!c) return;
@@ -416,6 +439,9 @@ function switchTab(tab, keepDetail = false) {
   } else {
     el(viewMap[tab] || "library-view")?.classList.remove("hidden");
     el("library-controls")?.classList.toggle("hidden", tab !== "library");
+    if (tab === "settings") {
+      loadEmulatorSettingsSection();
+    }
   }
 }
 
@@ -472,15 +498,18 @@ function updateSidebarTelemetry(telemetry) {
 function resolveGameSourceLabel(game) {
   const explicit = String(game?.source || "").trim();
   if (explicit) return explicit;
-  if (game?.steamAppId || game?.appId) return "Steam";
+  if (Number(game?.platformId || 0) > 0) return game?.platform || "Console";
+  if (game?.steamAppId || (game?.appId && Number(game.appId) < 2000000000)) return "Steam";
   return "Portable";
 }
 
 function getFilteredSortedGames() {
   const q = state.searchQuery.trim().toLowerCase();
   const list = state.library.filter((g) => {
+    const isRetro = Number(g?.platformId || 0) > 0;
     const srcLabel = resolveGameSourceLabel(g).toLowerCase();
-    const isSteamDetected = srcLabel === "steam" || Boolean(g.steamAppId || g.appId);
+    const hasRealSteamId = Boolean(g.steamAppId || (g.appId && Number(g.appId) < 2000000000));
+    const isSteamDetected = !isRetro && (srcLabel === "steam" || hasRealSteamId);
     const isStoreTagged = ["steam", "epic", "gog", "xbox"].includes(srcLabel);
     const isExplicitPortable =
       srcLabel === "portable" || String(g.genre || "").toLowerCase().includes("portable");
@@ -673,7 +702,10 @@ function renderLibraryGrid() {
 
   grid.innerHTML = games
     .map((game) => {
-      const cover = game.coverUrl || generateFallbackCoverDataUri(game.title, game.genre || "Installed");
+      const cover =
+        resolveMediaUrl(game.coverUrl) ||
+        resolveMediaUrl(game.coverDataUrl) ||
+        generateFallbackCoverDataUri(game.title, game.genre || "Installed");
       const playtimeStr = formatPlaytime(getTotalPlaytimeSecs(game));
       const lastStr = formatLastPlayed(game.lastPlayedTs || game.lastPlayed);
       const favClass = game.isFavorite ? "is-fav" : "";
@@ -726,7 +758,7 @@ function renderLibraryGrid() {
 function buildHeroCandidateList(appId, fallbackUrl) {
   const candidates = [];
   const validId = Number(appId || 0);
-  if (validId > 0) {
+  if (validId > 0 && validId < 2000000000) {
     candidates.push(
       `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${validId}/library_hero.jpg`,
       `https://cdn.cloudflare.steamstatic.com/steam/apps/${validId}/library_hero.jpg`,
@@ -734,16 +766,16 @@ function buildHeroCandidateList(appId, fallbackUrl) {
     );
   }
   if (fallbackUrl && typeof fallbackUrl === "string" && fallbackUrl.trim()) {
-    candidates.push(fallbackUrl.trim());
+    candidates.push(resolveMediaUrl(fallbackUrl.trim()));
   }
   return candidates.filter((url, idx, arr) => url && arr.indexOf(url) === idx);
 }
 
 function applyHeroCandidateChain(imgEl, rawCandidates, isStillValid) {
   if (!imgEl) return;
-  const candidates = rawCandidates.filter(
-    (url, idx, arr) => typeof url === "string" && url.trim() && arr.indexOf(url) === idx
-  );
+  const candidates = rawCandidates
+    .map((url) => resolveMediaUrl(url))
+    .filter((url, idx, arr) => typeof url === "string" && url.trim() && arr.indexOf(url) === idx);
   imgEl.onerror = null;
   imgEl.onload = null;
   imgEl.alt = "";
@@ -881,8 +913,11 @@ async function openGameDetail(gameId) {
   renderSidebarGameList();
   syncActiveSessionsUi();
 
+  const isRetroGame = Number(game.platformId || 0) > 0;
+  el("btn-detail-link-rom")?.classList.toggle("hidden", !isRetroGame);
+
   const detailHeroImg = el("detail-hero-img");
-  const cachedCover = game.heroUrl || game.coverDataUrl || game.coverUrl || "";
+  const cachedCover = resolveMediaUrl(game.heroUrl || game.coverDataUrl || game.coverUrl || "");
   if (detailHeroImg) {
     detailHeroImg.onerror = null;
     detailHeroImg.onload = null;
@@ -908,8 +943,14 @@ async function openGameDetail(gameId) {
   const appIdBadge = el("detail-hero-appid");
   const initialAppId = game.steamAppId || game.appId;
   if (appIdBadge) {
-    appIdBadge.textContent = initialAppId ? `AppID ${initialAppId}` : "";
-    appIdBadge.classList.toggle("hidden", !initialAppId);
+    if (isRetroGame) {
+      const badgeLabel = game.romId ? String(game.romId) : "";
+      appIdBadge.textContent = badgeLabel;
+      appIdBadge.classList.toggle("hidden", !badgeLabel);
+    } else {
+      appIdBadge.textContent = initialAppId ? `AppID ${initialAppId}` : "";
+      appIdBadge.classList.toggle("hidden", !initialAppId);
+    }
   }
 
   if (el("detail-last-played")) el("detail-last-played").textContent = formatLastPlayed(game.lastPlayedTs || game.lastPlayed);
@@ -955,6 +996,42 @@ async function openGameDetail(gameId) {
 
   const isStillCurrent = () =>
     requestId === state.activeDetailRequestId && state.selectedDetailId === game.id;
+
+  if (isRetroGame && (!initialAppId || Number(initialAppId) >= 2000000000)) {
+    try {
+      const catDetails = initialAppId ? await getCatalogGameDetails(initialAppId).catch(() => null) : null;
+      if (!isStillCurrent()) return;
+      const candidates = [
+        game.heroUrl,
+        game.coverUrl,
+        game.coverDataUrl,
+        catDetails?.heroUrl,
+        catDetails?.coverUrl,
+        catDetails?.headerUrl
+      ].filter((u, idx, arr) => u && arr.indexOf(u) === idx);
+      applyHeroCandidateChain(detailHeroImg, candidates, isStillCurrent);
+      if (el("detail-description")) {
+        el("detail-description").textContent =
+          catDetails?.shortDescription ||
+          `${resolveGameSourceLabel(game)} game managed by Duke Launcher${game.emulatorId ? ` (${game.emulatorId})` : ""}.`;
+      }
+      if (el("detail-developers")) el("detail-developers").textContent = (catDetails?.developers || []).join(", ") || "--";
+      if (el("detail-publishers")) el("detail-publishers").textContent = (catDetails?.publishers || []).join(", ") || "--";
+      if (el("detail-release-date")) el("detail-release-date").textContent = catDetails?.releaseDate || "--";
+      if (el("detail-genres")) el("detail-genres").textContent = (catDetails?.genres || []).join(", ") || game.genre || resolveGameSourceLabel(game);
+      if (el("detail-live-players")) el("detail-live-players").textContent = resolveGameSourceLabel(game);
+      if (el("detail-steam-price")) el("detail-steam-price").textContent = game.romId || "Console ROM";
+      if (el("detail-news-list")) {
+        el("detail-news-list").innerHTML =
+          `<div class="panel-sub">Powered by Duke Portable Emulator Orchestrator. Use Save Restore Point or Duke Swarm for automatic cross-PC save sync.</div>`;
+      }
+    } catch {
+      if (!isStillCurrent()) return;
+      if (el("detail-description")) el("detail-description").textContent = `${resolveGameSourceLabel(game)} ROM managed offline.`;
+      if (el("detail-live-players")) el("detail-live-players").textContent = resolveGameSourceLabel(game);
+    }
+    return;
+  }
 
   try {
     const details = await invokeCommand("get_game_steam_details", {
@@ -2344,6 +2421,7 @@ function buildCatalogQueryParams(offset = 0) {
     minReviews: Number(c.minReviews || 0),
     playerMode,
     minCcu: Number(c.minCcu || 0),
+    platform: String(c.platform || "all"),
     genres: Array.isArray(c.selectedGenres) ? [...c.selectedGenres] : [],
     offset: Math.max(0, Number(offset || 0)),
     limit: Number(c.batchSize || 60)
@@ -2356,15 +2434,24 @@ function buildCatalogCardElement(entry, installedSet) {
   card.dataset.appId = String(entry.appId);
   card.tabIndex = 0;
 
+  const isRetro = Number(entry.platformId || 0) > 0;
   const isInstalled = isCatalogGameInstalled(entry, installedSet);
   const modeTags = [];
   if (entry.isSingleplayer) modeTags.push("Single-Player");
   if (entry.isCoop) modeTags.push("Co-op");
-  const modePill = modeTags.length > 0 ? modeTags.join(" · ") : (entry.genres?.[0] || "Steam");
+  const modePill = isRetro
+    ? (entry.platformName || "Console")
+    : (modeTags.length > 0 ? modeTags.join(" · ") : (entry.genres?.[0] || "Steam"));
 
-  const priceText = entry.priceCents > 0 ? (entry.priceFormatted || `$${(entry.priceCents / 100).toFixed(2)}`) : "Free";
-  const ccuText = Number(entry.ccu || 0) > 0 ? `${Number(entry.ccu).toLocaleString()} live` : "Steam";
-  const ratingText = Number(entry.reviewPct || 0) > 0 ? `${Math.round(entry.reviewPct)}% pos` : (entry.ownersLabel || "");
+  const priceText = isRetro
+    ? (entry.releaseDate || entry.platformSlug?.toUpperCase() || "Console")
+    : (entry.priceCents > 0 ? (entry.priceFormatted || `$${(entry.priceCents / 100).toFixed(2)}`) : "Free");
+  const ccuText = isRetro
+    ? (entry.platformName || "Console")
+    : (Number(entry.ccu || 0) > 0 ? `${Number(entry.ccu).toLocaleString()} live` : "Steam");
+  const ratingText = isRetro
+    ? (entry.developers?.[0] || "")
+    : (Number(entry.reviewPct || 0) > 0 ? `${Math.round(entry.reviewPct)}% pos` : (entry.ownersLabel || ""));
 
   const media = document.createElement("div");
   media.className = "catalog-card-media";
@@ -2375,21 +2462,25 @@ function buildCatalogCardElement(entry, installedSet) {
   img.loading = "lazy";
   img.decoding = "async";
   img.dataset.fallbackStage = "0";
-  const primaryCover =
-    entry.coverUrl ||
-    `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${entry.appId}/library_600x900.jpg`;
-  const headerFallback =
-    entry.headerUrl ||
-    `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${entry.appId}/header.jpg`;
+  const primaryCover = isRetro
+    ? (resolveMediaUrl(entry.coverUrl) ||
+      resolveMediaUrl(entry.headerUrl) ||
+      generateFallbackCoverDataUri(entry.name || "Console Game", entry.platformName || "Console"))
+    : (resolveMediaUrl(entry.coverUrl) ||
+      `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${entry.appId}/library_600x900.jpg`);
+  const headerFallback = isRetro
+    ? (resolveMediaUrl(entry.headerUrl) || "")
+    : (resolveMediaUrl(entry.headerUrl) ||
+      `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${entry.appId}/header.jpg`);
 
   img.addEventListener("error", () => {
     const stage = Number(img.dataset.fallbackStage || "0");
-    if (stage === 0 && img.src !== headerFallback) {
+    if (stage === 0 && headerFallback && img.src !== headerFallback) {
       img.dataset.fallbackStage = "1";
       img.src = headerFallback;
     } else if (stage < 2) {
       img.dataset.fallbackStage = "2";
-      img.src = generateFallbackCoverDataUri(entry.name || "Steam Game", modePill);
+      img.src = generateFallbackCoverDataUri(entry.name || (isRetro ? "Console Game" : "Steam Game"), modePill);
     }
   });
   img.src = primaryCover;
@@ -2398,17 +2489,22 @@ function buildCatalogCardElement(entry, installedSet) {
   const topBadges = document.createElement("div");
   topBadges.className = "catalog-card-badges-top";
   topBadges.innerHTML = `
-    <span class="catalog-badge catalog-badge-ccu mono-num">${escapeHtml(ccuText)}</span>
+    <span class="catalog-badge ${isRetro ? "catalog-badge-platform" : "catalog-badge-ccu"} mono-num">${escapeHtml(ccuText)}</span>
     ${isInstalled ? '<span class="catalog-badge">Installed</span>' : ""}
   `;
   media.appendChild(topBadges);
 
   const bottomBadges = document.createElement("div");
   bottomBadges.className = "catalog-card-badges-bottom";
-  bottomBadges.innerHTML = `
-    <span class="catalog-badge catalog-badge-price ${entry.priceCents === 0 ? "is-free" : ""} mono-num">${escapeHtml(priceText)}</span>
-    <span class="catalog-badge catalog-badge-mode">${escapeHtml(modeTags.length > 0 ? modeTags.join(" / ") : "Steam")}</span>
-  `;
+  bottomBadges.innerHTML = isRetro
+    ? `
+      <span class="catalog-badge catalog-badge-price mono-num">${escapeHtml(priceText)}</span>
+      <span class="catalog-badge catalog-badge-mode">${escapeHtml((entry.genres || [])[0] || "Console")}</span>
+    `
+    : `
+      <span class="catalog-badge catalog-badge-price ${entry.priceCents === 0 ? "is-free" : ""} mono-num">${escapeHtml(priceText)}</span>
+      <span class="catalog-badge catalog-badge-mode">${escapeHtml(modeTags.length > 0 ? modeTags.join(" / ") : "Steam")}</span>
+    `;
   media.appendChild(bottomBadges);
 
   const overlay = document.createElement("div");
@@ -2653,6 +2749,13 @@ function syncCatalogFilterControlsToDom() {
   if (el("select-catalog-player-mode")) el("select-catalog-player-mode").value = c.playerMode;
   if (el("select-catalog-min-ccu")) el("select-catalog-min-ccu").value = String(c.minCcu);
 
+  const activePlatform = String(c.platform || "all");
+  document.querySelectorAll("#catalog-platform-pills .catalog-platform-pill").forEach((pill) => {
+    const isMatch = String(pill.dataset.catalogPlatform || "all") === activePlatform;
+    pill.classList.toggle("active", isMatch);
+    pill.setAttribute("aria-pressed", isMatch ? "true" : "false");
+  });
+
   const hideBtn = el("btn-catalog-hide-installed");
   if (hideBtn) {
     const active = Boolean(c.hideInstalled);
@@ -2771,12 +2874,23 @@ async function loadCatalogData({ query = state.catalog.searchQuery, forceRefresh
 
 function populateCatalogModal(entry) {
   if (!entry) return;
+  const isRetro = Number(entry.platformId || 0) > 0;
   state.catalog.modalGame = entry;
 
-  if (el("catalog-modal-title")) el("catalog-modal-title").textContent = entry.name || "Steam Game";
+  if (el("catalog-modal-title")) el("catalog-modal-title").textContent = entry.name || (isRetro ? "Console Game" : "Steam Game");
   if (el("catalog-modal-desc")) {
     el("catalog-modal-desc").textContent =
-      entry.shortDescription || "Game catalog entry stored in local offline library.";
+      entry.shortDescription ||
+      (isRetro
+        ? `${entry.platformName || "Console"} title indexed in local catalog.`
+        : "Game catalog entry stored in local offline library.");
+  }
+
+  el("btn-catalog-open-store")?.classList.toggle("hidden", isRetro);
+  el("btn-catalog-open-steamdb")?.classList.toggle("hidden", isRetro);
+  el("btn-catalog-add-library")?.classList.toggle("hidden", !isRetro);
+  if (el("btn-catalog-link-exe-label")) {
+    el("btn-catalog-link-exe-label").textContent = isRetro ? "Link Local ROM / ISO" : "Link Local Exe";
   }
 
   const priceLabel =
@@ -2787,12 +2901,18 @@ function populateCatalogModal(entry) {
     entry.discountPercent > 0 ? `<span class="pill emerald mono-num">-${entry.discountPercent}%</span>` : "";
 
   if (el("catalog-modal-badges")) {
-    el("catalog-modal-badges").innerHTML = `
-      <span class="pill gold mono-num">${escapeHtml(priceLabel)}</span>
-      ${discBadge}
-      <span class="pill emerald mono-num">${Number(entry.ccu || 0).toLocaleString()} live</span>
-      <span class="pill mono-num">AppID ${escapeHtml(String(entry.appId))}</span>
-    `;
+    el("catalog-modal-badges").innerHTML = isRetro
+      ? `
+        <span class="pill accent">${escapeHtml(entry.platformName || "Console")}</span>
+        ${entry.releaseDate ? `<span class="pill mono-num">${escapeHtml(entry.releaseDate)}</span>` : ""}
+        ${(entry.genres || [])[0] ? `<span class="pill">${escapeHtml(entry.genres[0])}</span>` : ""}
+      `
+      : `
+        <span class="pill gold mono-num">${escapeHtml(priceLabel)}</span>
+        ${discBadge}
+        <span class="pill emerald mono-num">${Number(entry.ccu || 0).toLocaleString()} live</span>
+        <span class="pill mono-num">AppID ${escapeHtml(String(entry.appId))}</span>
+      `;
   }
 
   if (el("catalog-modal-meta")) {
@@ -2801,15 +2921,23 @@ function populateCatalogModal(entry) {
     if (entry.isCoop) modes.push("Co-op");
     if (entry.isMultiplayer) modes.push("Multiplayer");
 
-    el("catalog-modal-meta").innerHTML = `
-      <div class="kv-row"><span class="kv-k">Estimated Owners</span><span class="kv-v mono-num">${escapeHtml(entry.ownersLabel || "Unreported")}</span></div>
-      <div class="kv-row"><span class="kv-k">Positive Reviews</span><span class="kv-v mono-num">${entry.reviewPct > 0 ? `${entry.reviewPct.toFixed(1)}% (${Number(entry.positive || 0).toLocaleString()})` : "--"}</span></div>
-      <div class="kv-row"><span class="kv-k">Developer</span><span class="kv-v">${escapeHtml((entry.developers || []).join(", ") || "--")}</span></div>
-      <div class="kv-row"><span class="kv-k">Publisher</span><span class="kv-v">${escapeHtml((entry.publishers || []).join(", ") || "--")}</span></div>
-      <div class="kv-row"><span class="kv-k">Release Date</span><span class="kv-v">${escapeHtml(entry.releaseDate || "--")}</span></div>
-      <div class="kv-row"><span class="kv-k">Genres</span><span class="kv-v">${escapeHtml((entry.genres || []).join(", ") || "--")}</span></div>
-      <div class="kv-row"><span class="kv-k">Steam Categories</span><span class="kv-v">${escapeHtml((entry.categories || []).join(", ") || modes.join(", ") || "--")}</span></div>
-    `;
+    el("catalog-modal-meta").innerHTML = isRetro
+      ? `
+        <div class="kv-row"><span class="kv-k">System</span><span class="kv-v">${escapeHtml(entry.platformName || "Console")}</span></div>
+        <div class="kv-row"><span class="kv-k">Developer</span><span class="kv-v">${escapeHtml((entry.developers || []).join(", ") || "--")}</span></div>
+        <div class="kv-row"><span class="kv-k">Publisher</span><span class="kv-v">${escapeHtml((entry.publishers || []).join(", ") || "--")}</span></div>
+        <div class="kv-row"><span class="kv-k">Release Year</span><span class="kv-v">${escapeHtml(entry.releaseDate || "--")}</span></div>
+        <div class="kv-row"><span class="kv-k">Genres</span><span class="kv-v">${escapeHtml((entry.genres || []).join(", ") || "--")}</span></div>
+      `
+      : `
+        <div class="kv-row"><span class="kv-k">Estimated Owners</span><span class="kv-v mono-num">${escapeHtml(entry.ownersLabel || "Unreported")}</span></div>
+        <div class="kv-row"><span class="kv-k">Positive Reviews</span><span class="kv-v mono-num">${entry.reviewPct > 0 ? `${entry.reviewPct.toFixed(1)}% (${Number(entry.positive || 0).toLocaleString()})` : "--"}</span></div>
+        <div class="kv-row"><span class="kv-k">Developer</span><span class="kv-v">${escapeHtml((entry.developers || []).join(", ") || "--")}</span></div>
+        <div class="kv-row"><span class="kv-k">Publisher</span><span class="kv-v">${escapeHtml((entry.publishers || []).join(", ") || "--")}</span></div>
+        <div class="kv-row"><span class="kv-k">Release Date</span><span class="kv-v">${escapeHtml(entry.releaseDate || "--")}</span></div>
+        <div class="kv-row"><span class="kv-k">Genres</span><span class="kv-v">${escapeHtml((entry.genres || []).join(", ") || "--")}</span></div>
+        <div class="kv-row"><span class="kv-k">Steam Categories</span><span class="kv-v">${escapeHtml((entry.categories || []).join(", ") || modes.join(", ") || "--")}</span></div>
+      `;
   }
 }
 
@@ -2837,11 +2965,12 @@ async function openCatalogModal(appId) {
     modalReqId === state.catalog.modalRequestId &&
     !el("catalog-detail-modal")?.classList.contains("hidden");
 
-  applyHeroCandidateChain(
-    modalHeroImg,
-    buildHeroCandidateList(entry.appId, entry.coverUrl),
-    isStillModalCurrent
-  );
+  const isRetro = Number(entry.platformId || 0) > 0;
+  const heroCandidates = isRetro
+    ? [entry.heroUrl, entry.coverUrl, entry.headerUrl].filter(Boolean)
+    : buildHeroCandidateList(entry.appId, entry.coverUrl);
+
+  applyHeroCandidateChain(modalHeroImg, heroCandidates, isStillModalCurrent);
 
   try {
     const enriched = await getCatalogGameDetails(entry.appId);
@@ -2849,6 +2978,12 @@ async function openCatalogModal(appId) {
     if (enriched) {
       state.catalog.itemsById.set(Number(enriched.appId), enriched);
       populateCatalogModal(enriched);
+      if (isRetro) {
+        const nextCandidates = [enriched.heroUrl, enriched.coverUrl, enriched.headerUrl].filter(Boolean);
+        if (nextCandidates.length > 0 && (!modalHeroImg?.getAttribute("src") || modalHeroImg.classList.contains("hidden"))) {
+          applyHeroCandidateChain(modalHeroImg, nextCandidates, isStillModalCurrent);
+        }
+      }
     }
   } catch {
     // Keep fast cached summary if Store enrichment fails offline
@@ -3201,18 +3336,156 @@ async function refreshSwarmAndMmapTelemetry() {
   }
 }
 
+let pendingEmuInstallPrompt = null;
+
+function renderEmulatorStatusCards(statuses) {
+  const container = el("settings-emulators-list");
+  if (!container) return;
+  const list = Array.isArray(statuses) ? statuses : [];
+  if (list.length === 0) {
+    container.innerHTML = `<div class="panel-sub">No console players registered yet.</div>`;
+    return;
+  }
+
+  let readyCount = 0;
+  container.innerHTML = list
+    .map((emu) => {
+      const isReady = emu.status === "ready";
+      const isCustom = emu.status === "custom_path";
+      if (isReady || isCustom) readyCount += 1;
+      const statusClass = isReady ? "ready" : isCustom ? "custom" : "";
+      const statusLabel = isReady ? "Ready" : isCustom ? "Custom Path" : "Not Installed";
+      const activePath = emu.customPath || emu.exePath || "";
+      const setupBtn = emu.supportsAutoInstall
+        ? `<button type="button" class="btn btn-primary btn-xs" data-emu-setup="${escapeHtml(emu.id)}">
+             ${svgIcon("icon-download")}
+             <span>${isReady ? "Reinstall" : "Set Up"}</span>
+           </button>`
+        : "";
+      const clearBtn = emu.customPath
+        ? `<button type="button" class="btn btn-secondary btn-xs" data-emu-clear="${escapeHtml(emu.id)}">
+             <span>Clear</span>
+           </button>`
+        : "";
+
+      return `
+        <article class="emu-card" data-emu-id="${escapeHtml(emu.id)}">
+          <div class="emu-card-head">
+            <div>
+              <div class="emu-card-title">${escapeHtml(emu.displayName)}</div>
+              <div class="emu-card-consoles">${escapeHtml((emu.consoleNames || []).join(" · "))}</div>
+            </div>
+            <span class="emu-status-pill ${statusClass}">${escapeHtml(statusLabel)}</span>
+          </div>
+          <p class="emu-card-caption">${escapeHtml(emu.caption || "")}</p>
+          <div class="emu-card-path" title="${escapeHtml(activePath || emu.installDir || "")}">
+            ${escapeHtml(activePath || `Portable folder: ${emu.installDir || "emulators"}`)}
+          </div>
+          <div class="emu-card-actions">
+            ${setupBtn}
+            <button type="button" class="btn btn-secondary btn-xs" data-emu-browse="${escapeHtml(emu.id)}">
+              ${svgIcon("icon-folder-open")}
+              <span>Browse Exe...</span>
+            </button>
+            ${clearBtn}
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+
+  const statusLine = el("settings-retro-sync-status");
+  if (statusLine && !statusLine.dataset.syncBusy) {
+    statusLine.textContent = `${readyCount} of ${list.length} portable console players configured · Zero registry writes.`;
+  }
+}
+
+async function loadEmulatorSettingsSection(showBusyToast = false) {
+  try {
+    const statuses = await getEmulatorStatuses();
+    renderEmulatorStatusCards(statuses);
+    if (showBusyToast) {
+      showToast("Console player statuses refreshed.", "info", 2200);
+    }
+  } catch (err) {
+    const container = el("settings-emulators-list");
+    if (container) {
+      container.innerHTML = `<div class="panel-sub">${escapeHtml(String(err || "Unable to inspect portable emulators."))}</div>`;
+    }
+  }
+}
+
+function openEmulatorInstallModal({ game, consoleSlug, consoleName, emuDisplayName }) {
+  pendingEmuInstallPrompt = {
+    game,
+    consoleSlug: String(consoleSlug || ""),
+    consoleName: String(consoleName || "Console"),
+    emuDisplayName: String(emuDisplayName || "Portable Emulator")
+  };
+  if (el("emu-install-prompt-title")) {
+    el("emu-install-prompt-title").textContent = `Download ${pendingEmuInstallPrompt.consoleName} Emulator & Play`;
+  }
+  if (el("emu-install-prompt-desc")) {
+    el("emu-install-prompt-desc").textContent =
+      `"${pendingEmuInstallPrompt.emuDisplayName}" is needed to play "${game?.title || "this game"}". ` +
+      `Duke Launcher will install it into its portable folder (no registry clutter) and start playing automatically.`;
+  }
+  el("emu-install-progress-wrap")?.classList.add("hidden");
+  if (el("emu-install-progress-label")) el("emu-install-progress-label").textContent = "Preparing portable package...";
+  if (el("emu-install-progress-pct")) el("emu-install-progress-pct").textContent = "0%";
+  if (el("emu-install-progress-fill")) el("emu-install-progress-fill").style.width = "0%";
+  if (el("btn-emu-install-and-play")) el("btn-emu-install-and-play").disabled = false;
+  el("emu-install-prompt-modal")?.classList.remove("hidden");
+}
+
+function closeEmulatorInstallModal() {
+  el("emu-install-prompt-modal")?.classList.add("hidden");
+  pendingEmuInstallPrompt = null;
+}
+
 async function launchGameDirectly(game) {
   if (!game) return;
   try {
     showToast(`Launching ${game.title}...`, "info");
     await invokeCommand("launch_game", {
-      exePath: game.exePath,
+      exePath: game.exePath || "",
       gameId: game.id,
       launchArgs: game.launchArgs || null
     });
     setTimeout(refreshActiveSessions, 400);
   } catch (err) {
-    showToast(String(err), "error");
+    const msg = String(err || "");
+    if (msg.startsWith("EMULATOR_NOT_INSTALLED|")) {
+      const [, consoleSlug, consoleName, emuDisplayName] = msg.split("|");
+      openEmulatorInstallModal({
+        game,
+        consoleSlug: consoleSlug || "",
+        consoleName: consoleName || "Console",
+        emuDisplayName: emuDisplayName || "Portable Emulator"
+      });
+      return;
+    }
+    if (msg.startsWith("ROM_NOT_LINKED|")) {
+      showToast(`Select the local ROM or ISO file for "${game.title}" to play.`, "info", 3600);
+      const romPath = await pickRomFile();
+      if (!romPath) return;
+      try {
+        const updatedGame = await linkGameRom({ gameId: game.id, romPath });
+        state.library = await invokeCommand("get_local_library");
+        invalidateSidebarIcons([game.id]);
+        renderSidebarGameList();
+        renderLibraryGrid();
+        updateSidebarTelemetry();
+        if (state.selectedDetailId === game.id) {
+          openGameDetailView(game.id);
+        }
+        await launchGameDirectly(updatedGame || { ...game, exePath: romPath });
+      } catch (linkErr) {
+        showToast(String(linkErr), "error");
+      }
+      return;
+    }
+    showToast(msg, "error");
   }
 }
 
@@ -3505,7 +3778,7 @@ async function handleIngestPathsFlow(paths) {
     } else if (skippedReasons.length > 0) {
       showToast(skippedReasons[0], "info", 3800);
     } else {
-      showToast("No new game executables found in dropped items.", "info", 3200);
+      showToast("No new game executables or console ROMs found in dropped items.", "info", 3200);
     }
     return res;
   } catch (err) {
@@ -3689,6 +3962,35 @@ function wireEvents() {
     renderCatalogView(true);
   });
 
+  el("catalog-platform-pills")?.addEventListener("click", (e) => {
+    const pill = e.target.closest(".catalog-platform-pill[data-catalog-platform]");
+    if (!pill) return;
+    state.catalog.platform = String(pill.dataset.catalogPlatform || "all");
+    syncCatalogFilterControlsToDom();
+    renderCatalogView(true);
+  });
+
+  el("btn-catalog-sync-retro")?.addEventListener("click", async () => {
+    const btn = el("btn-catalog-sync-retro");
+    try {
+      if (btn) btn.disabled = true;
+      showToast("Syncing Nintendo & retro console database...", "info", 3200);
+      const status = await syncRetroCatalog(true);
+      showToast(
+        status?.message || `Indexed ${Number(status?.totalCatalogEntries || 0).toLocaleString()} catalog titles.`,
+        "success",
+        3800
+      );
+      if (state.activeTab === "catalog") {
+        renderCatalogView(true);
+      }
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
   el("btn-catalog-hide-installed")?.addEventListener("click", () => {
     state.catalog.hideInstalled = !state.catalog.hideInstalled;
     syncCatalogFilterControlsToDom();
@@ -3815,10 +4117,43 @@ function wireEvents() {
     handoffGameToFindGames(entry.name || "");
   });
 
-  el("btn-catalog-link-exe")?.addEventListener("click", async () => {
+  el("btn-catalog-add-library")?.addEventListener("click", async () => {
     const entry = state.catalog.modalGame;
     if (!entry) return;
     try {
+      const added = await addRetroGameFromCatalog({ appId: entry.appId, romPath: null });
+      state.library = await invokeCommand("get_local_library");
+      invalidateSidebarIcons([added?.id].filter(Boolean));
+      renderSidebarGameList();
+      renderLibraryGrid();
+      renderCatalogView(true);
+      updateSidebarTelemetry();
+      closeCatalogModal();
+      showToast(`Added ${added?.title || entry.name} (${entry.platformName || "Console"}) to My Games.`, "success");
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-catalog-link-exe")?.addEventListener("click", async () => {
+    const entry = state.catalog.modalGame;
+    if (!entry) return;
+    const isRetro = Number(entry.platformId || 0) > 0;
+    try {
+      if (isRetro) {
+        const romPath = await pickRomFile();
+        if (!romPath) return;
+        const added = await addRetroGameFromCatalog({ appId: entry.appId, romPath });
+        state.library = await invokeCommand("get_local_library");
+        invalidateSidebarIcons([added?.id].filter(Boolean));
+        renderSidebarGameList();
+        renderLibraryGrid();
+        renderCatalogView(true);
+        updateSidebarTelemetry();
+        closeCatalogModal();
+        showToast(`Linked ${added?.title || entry.name} ROM to My Games.`, "success");
+        return;
+      }
       const exePath = await pickExecutableFile();
       if (!exePath) return;
       const added = await linkLocalGameWithSteamId({
@@ -4254,6 +4589,150 @@ function wireEvents() {
         2600
       );
     } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-settings-scan-rom-folder")?.addEventListener("click", async () => {
+    const btn = el("btn-settings-scan-rom-folder");
+    try {
+      const folder = await pickGameFolder();
+      if (!folder) return;
+      if (btn) btn.disabled = true;
+      showToast("Scanning folder headers for console ROMs & ISOs...", "info", 3200);
+      const res = await scanRomFolder(folder);
+      if (Array.isArray(res?.library)) {
+        state.library = res.library;
+        invalidateSidebarIcons();
+        renderSidebarGameList();
+        renderLibraryGrid();
+        updateSidebarTelemetry();
+      }
+      const added = Number(res?.addedCount || 0);
+      const matched = Number(res?.matchedCount || 0);
+      showToast(
+        added > 0
+          ? `Added ${added} console game${added === 1 ? "" : "s"} (${matched} detected).`
+          : "No new ROMs or ISOs were added from that folder.",
+        added > 0 ? "success" : "info",
+        3800
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  el("btn-settings-sync-retro-catalog")?.addEventListener("click", async () => {
+    const btn = el("btn-settings-sync-retro-catalog");
+    const statusLine = el("settings-retro-sync-status");
+    try {
+      if (btn) btn.disabled = true;
+      if (statusLine) {
+        statusLine.dataset.syncBusy = "1";
+        statusLine.textContent = "Downloading Libretro RDB console catalogs...";
+      }
+      const status = await syncRetroCatalog(true);
+      if (statusLine) {
+        delete statusLine.dataset.syncBusy;
+        statusLine.textContent =
+          status?.message || `Indexed ${Number(status?.totalCatalogEntries || 0).toLocaleString()} games across all systems.`;
+      }
+      showToast("Console game catalog updated.", "success", 3200);
+      if (state.activeTab === "catalog") renderCatalogView(true);
+    } catch (err) {
+      if (statusLine) delete statusLine.dataset.syncBusy;
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  el("btn-settings-refresh-emus")?.addEventListener("click", () => {
+    loadEmulatorSettingsSection(true);
+  });
+
+  el("settings-emulators-list")?.addEventListener("click", async (e) => {
+    const setupBtn = e.target.closest("[data-emu-setup]");
+    if (setupBtn) {
+      const emuId = String(setupBtn.dataset.emuSetup || "");
+      if (!emuId) return;
+      try {
+        setupBtn.disabled = true;
+        showToast("Downloading portable console player...", "info", 3200);
+        const statuses = await installEmulatorForConsole(emuId);
+        renderEmulatorStatusCards(statuses);
+        showToast("Portable console player installed and configured.", "success", 3400);
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        setupBtn.disabled = false;
+      }
+      return;
+    }
+
+    const browseBtn = e.target.closest("[data-emu-browse]");
+    if (browseBtn) {
+      const emuId = String(browseBtn.dataset.emuBrowse || "");
+      if (!emuId) return;
+      try {
+        const chosen = await pickExecutableFile();
+        if (!chosen) return;
+        const statuses = await setCustomEmulatorPath(emuId, chosen);
+        renderEmulatorStatusCards(statuses);
+        showToast("Custom emulator executable saved.", "success", 3000);
+      } catch (err) {
+        showToast(String(err), "error");
+      }
+      return;
+    }
+
+    const clearBtn = e.target.closest("[data-emu-clear]");
+    if (clearBtn) {
+      const emuId = String(clearBtn.dataset.emuClear || "");
+      if (!emuId) return;
+      try {
+        const statuses = await setCustomEmulatorPath(emuId, "");
+        renderEmulatorStatusCards(statuses);
+        showToast("Cleared custom emulator path override.", "info", 2600);
+      } catch (err) {
+        showToast(String(err), "error");
+      }
+    }
+  });
+
+  el("btn-close-emu-install-modal")?.addEventListener("click", closeEmulatorInstallModal);
+  el("btn-emu-install-cancel")?.addEventListener("click", closeEmulatorInstallModal);
+  el("emu-install-prompt-modal")?.addEventListener("click", (e) => {
+    if (e.target === el("emu-install-prompt-modal")) closeEmulatorInstallModal();
+  });
+
+  el("btn-emu-open-settings")?.addEventListener("click", () => {
+    closeEmulatorInstallModal();
+    switchTab("settings");
+    loadEmulatorSettingsSection();
+    el("settings-consoles-card")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
+
+  el("btn-emu-install-and-play")?.addEventListener("click", async () => {
+    const prompt = pendingEmuInstallPrompt;
+    if (!prompt?.consoleSlug) return;
+    const installBtn = el("btn-emu-install-and-play");
+    const wrap = el("emu-install-progress-wrap");
+    if (installBtn) installBtn.disabled = true;
+    wrap?.classList.remove("hidden");
+    try {
+      const statuses = await installEmulatorForConsole(prompt.consoleSlug);
+      renderEmulatorStatusCards(statuses);
+      const targetGame = prompt.game;
+      closeEmulatorInstallModal();
+      showToast(`${prompt.emuDisplayName} ready — starting ${targetGame?.title || "game"}!`, "success", 3000);
+      if (targetGame) {
+        await launchGameDirectly(targetGame);
+      }
+    } catch (err) {
+      if (installBtn) installBtn.disabled = false;
       showToast(String(err), "error");
     }
   });
@@ -4907,6 +5386,25 @@ function wireEvents() {
   };
   el("btn-detail-change-exe")?.addEventListener("click", () => withSelectedGame(changeExeFlow));
   el("btn-detail-inline-exe")?.addEventListener("click", () => withSelectedGame(changeExeFlow));
+
+  el("btn-detail-link-rom")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      try {
+        const romPath = await pickRomFile();
+        if (!romPath) return;
+        await linkGameRom({ gameId: g.id, romPath });
+        state.library = await invokeCommand("get_local_library");
+        invalidateSidebarIcons([g.id]);
+        renderSidebarGameList();
+        renderLibraryGrid();
+        updateSidebarTelemetry();
+        openGameDetailView(g.id);
+        showToast("Console ROM / ISO linked.", "success");
+      } catch (err) {
+        showToast(String(err), "error");
+      }
+    })
+  );
 
   el("btn-detail-cover")?.addEventListener("click", () =>
     withSelectedGame((g) => {
@@ -6324,7 +6822,55 @@ async function init() {
     }
   });
 
+  await listenEmulatorInstallProgress((payload) => {
+    if (!payload) return;
+    const wrap = el("emu-install-progress-wrap");
+    const label = el("emu-install-progress-label");
+    const pctEl = el("emu-install-progress-pct");
+    const fill = el("emu-install-progress-fill");
+    const pct = Math.max(0, Math.min(100, Math.round(Number(payload.progressPct || 0))));
+    if (wrap && !el("emu-install-prompt-modal")?.classList.contains("hidden")) {
+      wrap.classList.remove("hidden");
+    }
+    if (label) label.textContent = payload.message || `${payload.consoleName || "Emulator"}: ${payload.stage || "installing"}`;
+    if (pctEl) pctEl.textContent = `${pct}%`;
+    if (fill) fill.style.width = `${pct}%`;
+    const statusLine = el("settings-retro-sync-status");
+    if (statusLine && payload.stage !== "ready") {
+      statusLine.dataset.syncBusy = "1";
+      statusLine.textContent = `${payload.consoleName || "Emulator"} setup (${pct}%): ${payload.message || payload.stage}`;
+    } else if (payload.stage === "ready") {
+      if (statusLine) delete statusLine.dataset.syncBusy;
+      loadEmulatorSettingsSection();
+    }
+  });
+
+  await listenRetroCatalogSyncProgress((payload) => {
+    if (!payload) return;
+    const total = Number(payload.totalCatalogEntries || 0);
+    if (total > 0) {
+      state.catalog.totalCached = total;
+      updateNavCatalogBadge();
+    }
+    const statusLine = el("settings-retro-sync-status");
+    const synced = Number(payload.syncedPlatforms || 0);
+    const totalPlatforms = Number(payload.totalPlatforms || 0);
+    if (statusLine) {
+      if (totalPlatforms > 0 && synced < totalPlatforms) {
+        statusLine.dataset.syncBusy = "1";
+        statusLine.textContent = payload.message || `Syncing ${payload.currentPlatform || "consoles"} (${synced}/${totalPlatforms})...`;
+      } else {
+        delete statusLine.dataset.syncBusy;
+        if (payload.message) statusLine.textContent = payload.message;
+      }
+    }
+    if (state.activeTab === "catalog" && state.catalog.loaded && !state.catalog.loading && total > 0 && synced >= totalPlatforms) {
+      runCatalogQuery(true);
+    }
+  });
+
   await refreshAllData();
+  loadEmulatorSettingsSection();
   refreshFriendsPanel(true);
   const pendingProtocolUrls = await takePendingProtocolUrls().catch(() => []);
   if (Array.isArray(pendingProtocolUrls) && pendingProtocolUrls.length > 0) {

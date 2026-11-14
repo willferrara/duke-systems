@@ -6,6 +6,7 @@ mod artwork;
 mod bench;
 mod catalog_mmap;
 mod delta_patch;
+mod emulators;
 mod friends;
 mod importers;
 mod ludusavi;
@@ -13,6 +14,9 @@ mod mcp;
 mod metadata_ext;
 mod ntfs_compress;
 mod pe_inspect;
+mod platforms;
+mod retro_catalog;
+mod rom_inspect;
 mod sidebar_icons;
 mod sites;
 mod snapshots;
@@ -360,6 +364,14 @@ pub struct GameEntry {
     pub update_available: bool,
     #[serde(alias = "achievements_path")]
     pub achievements_path: String,
+    #[serde(default, alias = "platformId")]
+    pub platform_id: u16,
+    #[serde(default, alias = "consoleGroup")]
+    pub console_group: u8,
+    #[serde(default, alias = "romId")]
+    pub rom_id: String,
+    #[serde(default, alias = "emulatorId")]
+    pub emulator_id: String,
 }
 
 impl GameEntry {
@@ -529,6 +541,8 @@ pub struct LauncherSettings {
     pub swarm_auto_sync_saves: bool,
     #[serde(alias = "start_minimized_with_windows")]
     pub start_minimized_with_windows: bool,
+    #[serde(default, alias = "customEmulatorPaths")]
+    pub custom_emulator_paths: HashMap<String, String>,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -600,6 +614,7 @@ impl Default for LauncherSettings {
             global_launch_args: None,
             swarm_auto_sync_saves: false,
             start_minimized_with_windows: false,
+            custom_emulator_paths: HashMap::new(),
         }
     }
 }
@@ -640,6 +655,14 @@ pub struct CatalogGameEntry {
     pub app_id: u32,
     pub name: String,
     pub price_cents: u32,
+    #[serde(default, rename = "platformId")]
+    pub platform_id: u16,
+    #[serde(default, rename = "consoleGroup")]
+    pub console_group: u8,
+    #[serde(default, rename = "platformName")]
+    pub platform_name: String,
+    #[serde(default, rename = "platformSlug")]
+    pub platform_slug: String,
     pub initial_price_cents: u32,
     pub discount_percent: u32,
     pub price_formatted: String,
@@ -2031,6 +2054,14 @@ fn load_settings_from_disk(app: &AppHandle) -> LauncherSettings {
 fn save_settings_to_disk(app: &AppHandle, settings: &LauncherSettings) -> Result<(), String> {
     let _guard = get_settings_io_lock().lock().unwrap();
     let path = get_app_data_file(app, "settings.json")?;
+    let serialized = serde_json::to_string_pretty(settings)
+        .map_err(|e| format!("Failed to serialize settings: {}", e))?;
+    atomic_write_string(&path, &serialized)
+}
+
+pub(crate) fn save_settings_standalone(settings: &LauncherSettings) -> Result<(), String> {
+    let _guard = get_settings_io_lock().lock().unwrap();
+    let path = get_app_data_file_standalone("settings.json")?;
     let serialized = serde_json::to_string_pretty(settings)
         .map_err(|e| format!("Failed to serialize settings: {}", e))?;
     atomic_write_string(&path, &serialized)
@@ -7756,18 +7787,6 @@ async fn launch_game_internal(
     let trimmed = exe_path.trim().trim_matches('"').to_string();
     let exe_file = PathBuf::from(&trimmed);
 
-    if !exe_file.exists() || !exe_file.is_file() {
-        return Err(format!("Game executable not found at: {}", trimmed));
-    }
-
-    // Automatically strip NTFS Mark-of-the-Web (:Zone.Identifier) before launching so SmartScreen never blocks
-    unblock_ntfs_zone_identifier(&exe_file);
-
-    let working_dir = exe_file
-        .parent()
-        .map(|p| p.to_path_buf())
-        .ok_or_else(|| "Unable to determine executable working directory.".to_string())?;
-
     let start_ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -7786,28 +7805,29 @@ async fn launch_game_internal(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Game".to_string());
-    let exe_name_for_bus = exe_file
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default()
-        .to_string();
+    let default_root_dir = if exe_file.is_file() {
+        resolve_game_root_dir(&exe_file)
+    } else {
+        exe_file
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(PathBuf::new)
+    };
+    let default_root_fallback = default_root_dir.clone();
 
-    let exe_file_for_start = exe_file.clone();
-    let (
-        resolved_cli_args,
-        game_title,
-        sandbox_enabled,
-        prefetch_enabled,
-        game_root_dir,
-        launch_settings,
-    ): (
-        Option<String>,
-        String,
-        bool,
-        bool,
-        PathBuf,
-        LauncherSettings,
-    ) = tokio::task::spawn_blocking(move || {
+    struct LaunchContext {
+        saved_args: Option<String>,
+        resolved_title: String,
+        sb_enabled: bool,
+        pf_enabled: bool,
+        g_root: PathBuf,
+        plat_id: u16,
+        emu_id: Option<String>,
+        rom_from_lib: Option<String>,
+        global_settings: LauncherSettings,
+    }
+
+    let launch_ctx = tokio::task::spawn_blocking(move || {
         let mut saved_args = explicit_args_clone.clone();
         let mut resolved_title = fallback_game_title;
         let global_settings = load_settings_from_disk(&app_for_start);
@@ -7815,17 +7835,27 @@ async fn launch_game_internal(
         let mut pf_enabled = global_settings.performance_boost_enabled
             && global_settings.nvme_prefetch_enabled
             && global_settings.nvme_cache_budget_pct > 0;
-        let mut g_root = resolve_game_root_dir(&exe_file_for_start);
+        let mut g_root = default_root_dir;
+        let mut plat_id = 0u16;
+        let mut emu_id: Option<String> = None;
+        let mut rom_from_lib: Option<String> = None;
         if let Ok(mut library) = load_library_from_disk(&app_for_start) {
             if let Some(item) = library.iter_mut().find(|g| {
                 gid_for_start
                     .as_ref()
                     .map(|id| g.id == *id)
                     .unwrap_or(false)
-                    || g.exe_path.eq_ignore_ascii_case(&path_for_start)
+                    || (!path_for_start.is_empty() && g.exe_path.eq_ignore_ascii_case(&path_for_start))
             }) {
                 if !item.title.trim().is_empty() {
                     resolved_title = item.title.trim().to_string();
+                }
+                plat_id = item.platform_id;
+                if !item.emulator_id.trim().is_empty() {
+                    emu_id = Some(item.emulator_id.trim().to_string());
+                }
+                if path_for_start.is_empty() && !item.exe_path.trim().is_empty() {
+                    rom_from_lib = Some(item.exe_path.trim().to_string());
                 }
                 sb_enabled = item.sandbox_enabled || global_settings.portable_sandbox_default;
                 let item_pf = item
@@ -7840,8 +7870,10 @@ async fn launch_game_internal(
                         g_root = cand;
                     }
                 }
-                item.last_played = Some(start_ts);
-                item.last_played_ts = Some(start_ts);
+                if !path_for_start.is_empty() || rom_from_lib.is_some() {
+                    item.last_played = Some(start_ts);
+                    item.last_played_ts = Some(start_ts);
+                }
                 if saved_args.is_none() {
                     saved_args = item.launch_args.clone();
                 } else {
@@ -7851,41 +7883,139 @@ async fn launch_game_internal(
                 let _ = app_for_start.emit("library-updated", &library);
             }
         }
-        (
+        LaunchContext {
             saved_args,
             resolved_title,
             sb_enabled,
             pf_enabled,
             g_root,
+            plat_id,
+            emu_id,
+            rom_from_lib,
             global_settings,
-        )
+        }
     })
     .await
     .unwrap_or_else(|_| {
         let fallback = load_settings_standalone();
-        (
-            None,
-            String::from("Game"),
-            fallback.portable_sandbox_default,
-            fallback.performance_boost_enabled
+        LaunchContext {
+            saved_args: None,
+            resolved_title: String::from("Game"),
+            sb_enabled: fallback.portable_sandbox_default,
+            pf_enabled: fallback.performance_boost_enabled
                 && fallback.nvme_prefetch_enabled
                 && fallback.nvme_cache_budget_pct > 0,
-            working_dir.clone(),
-            fallback,
-        )
+            g_root: default_root_fallback,
+            plat_id: 0,
+            emu_id: None,
+            rom_from_lib: None,
+            global_settings: fallback,
+        }
     });
 
-    let mut parsed_args = launch_settings
-        .global_launch_args
-        .as_deref()
-        .map(parse_cli_launch_args)
-        .unwrap_or_default();
+    let resolved_cli_args = launch_ctx.saved_args;
+    let game_title = launch_ctx.resolved_title;
+    let sandbox_enabled = launch_ctx.sb_enabled;
+    let prefetch_enabled = launch_ctx.pf_enabled;
+    let game_root_dir = launch_ctx.g_root;
+    let item_platform_id = launch_ctx.plat_id;
+    let item_emulator_id = launch_ctx.emu_id;
+    let resolved_rom_path_from_lib = launch_ctx.rom_from_lib;
+    let launch_settings = launch_ctx.global_settings;
+
+    let trimmed = if trimmed.is_empty() {
+        resolved_rom_path_from_lib.unwrap_or_default()
+    } else {
+        trimmed
+    };
+    let exe_file = PathBuf::from(&trimmed);
+
+    if item_platform_id > 0 && (trimmed.is_empty() || !exe_file.exists() || !exe_file.is_file()) {
+        return Err(format!(
+            "ROM_NOT_LINKED|{}|{}",
+            game_id.clone().unwrap_or_default(),
+            game_title
+        ));
+    }
+
+    if !exe_file.exists() || !exe_file.is_file() {
+        return Err(format!("Game executable not found at: {}", trimmed));
+    }
+
+    // Automatically strip NTFS Mark-of-the-Web (:Zone.Identifier) before launching so SmartScreen never blocks
+    unblock_ntfs_zone_identifier(&exe_file);
+
+    let (spawn_exe, working_dir, emu_prefix_args, resolved_emu_id) = if item_platform_id > 0 {
+        let resolved = emulators::resolve_emulator_launch(
+            item_platform_id,
+            item_emulator_id.as_deref(),
+            &exe_file,
+        )?;
+        unblock_ntfs_zone_identifier(&resolved.exe_path);
+        (
+            resolved.exe_path,
+            resolved.working_dir,
+            resolved.args,
+            resolved.emulator_id,
+        )
+    } else {
+        let wd = exe_file
+            .parent()
+            .map(|p| p.to_path_buf())
+            .ok_or_else(|| "Unable to determine executable working directory.".to_string())?;
+        (exe_file.clone(), wd, Vec::new(), String::new())
+    };
+
+    let exe_name_for_bus = spawn_exe
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string();
+
+    if prefetch_enabled && item_platform_id > 0 {
+        let rom_len = fs::metadata(&exe_file).map(|m| m.len()).unwrap_or(0);
+        if rom_len > 32 * 1024 * 1024 {
+            let warm_rom = exe_file.clone();
+            let warm_budget_pct = launch_settings.nvme_cache_budget_pct.clamp(1, 40);
+            if let Ok(Ok(report)) = tokio::task::spawn_blocking(move || {
+                duke_core::nvme_prefetch::warm_single_file_with_budget_pct(
+                    &warm_rom,
+                    warm_budget_pct,
+                )
+            })
+            .await
+            {
+                let _ = app.emit(
+                    "nvme-prefetch-report",
+                    serde_json::json!({
+                        "gameId": game_id.clone().unwrap_or_default(),
+                        "gameTitle": game_title,
+                        "filesWarmed": report.files_warmed,
+                        "warmedMb": report.warmed_mb,
+                        "throughputGbS": report.throughput_gbps,
+                        "elapsedMs": report.elapsed_ms,
+                        "ramBudgetMb": report.budget_bytes / (1024 * 1024)
+                    }),
+                );
+            }
+        }
+    }
+
+    let mut parsed_args = if item_platform_id > 0 {
+        emu_prefix_args
+    } else {
+        launch_settings
+            .global_launch_args
+            .as_deref()
+            .map(parse_cli_launch_args)
+            .unwrap_or_default()
+    };
     if let Some(per_game_args) = resolved_cli_args.as_deref() {
         parsed_args.extend(parse_cli_launch_args(per_game_args));
     }
 
     // Anti-Telemetry Game Launch Scrubbing (when enabled) + Global/Per-Game CLI Launch Arguments
-    let mut cmd = tokio::process::Command::new(&exe_file);
+    let mut cmd = tokio::process::Command::new(&spawn_exe);
     cmd.current_dir(&working_dir)
         .args(&parsed_args)
         .env("STEAM_FRAME_FORCE_CLOSE", "1");
@@ -7932,7 +8062,9 @@ async fn launch_game_internal(
     };
 
     let cpu_mode_for_tree = launch_settings.cpu_priority_mode.clone();
-    let should_boost_tree = launch_settings.performance_boost_enabled || cpu_mode_for_tree != "auto";
+    let should_boost_tree = item_platform_id > 0
+        || launch_settings.performance_boost_enabled
+        || cpu_mode_for_tree != "auto";
     if game_pid > 0 {
         let mut guard = get_active_sessions().lock().unwrap();
         guard.insert(
@@ -7987,11 +8119,11 @@ async fn launch_game_internal(
         ShmEventType::GameLaunched,
         game_pid,
         game_title.len() as u64,
-        u64::from(sandbox_enabled),
+        duke_core::shm_bus::pack_game_launch_payload_b(sandbox_enabled, item_platform_id),
         shm_tag,
     );
 
-    if prefetch_enabled && game_root_dir.is_dir() {
+    if prefetch_enabled && item_platform_id == 0 && game_root_dir.is_dir() {
         let app_warm = app.clone();
         let warm_dir = game_root_dir.clone();
         let warm_gid = session_key.clone();
@@ -8045,6 +8177,8 @@ async fn launch_game_internal(
     let _ = window.hide();
     if launch_settings.performance_boost_enabled {
         enable_ecoqos_game_boost_mode();
+    } else if item_platform_id > 0 {
+        trim_process_working_set();
     }
     let _ = app.emit(
         "memory-telemetry",
@@ -8135,6 +8269,22 @@ async fn launch_game_internal(
         );
         if let Some(ref gid) = gid_after {
             achievements::stop_achievement_watcher(gid);
+        }
+        if item_platform_id > 0 {
+            let gid_snap = gid_after.clone().unwrap_or_else(|| session_key_after.clone());
+            let emu_snap = resolved_emu_id.clone();
+            let lbl_snap = format!("Auto-save snapshot: {}", game_title_after);
+            let _ = tokio::task::spawn_blocking(move || {
+                emulators::snapshot_console_saves_on_exit(
+                    &gid_snap,
+                    item_platform_id,
+                    &emu_snap,
+                    Some(&lbl_snap),
+                );
+            })
+            .await;
+        }
+        if let Some(ref gid) = gid_after {
             if swarm_auto_sync {
                 swarm::spawn_game_stopped_mesh_sync(gid.clone());
             }
@@ -8396,70 +8546,124 @@ pub(crate) async fn launch_game_detached_headless(
     launch_args: Option<&str>,
 ) -> Result<u32, String> {
     let trimmed = exe_path.trim().trim_matches('"');
-    let exe_file = PathBuf::from(trimmed);
-    if !exe_file.exists() || !exe_file.is_file() {
-        return Err(format!("Game executable not found at '{}'", trimmed));
-    }
-    unblock_ntfs_zone_identifier(&exe_file);
-    let working_dir = exe_file
-        .parent()
-        .map(|p| p.to_path_buf())
-        .ok_or_else(|| "Unable to determine executable working directory.".to_string())?;
     let parsed_args = launch_args.map(parse_cli_launch_args).unwrap_or_default();
 
     let gid_lookup = game_id.map(str::to_string);
     let exe_lookup = trimmed.to_string();
-    let (sandbox_enabled, prefetch_enabled, game_root_dir, launch_settings) =
-        tokio::task::spawn_blocking(move || {
-            let global_settings = load_settings_standalone();
-            let mut sb = global_settings.portable_sandbox_default;
-            let mut pf = global_settings.performance_boost_enabled
-                && global_settings.nvme_prefetch_enabled
-                && global_settings.nvme_cache_budget_pct > 0;
-            let mut g_root = resolve_game_root_dir(Path::new(&exe_lookup));
-            if let Ok(library) = load_library_standalone() {
-                if let Some(item) = library.iter().find(|g| {
-                    gid_lookup.as_ref().map(|id| g.id == *id).unwrap_or(false)
-                        || g.exe_path.eq_ignore_ascii_case(&exe_lookup)
-                }) {
-                    sb = item.sandbox_enabled || global_settings.portable_sandbox_default;
-                    let item_pf = item
-                        .nvme_prefetch_enabled
-                        .unwrap_or(global_settings.nvme_prefetch_enabled);
-                    pf = global_settings.performance_boost_enabled
-                        && item_pf
-                        && global_settings.nvme_cache_budget_pct > 0;
-                    if !item.install_dir.trim().is_empty() {
-                        let cand = PathBuf::from(item.install_dir.trim());
-                        if cand.is_dir() {
-                            g_root = cand;
-                        }
+    let (
+        sandbox_enabled,
+        prefetch_enabled,
+        game_root_dir,
+        item_platform_id,
+        item_emulator_id,
+        resolved_exe_from_lib,
+        launch_settings,
+    ) = tokio::task::spawn_blocking(move || {
+        let global_settings = load_settings_standalone();
+        let mut sb = global_settings.portable_sandbox_default;
+        let mut pf = global_settings.performance_boost_enabled
+            && global_settings.nvme_prefetch_enabled
+            && global_settings.nvme_cache_budget_pct > 0;
+        let mut g_root = resolve_game_root_dir(Path::new(&exe_lookup));
+        let mut plat_id = 0u16;
+        let mut emu_id: Option<String> = None;
+        let mut lib_exe: Option<String> = None;
+        if let Ok(library) = load_library_standalone() {
+            if let Some(item) = library.iter().find(|g| {
+                gid_lookup.as_ref().map(|id| g.id == *id).unwrap_or(false)
+                    || (!exe_lookup.is_empty() && g.exe_path.eq_ignore_ascii_case(&exe_lookup))
+            }) {
+                plat_id = item.platform_id;
+                if !item.emulator_id.trim().is_empty() {
+                    emu_id = Some(item.emulator_id.trim().to_string());
+                }
+                if exe_lookup.is_empty() && !item.exe_path.trim().is_empty() {
+                    lib_exe = Some(item.exe_path.trim().to_string());
+                }
+                sb = item.sandbox_enabled || global_settings.portable_sandbox_default;
+                let item_pf = item
+                    .nvme_prefetch_enabled
+                    .unwrap_or(global_settings.nvme_prefetch_enabled);
+                pf = global_settings.performance_boost_enabled
+                    && item_pf
+                    && global_settings.nvme_cache_budget_pct > 0;
+                if !item.install_dir.trim().is_empty() {
+                    let cand = PathBuf::from(item.install_dir.trim());
+                    if cand.is_dir() {
+                        g_root = cand;
                     }
                 }
             }
-            (sb, pf, g_root, global_settings)
-        })
-        .await
-        .unwrap_or_else(|_| {
-            let fallback = load_settings_standalone();
-            (
-                fallback.portable_sandbox_default,
-                fallback.performance_boost_enabled
-                    && fallback.nvme_prefetch_enabled
-                    && fallback.nvme_cache_budget_pct > 0,
-                working_dir.clone(),
-                fallback,
-            )
-        });
+        }
+        (sb, pf, g_root, plat_id, emu_id, lib_exe, global_settings)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        let fallback = load_settings_standalone();
+        (
+            fallback.portable_sandbox_default,
+            fallback.performance_boost_enabled
+                && fallback.nvme_prefetch_enabled
+                && fallback.nvme_cache_budget_pct > 0,
+            PathBuf::new(),
+            0,
+            None,
+            None,
+            fallback,
+        )
+    });
 
-    let mut combined_args = launch_settings
-        .global_launch_args
-        .as_deref()
-        .map(parse_cli_launch_args)
-        .unwrap_or_default();
+    let effective_target = if trimmed.is_empty() {
+        resolved_exe_from_lib.unwrap_or_default()
+    } else {
+        trimmed.to_string()
+    };
+    let exe_file = PathBuf::from(&effective_target);
+    if !exe_file.exists() || !exe_file.is_file() {
+        return Err(format!("Game executable not found at '{}'", effective_target));
+    }
+    unblock_ntfs_zone_identifier(&exe_file);
+
+    let (spawn_exe, working_dir, emu_args) = if item_platform_id > 0 {
+        let resolved = emulators::resolve_emulator_launch(
+            item_platform_id,
+            item_emulator_id.as_deref(),
+            &exe_file,
+        )?;
+        unblock_ntfs_zone_identifier(&resolved.exe_path);
+        (resolved.exe_path, resolved.working_dir, resolved.args)
+    } else {
+        let wd = exe_file
+            .parent()
+            .map(|p| p.to_path_buf())
+            .ok_or_else(|| "Unable to determine executable working directory.".to_string())?;
+        (exe_file.clone(), wd, Vec::new())
+    };
+
+    if prefetch_enabled && item_platform_id > 0 {
+        let rom_len = fs::metadata(&exe_file).map(|m| m.len()).unwrap_or(0);
+        if rom_len > 32 * 1024 * 1024 {
+            let warm_rom = exe_file.clone();
+            let budget_pct = launch_settings.nvme_cache_budget_pct.clamp(1, 40);
+            let _ = tokio::task::spawn_blocking(move || {
+                duke_core::nvme_prefetch::warm_single_file_with_budget_pct(&warm_rom, budget_pct)
+            })
+            .await;
+        }
+    }
+
+    let mut combined_args = if item_platform_id > 0 {
+        emu_args
+    } else {
+        launch_settings
+            .global_launch_args
+            .as_deref()
+            .map(parse_cli_launch_args)
+            .unwrap_or_default()
+    };
     combined_args.extend(parsed_args);
 
-    let mut cmd = Command::new(&exe_file);
+    let mut cmd = Command::new(&spawn_exe);
     cmd.current_dir(&working_dir)
         .args(&combined_args)
         .env("STEAM_FRAME_FORCE_CLOSE", "1");
@@ -8480,12 +8684,15 @@ pub(crate) async fn launch_game_detached_headless(
 
     let child = cmd
         .spawn()
-        .map_err(|e| format!("Failed spawning '{}': {}", trimmed, e))?;
+        .map_err(|e| format!("Failed spawning '{}': {}", effective_target, e))?;
     let pid = child.id();
-    if launch_settings.performance_boost_enabled || launch_settings.cpu_priority_mode != "auto" {
+    if item_platform_id > 0
+        || launch_settings.performance_boost_enabled
+        || launch_settings.cpu_priority_mode != "auto"
+    {
         duke_core::win32_ffi::apply_cpu_priority_mode(&[pid], &launch_settings.cpu_priority_mode);
     }
-    let exe_tag = exe_file
+    let exe_tag = spawn_exe
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("");
@@ -8493,11 +8700,11 @@ pub(crate) async fn launch_game_detached_headless(
         ShmEventType::GameLaunched,
         pid,
         u64::from(sandbox_enabled),
-        0,
+        duke_core::shm_bus::pack_game_launch_payload_b(sandbox_enabled, item_platform_id),
         exe_tag,
     );
 
-    if prefetch_enabled && game_root_dir.is_dir() {
+    if prefetch_enabled && item_platform_id == 0 && game_root_dir.is_dir() {
         let warm_dir = game_root_dir.clone();
         let budget_pct = launch_settings.nvme_cache_budget_pct.clamp(1, 40);
         tokio::task::spawn_blocking(move || {
@@ -8509,7 +8716,7 @@ pub(crate) async fn launch_game_detached_headless(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let trimmed_owned = trimmed.to_string();
+    let trimmed_owned = effective_target;
     let gid_owned = game_id.map(str::to_string);
     let _ = tokio::task::spawn_blocking(move || {
         if let Ok(mut library) = load_library_standalone() {
@@ -9329,6 +9536,44 @@ fn compute_catalog_value_score(entry: &CatalogGameEntry) -> f64 {
 fn finalize_catalog_entry(entry: &mut CatalogGameEntry, now: u64) {
     if entry.app_id == 0 {
         return;
+    }
+    if entry.platform_id > 0 || platforms::is_synthetic_retro_appid(entry.app_id) {
+        let plat = platforms::platform_by_id(entry.platform_id);
+        entry.console_group = plat.console_group;
+        if entry.platform_name.is_empty() {
+            entry.platform_name = plat.display_name.to_string();
+        }
+        if entry.platform_slug.is_empty() {
+            entry.platform_slug = plat.slug.to_string();
+        }
+        if entry.cover_url.is_empty() {
+            let (boxart_url, _, _) =
+                retro_catalog::build_libretro_thumbnail_urls(entry.platform_id, &entry.name);
+            if !boxart_url.is_empty() {
+                entry.cover_url = boxart_url;
+            }
+        }
+        if entry.header_url.is_empty() {
+            entry.header_url = entry.cover_url.clone();
+        }
+        if entry.hero_url.is_empty() {
+            entry.hero_url = entry.cover_url.clone();
+        }
+        entry.is_free = true;
+        if entry.price_formatted.is_empty() {
+            entry.price_formatted = plat.short_name.to_string();
+        }
+        if entry.updated_at == 0 {
+            entry.updated_at = now;
+        }
+        return;
+    }
+    entry.console_group = platforms::GROUP_PC;
+    if entry.platform_name.is_empty() {
+        entry.platform_name = "PC".to_string();
+    }
+    if entry.platform_slug.is_empty() {
+        entry.platform_slug = "pc".to_string();
     }
     if entry.cover_url.is_empty() {
         entry.cover_url = format!(
@@ -10476,6 +10721,30 @@ async fn get_catalog_game_details(
         .map_err(|e| format!("Failed reading catalog entry: {}", e))?;
 
     if let Some(ref item) = existing {
+        if item.platform_id > 0 || platforms::is_synthetic_retro_appid(app_id) {
+            let mut retro_item = item.clone();
+            let plat = platforms::platform_by_id(retro_item.platform_id);
+            if retro_item.platform_name.is_empty() {
+                retro_item.platform_name = plat.display_name.to_string();
+            }
+            if retro_item.platform_slug.is_empty() {
+                retro_item.platform_slug = plat.slug.to_string();
+            }
+            retro_item.console_group = plat.console_group;
+            if retro_item.cover_url.is_empty() {
+                let (boxart_url, _, _) = retro_catalog::build_libretro_thumbnail_urls(
+                    retro_item.platform_id,
+                    &retro_item.name,
+                );
+                if !boxart_url.is_empty() {
+                    retro_item.cover_url = boxart_url;
+                }
+            }
+            if retro_item.header_url.is_empty() {
+                retro_item.header_url = retro_item.cover_url.clone();
+            }
+            return Ok(retro_item);
+        }
         if item.details_enriched
             && !item.short_description.is_empty()
             && now.saturating_sub(item.updated_at) < 3600
@@ -10851,6 +11120,488 @@ async fn apply_shortcut_launch_args_if_empty(
 }
 
 /// Automatically ingests any dropped folders, `.exe` files, or `.lnk` shortcuts in zero extra clicks.
+type CoverCacheTarget = (u16, String, String, Option<String>);
+
+struct RetroUpsertParams<'a> {
+    rom_path: Option<&'a Path>,
+    inspection: Option<&'a rom_inspect::RomInspectionResult>,
+    platform_id: u16,
+    custom_title: Option<&'a str>,
+    catalog_app_id: Option<u32>,
+    cover_hint: Option<&'a str>,
+    hero_hint: Option<&'a str>,
+    origin_source: &'a str,
+}
+
+fn upsert_retro_game_entry_in_library(
+    library: &mut Vec<GameEntry>,
+    params: RetroUpsertParams<'_>,
+) -> GameEntry {
+    let rom_path = params.rom_path;
+    let inspection = params.inspection;
+    let platform_id = params.platform_id;
+    let custom_title = params.custom_title;
+    let catalog_app_id = params.catalog_app_id;
+    let cover_hint = params.cover_hint;
+    let hero_hint = params.hero_hint;
+    let origin_source = params.origin_source;
+    let eff_plat_id = inspection
+        .map(|i| i.platform_id)
+        .filter(|&id| id > 0)
+        .unwrap_or(platform_id);
+    let plat = platforms::platform_by_id(eff_plat_id);
+
+    let rom_id = inspection
+        .map(|i| i.rom_id.trim().to_string())
+        .unwrap_or_default();
+    let raw_title = custom_title
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            inspection
+                .map(|i| i.detected_title.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            rom_path
+                .and_then(|p| p.file_stem())
+                .and_then(|s| s.to_str())
+                .map(clean_game_title)
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| format!("{} Title", plat.short_name));
+
+    let catalog_match = catalog_app_id
+        .and_then(catalog_mmap::get_entry_via_mmap)
+        .or_else(|| {
+            catalog_mmap::lookup_retro_entry_by_title_or_id(eff_plat_id, &rom_id, &raw_title)
+        });
+
+    let resolved_title = if custom_title.is_some() {
+        raw_title.clone()
+    } else if let Some(ref cat) = catalog_match {
+        let base = retro_catalog::normalize_retro_base_title(&cat.name);
+        if !base.is_empty() {
+            base
+        } else {
+            raw_title.clone()
+        }
+    } else {
+        raw_title.clone()
+    };
+
+    let resolved_app_id = catalog_app_id.or_else(|| catalog_match.as_ref().map(|c| c.app_id));
+    let resolved_cover = cover_hint
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            catalog_match
+                .as_ref()
+                .map(|c| c.cover_url.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            let (boxart_url, _, _) =
+                retro_catalog::build_libretro_thumbnail_urls(eff_plat_id, &resolved_title);
+            if boxart_url.is_empty() {
+                None
+            } else {
+                Some(boxart_url)
+            }
+        });
+    let resolved_hero = hero_hint
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            catalog_match
+                .as_ref()
+                .map(|c| c.hero_url.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| resolved_cover.clone());
+
+    let rom_path_str = rom_path
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let (install_dir_str, size_bytes) = if let Some(p) = rom_path {
+        let dir = p
+            .parent()
+            .map(|d| d.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let bytes = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        (dir, bytes)
+    } else {
+        (String::new(), 0)
+    };
+    let is_installed = !rom_path_str.is_empty();
+    let now_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    if let Some(existing) = library.iter_mut().find(|g| {
+        (!rom_path_str.is_empty() && g.exe_path.eq_ignore_ascii_case(&rom_path_str))
+            || (g.platform_id == eff_plat_id
+                && resolved_app_id.is_some()
+                && g.app_id == resolved_app_id)
+    }) {
+        if is_installed {
+            existing.exe_path = rom_path_str.clone();
+            existing.install_dir = install_dir_str;
+            existing.size_bytes = size_bytes;
+            existing.size_formatted = format_bytes(size_bytes);
+            existing.is_installed = true;
+        }
+        existing.platform_id = eff_plat_id;
+        existing.console_group = plat.console_group;
+        existing.platform = plat.display_name.to_string();
+        if existing.emulator_id.trim().is_empty() {
+            existing.emulator_id = plat.default_emulator_id.to_string();
+        }
+        if !rom_id.is_empty() {
+            existing.rom_id = rom_id;
+        }
+        if existing.cover_url.is_empty() {
+            if let Some(ref c) = resolved_cover {
+                existing.cover_url = c.clone();
+            }
+        }
+        if existing.hero_url.is_none() {
+            existing.hero_url = resolved_hero;
+        }
+        if existing.app_id.is_none() {
+            existing.app_id = resolved_app_id;
+        }
+        return existing.clone();
+    }
+
+    let id = if !rom_path_str.is_empty() {
+        format!(
+            "retro_{}_{:08x}",
+            plat.slug,
+            crc32_ieee(rom_path_str.to_ascii_lowercase().as_bytes())
+        )
+    } else if let Some(aid) = resolved_app_id {
+        format!("retro_{}_{}", plat.slug, aid)
+    } else {
+        format!(
+            "retro_{}_{:08x}",
+            plat.slug,
+            crc32_ieee(resolved_title.to_ascii_lowercase().as_bytes())
+        )
+    };
+
+    let entry = GameEntry {
+        id,
+        title: resolved_title,
+        exe_path: rom_path_str,
+        install_dir: install_dir_str,
+        size_bytes,
+        size_formatted: format_bytes(size_bytes),
+        cover_url: resolved_cover.unwrap_or_default(),
+        hero_url: resolved_hero,
+        icon_path: None,
+        genre: format!("{} Console", plat.short_name),
+        platform: plat.display_name.to_string(),
+        source: plat.display_name.to_string(),
+        acquisition_source: origin_source.to_string(),
+        is_favorite: false,
+        is_installed,
+        added_at: now_ts,
+        app_id: resolved_app_id,
+        steam_app_id: resolved_app_id.map(u64::from),
+        platform_id: eff_plat_id,
+        console_group: plat.console_group,
+        rom_id,
+        emulator_id: plat.default_emulator_id.to_string(),
+        ..Default::default()
+    };
+    library.push(entry.clone());
+    entry
+}
+
+fn spawn_cache_retro_covers_batch(app: AppHandle, targets: Vec<CoverCacheTarget>) {
+    if targets.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        let sem = Arc::new(tokio::sync::Semaphore::new(4));
+        let mut updates: Vec<(String, String, String)> = Vec::new();
+        let mut join_set = tokio::task::JoinSet::new();
+        for (plat_id, gid, title, hint) in targets.into_iter().take(64) {
+            let permit = Arc::clone(&sem);
+            join_set.spawn(async move {
+                let Ok(_p) = permit.acquire().await else {
+                    return None;
+                };
+                retro_catalog::cache_retro_cover_and_icon(
+                    plat_id,
+                    &gid,
+                    &title,
+                    hint.as_deref(),
+                )
+                .await
+                .map(|(cov, ico)| (gid, cov, ico))
+            });
+        }
+        while let Some(res) = join_set.join_next().await {
+            if let Ok(Some(item)) = res {
+                updates.push(item);
+            }
+        }
+        if !updates.is_empty() {
+            let app_save = app.clone();
+            if let Ok(Ok(lib)) = tokio::task::spawn_blocking(move || -> Result<Vec<GameEntry>, String> {
+                let mut lib = load_library_from_disk(&app_save)?;
+                for (gid, cov, ico) in &updates {
+                    if let Some(entry) = lib.iter_mut().find(|g| &g.id == gid) {
+                        if !cov.is_empty() {
+                            entry.cover_url = cov.clone();
+                        }
+                        if !ico.is_empty() {
+                            entry.icon_path = Some(ico.clone());
+                        }
+                    }
+                }
+                save_library_to_disk(&app_save, &lib)?;
+                Ok(lib)
+            })
+            .await
+            {
+                let _ = app.emit("library-updated", &lib);
+            }
+        }
+    });
+}
+
+#[tauri::command]
+async fn inspect_rom_path(path: String) -> Result<rom_inspect::RomInspectionResult, String> {
+    let trimmed = path.trim().trim_matches('"').to_string();
+    let p = PathBuf::from(&trimmed);
+    if !p.is_file() {
+        return Err(format!("ROM / ISO file not found: {}", trimmed));
+    }
+    tokio::task::spawn_blocking(move || {
+        rom_inspect::inspect_rom_file(&p)
+            .ok_or_else(|| "Unrecognized console ROM or disc image header.".to_string())
+    })
+    .await
+    .map_err(|e| format!("ROM inspection worker failed: {}", e))?
+}
+
+#[tauri::command]
+async fn add_retro_game_from_catalog(
+    app: AppHandle,
+    app_id: u32,
+    rom_path: Option<String>,
+) -> Result<GameEntry, String> {
+    let cat_entry = tokio::task::spawn_blocking(move || catalog_mmap::get_entry_via_mmap(app_id))
+        .await
+        .map_err(|e| format!("Catalog lookup failed: {}", e))?
+        .ok_or_else(|| format!("Catalog entry {} not found.", app_id))?;
+
+    let trimmed_rom = rom_path
+        .map(|s| s.trim().trim_matches('"').to_string())
+        .filter(|s| !s.is_empty());
+    let rom_buf = trimmed_rom.as_ref().map(PathBuf::from);
+    if let Some(ref p) = rom_buf {
+        if !p.is_file() {
+            return Err(format!("ROM / ISO file not found: {}", p.display()));
+        }
+        unblock_ntfs_zone_identifier(p);
+    }
+
+    let rom_inspect_res = if let Some(ref p) = rom_buf {
+        let p_clone = p.clone();
+        tokio::task::spawn_blocking(move || rom_inspect::inspect_rom_file(&p_clone))
+            .await
+            .map_err(|e| format!("ROM inspection worker failed: {}", e))?
+    } else {
+        None
+    };
+
+    let app_clone = app.clone();
+    let cat_clone = cat_entry.clone();
+    let entry = tokio::task::spawn_blocking(move || -> Result<GameEntry, String> {
+        let mut library = load_library_from_disk(&app_clone)?;
+        let title_clean = retro_catalog::normalize_retro_base_title(&cat_clone.name);
+        let eff_title = if title_clean.is_empty() {
+            cat_clone.name.clone()
+        } else {
+            title_clean
+        };
+        let entry = upsert_retro_game_entry_in_library(
+            &mut library,
+            RetroUpsertParams {
+                rom_path: rom_buf.as_deref(),
+                inspection: rom_inspect_res.as_ref(),
+                platform_id: cat_clone.platform_id,
+                custom_title: Some(&eff_title),
+                catalog_app_id: Some(cat_clone.app_id),
+                cover_hint: if cat_clone.cover_url.is_empty() {
+                    None
+                } else {
+                    Some(cat_clone.cover_url.as_str())
+                },
+                hero_hint: if cat_clone.hero_url.is_empty() {
+                    None
+                } else {
+                    Some(cat_clone.hero_url.as_str())
+                },
+                origin_source: if rom_buf.is_some() {
+                    "rom_linked"
+                } else {
+                    "catalog_retro"
+                },
+            },
+        );
+        save_library_to_disk(&app_clone, &library)?;
+        let _ = app_clone.emit("library-updated", &library);
+        Ok(entry)
+    })
+    .await
+    .map_err(|e| format!("Library update worker failed: {}", e))??;
+
+    let hint = if entry.cover_url.is_empty() {
+        None
+    } else {
+        Some(entry.cover_url.clone())
+    };
+    spawn_cache_retro_covers_batch(
+        app,
+        vec![(entry.platform_id, entry.id.clone(), entry.title.clone(), hint)],
+    );
+
+    Ok(entry)
+}
+
+#[tauri::command]
+async fn link_game_rom(
+    app: AppHandle,
+    game_id: String,
+    rom_path: String,
+) -> Result<Vec<GameEntry>, String> {
+    let trimmed = rom_path.trim().trim_matches('"').to_string();
+    let rom_buf = PathBuf::from(&trimmed);
+    if !rom_buf.is_file() {
+        return Err(format!("Selected ROM / ISO file does not exist: {}", trimmed));
+    }
+    unblock_ntfs_zone_identifier(&rom_buf);
+    let rom_inspect_buf = rom_buf.clone();
+    let inspection = tokio::task::spawn_blocking(move || rom_inspect::inspect_rom_file(&rom_inspect_buf))
+        .await
+        .map_err(|e| format!("ROM inspection worker failed: {}", e))?;
+
+    let app_clone = app.clone();
+    let updated = tokio::task::spawn_blocking(move || -> Result<Vec<GameEntry>, String> {
+        let mut library = load_library_from_disk(&app_clone)?;
+        let Some(entry) = library.iter_mut().find(|g| g.id == game_id) else {
+            return Err("Game entry not found in library.".to_string());
+        };
+        let size_bytes = fs::metadata(&rom_buf).map(|m| m.len()).unwrap_or(0);
+        entry.exe_path = trimmed.clone();
+        entry.install_dir = rom_buf
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        entry.size_bytes = size_bytes;
+        entry.size_formatted = format_bytes(size_bytes);
+        entry.is_installed = true;
+        if let Some(ref info) = inspection {
+            if entry.platform_id == 0 && info.platform_id > 0 {
+                let plat = platforms::platform_by_id(info.platform_id);
+                entry.platform_id = info.platform_id;
+                entry.console_group = plat.console_group;
+                entry.platform = plat.display_name.to_string();
+                entry.emulator_id = plat.default_emulator_id.to_string();
+            }
+            if !info.rom_id.trim().is_empty() {
+                entry.rom_id = info.rom_id.clone();
+            }
+        }
+        save_library_to_disk(&app_clone, &library)?;
+        let _ = app_clone.emit("library-updated", &library);
+        Ok(library)
+    })
+    .await
+    .map_err(|e| format!("Failed linking ROM: {}", e))??;
+
+    Ok(updated)
+}
+
+#[tauri::command]
+async fn scan_rom_folder(app: AppHandle, folder_path: String) -> Result<IngestPathsReport, String> {
+    let trimmed = folder_path.trim().trim_matches('"').to_string();
+    let dir = PathBuf::from(&trimmed);
+    if !dir.is_dir() {
+        return Err(format!("Selected ROM folder does not exist: {}", trimmed));
+    }
+
+    let detected = tokio::task::spawn_blocking(move || rom_inspect::scan_folder_for_roms(&dir, 4))
+        .await
+        .map_err(|e| format!("ROM folder scanner failed: {}", e))?;
+
+    if detected.is_empty() {
+        let library = load_library_from_disk(&app).unwrap_or_default();
+        return Ok(IngestPathsReport {
+            added_count: 0,
+            skipped_count: 1,
+            added_titles: Vec::new(),
+            skipped_reasons: vec![format!("No supported console ROM / ISO files found in '{}'.", trimmed)],
+            library,
+        });
+    }
+
+    let app_clone = app.clone();
+    let (added_titles, cache_targets, library) = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        let mut lib = load_library_from_disk(&app_clone)?;
+        let mut titles = Vec::new();
+        let mut covers = Vec::new();
+        for info in detected {
+            let p = PathBuf::from(&info.path);
+            unblock_ntfs_zone_identifier(&p);
+            let entry = upsert_retro_game_entry_in_library(
+                &mut lib,
+                RetroUpsertParams {
+                    rom_path: Some(&p),
+                    inspection: Some(&info),
+                    platform_id: info.platform_id,
+                    custom_title: None,
+                    catalog_app_id: None,
+                    cover_hint: None,
+                    hero_hint: None,
+                    origin_source: "rom_scan",
+                },
+            );
+            titles.push(entry.title.clone());
+            let hint = if entry.cover_url.is_empty() {
+                None
+            } else {
+                Some(entry.cover_url.clone())
+            };
+            covers.push((entry.platform_id, entry.id, entry.title, hint));
+        }
+        save_library_to_disk(&app_clone, &lib)?;
+        let _ = app_clone.emit("library-updated", &lib);
+        Ok((titles, covers, lib))
+    })
+    .await
+    .map_err(|e| format!("Failed saving scanned ROMs: {}", e))??;
+
+    spawn_cache_retro_covers_batch(app, cache_targets);
+
+    Ok(IngestPathsReport {
+        added_count: added_titles.len(),
+        skipped_count: 0,
+        added_titles,
+        skipped_reasons: Vec::new(),
+        library,
+    })
+}
+
 #[tauri::command]
 async fn ingest_dropped_paths(
     app: AppHandle,
@@ -10893,10 +11644,63 @@ async fn ingest_dropped_paths(
             .map_err(|e| format!("Folder scan worker failed: {}", e))?;
 
             let Some(exe_path) = best_exe else {
-                skipped_reasons.push(format!(
-                    "No playable game executable found inside '{}'.",
-                    folder_title
-                ));
+                let dir_for_roms = path.clone();
+                let scanned_roms = tokio::task::spawn_blocking(move || {
+                    rom_inspect::scan_folder_for_roms(&dir_for_roms, 4)
+                })
+                .await
+                .map_err(|e| format!("ROM scanner failed: {}", e))?;
+
+                if scanned_roms.is_empty() {
+                    skipped_reasons.push(format!(
+                        "No playable game executable or console ROM found inside '{}'.",
+                        folder_title
+                    ));
+                    continue;
+                }
+
+                struct ScannedRomBatch {
+                    titles: Vec<String>,
+                    covers: Vec<CoverCacheTarget>,
+                }
+                let app_for_roms = app.clone();
+                let batch = tokio::task::spawn_blocking(move || -> Result<ScannedRomBatch, String> {
+                    let mut lib = load_library_from_disk(&app_for_roms)?;
+                    let mut titles = Vec::new();
+                    let mut covers = Vec::new();
+                    for info in scanned_roms {
+                        let rom_p = PathBuf::from(&info.path);
+                        unblock_ntfs_zone_identifier(&rom_p);
+                        let entry = upsert_retro_game_entry_in_library(
+                            &mut lib,
+                            RetroUpsertParams {
+                                rom_path: Some(&rom_p),
+                                inspection: Some(&info),
+                                platform_id: info.platform_id,
+                                custom_title: None,
+                                catalog_app_id: None,
+                                cover_hint: None,
+                                hero_hint: None,
+                                origin_source: "dropped_rom_folder",
+                            },
+                        );
+                        titles.push(entry.title.clone());
+                        let hint = if entry.cover_url.is_empty() {
+                            None
+                        } else {
+                            Some(entry.cover_url.clone())
+                        };
+                        covers.push((entry.platform_id, entry.id, entry.title, hint));
+                    }
+                    save_library_to_disk(&app_for_roms, &lib)?;
+                    let _ = app_for_roms.emit("library-updated", &lib);
+                    Ok(ScannedRomBatch { titles, covers })
+                })
+                .await
+                .map_err(|e| format!("Failed saving dropped ROMs: {}", e))??;
+
+                added_titles.extend(batch.titles);
+                spawn_cache_retro_covers_batch(app.clone(), batch.covers);
                 continue;
             };
             let app_id = read_steam_appid_from_folder(&path)
@@ -11027,8 +11831,50 @@ async fn ingest_dropped_paths(
             continue;
         }
 
+        let path_for_rom = path.clone();
+        if let Ok(Some(rom_info)) =
+            tokio::task::spawn_blocking(move || rom_inspect::inspect_rom_file(&path_for_rom)).await
+        {
+            unblock_ntfs_zone_identifier(&path);
+            let app_for_rom = app.clone();
+            let path_owned = path.clone();
+            let entry = tokio::task::spawn_blocking(move || -> Result<GameEntry, String> {
+                let mut lib = load_library_from_disk(&app_for_rom)?;
+                let entry = upsert_retro_game_entry_in_library(
+                    &mut lib,
+                    RetroUpsertParams {
+                        rom_path: Some(&path_owned),
+                        inspection: Some(&rom_info),
+                        platform_id: rom_info.platform_id,
+                        custom_title: None,
+                        catalog_app_id: None,
+                        cover_hint: None,
+                        hero_hint: None,
+                        origin_source: "dropped_rom",
+                    },
+                );
+                save_library_to_disk(&app_for_rom, &lib)?;
+                let _ = app_for_rom.emit("library-updated", &lib);
+                Ok(entry)
+            })
+            .await
+            .map_err(|e| format!("Failed adding dropped ROM: {}", e))??;
+
+            added_titles.push(entry.title.clone());
+            let hint = if entry.cover_url.is_empty() {
+                None
+            } else {
+                Some(entry.cover_url.clone())
+            };
+            spawn_cache_retro_covers_batch(
+                app.clone(),
+                vec![(entry.platform_id, entry.id, entry.title, hint)],
+            );
+            continue;
+        }
+
         skipped_reasons.push(format!(
-            "Unsupported drop '{}': drop a game folder, .exe, or Windows .lnk shortcut.",
+            "Unsupported drop '{}': drop a game folder, .exe, .lnk shortcut, or console ROM / ISO.",
             path.file_name().and_then(|n| n.to_str()).unwrap_or(&trimmed)
         ));
     }
@@ -12413,12 +13259,17 @@ fn main() {
             }
 
             // Ensure covers/, sidebar_icons/, and backups/ directories exist (supports Portable Mode if portable.flag or data/ is present)
-            let _ = get_covers_dir(app.handle());
+            if let Ok(covers_dir) = get_covers_dir(app.handle()) {
+                let _ = app.asset_protocol_scope().allow_directory(&covers_dir, true);
+            }
             let _ = sidebar_icons::get_sidebar_icons_dir(app.handle());
             if resolve_portable_data_dir().is_some() {
                 sidebar_icons::allow_portable_sidebar_icons_scope(app.handle());
             }
             let _ = get_backups_dir(app.handle());
+
+            // Non-blocking background sync of Nintendo & retro Libretro RDB catalog into `catalog.dkcat` if empty
+            retro_catalog::spawn_background_retro_catalog_sync_if_needed(app.handle().clone());
 
             // Initialize cache-line-aligned lock-free Win32 shared memory event bus (`Local\duke-suite-shm-v1`).
             let _ = DUKE_SHM_BUS.get_or_init(|| {
@@ -12644,7 +13495,17 @@ fn main() {
             toggle_overlay_window,
             hide_overlay_window,
             trigger_replay_clip_ipc,
-            purge_suite_ram_ipc
+            purge_suite_ram_ipc,
+            retro_catalog::sync_retro_catalog,
+            retro_catalog::get_retro_platforms,
+            emulators::get_emulator_statuses,
+            emulators::install_emulator_for_console,
+            emulators::set_custom_emulator_path,
+            emulators::check_game_emulator_ready,
+            inspect_rom_path,
+            add_retro_game_from_catalog,
+            link_game_rom,
+            scan_rom_folder
         ])
         .build(tauri::generate_context!())
         .expect("error while building Duke Launcher Tauri application");
