@@ -795,6 +795,11 @@ pub(crate) async fn import_existing_libraries_core() -> Result<ImportLibraryResu
             .as_secs();
 
         let mut library = crate::load_library_standalone()?;
+        let prev_snapshots: std::collections::HashMap<String, (String, String, Option<u32>)> =
+            library
+                .iter()
+                .map(|g| (g.id.clone(), (g.exe_path.clone(), g.cover_url.clone(), g.app_id)))
+                .collect();
         let (added, updated, by_source) =
             merge_discovered_games_into_library(&mut library, discovered, now);
 
@@ -804,6 +809,17 @@ pub(crate) async fn import_existing_libraries_core() -> Result<ImportLibraryResu
 
         if added > 0 || updated > 0 {
             crate::save_library_standalone(&library)?;
+            for entry in &library {
+                let changed = match prev_snapshots.get(&entry.id) {
+                    None => true,
+                    Some((exe, cover, aid)) => {
+                        *exe != entry.exe_path || *cover != entry.cover_url || *aid != entry.app_id
+                    }
+                };
+                if changed {
+                    crate::sidebar_icons::invalidate_sidebar_icon_standalone(&entry.id);
+                }
+            }
         }
 
         let total = library.len();

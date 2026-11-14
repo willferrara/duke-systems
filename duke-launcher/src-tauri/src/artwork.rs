@@ -379,6 +379,8 @@ pub(crate) async fn apply_custom_artwork(
     .await
     .map_err(|e| format!("Failed saving custom artwork: {}", e))??;
 
+    crate::sidebar_icons::invalidate_sidebar_icon(&app, &updated_entry.id);
+
     if let Ok(full_lib) = tokio::task::spawn_blocking(crate::load_library_standalone)
         .await
         .unwrap_or_else(|_| Ok(Vec::new()))

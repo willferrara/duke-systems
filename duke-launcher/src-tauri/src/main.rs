@@ -9,6 +9,7 @@ mod importers;
 mod ludusavi;
 mod mcp;
 mod pe_inspect;
+mod sidebar_icons;
 mod sites;
 mod snapshots;
 mod sources;
@@ -597,7 +598,7 @@ fn resolve_default_downloads_dir(app: &AppHandle) -> PathBuf {
     std::env::temp_dir().join("DukeLauncherDownloads")
 }
 
-fn encode_base64(input: &[u8]) -> String {
+pub(crate) fn encode_base64(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
@@ -1355,7 +1356,7 @@ pub(crate) fn get_backups_dir_standalone() -> Result<PathBuf, String> {
     Ok(backups_dir)
 }
 
-fn resolve_data_root_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn resolve_data_root_dir(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(portable_dir) = resolve_portable_data_dir() {
         return Ok(portable_dir);
     }
@@ -1377,7 +1378,7 @@ fn resolve_data_root_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir)
 }
 
-fn get_covers_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn get_covers_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let root = resolve_data_root_dir(app)?;
     let covers_dir = root.join("covers");
     if !covers_dir.exists() {
@@ -1824,6 +1825,25 @@ fn save_catalog_cache_to_disk(app: &AppHandle, cache: &CatalogCacheFile) -> Resu
     let dkcat_path = get_app_data_file(app, "catalog.dkcat")?;
     catalog_mmap::atomic_rebuild_dkcat(&dkcat_path, cache)?;
     Ok(())
+}
+
+pub(crate) fn load_library_lightweight(app: &AppHandle) -> Result<Vec<GameEntry>, String> {
+    let _guard = get_library_io_lock().lock().unwrap();
+    let path = get_app_data_file(app, "library.json")?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read library.json: {}", e))?;
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut entries: Vec<GameEntry> = serde_json::from_str(&raw)
+        .map_err(|e| format!("Failed to parse library.json: {}", e))?;
+    for entry in &mut entries {
+        normalize_game_entry(entry);
+    }
+    Ok(entries)
 }
 
 fn load_library_from_disk(app: &AppHandle) -> Result<Vec<GameEntry>, String> {
@@ -6065,6 +6085,7 @@ async fn get_download_jobs(
 #[tauri::command]
 async fn auto_fix_all_covers(app: AppHandle) -> Result<Vec<GameEntry>, String> {
     let mut library = load_library_from_disk(&app)?;
+    let mut updated_ids = Vec::new();
     for entry in &mut library {
         let (cover, app_id, matched_title) =
             smart_find_game_cover(&entry.title, &entry.exe_path, &entry.install_dir).await;
@@ -6079,9 +6100,13 @@ async fn auto_fix_all_covers(app: AppHandle) -> Result<Vec<GameEntry>, String> {
                     entry.title = real_name;
                 }
             }
+            updated_ids.push(entry.id.clone());
         }
     }
     save_library_to_disk(&app, &library)?;
+    for gid in &updated_ids {
+        sidebar_icons::invalidate_sidebar_icon(&app, gid);
+    }
     trim_process_working_set();
     Ok(library)
 }
@@ -6093,6 +6118,7 @@ async fn find_and_apply_cover(
     custom_query: Option<String>,
 ) -> Result<Vec<GameEntry>, String> {
     let mut library = load_library_from_disk(&app)?;
+    let mut updated_id: Option<String> = None;
     if let Some(entry) = library.iter_mut().find(|g| g.id == id) {
         let search_title = custom_query
             .filter(|q| !q.trim().is_empty())
@@ -6108,6 +6134,7 @@ async fn find_and_apply_cover(
             if let Some(official) = matched_name {
                 entry.title = official;
             }
+            updated_id = Some(entry.id.clone());
         } else {
             trim_process_working_set();
             return Err(format!(
@@ -6117,6 +6144,9 @@ async fn find_and_apply_cover(
         }
     }
     save_library_to_disk(&app, &library)?;
+    if let Some(gid) = updated_id {
+        sidebar_icons::invalidate_sidebar_icon(&app, &gid);
+    }
     trim_process_working_set();
     Ok(library)
 }
@@ -6806,7 +6836,8 @@ async fn add_local_game(
             let preserve_args = existing.launch_args.clone();
             let preserve_sandbox = existing.sandbox_enabled;
             let preserve_prefetch = existing.nvme_prefetch_enabled;
-            *existing = entry_clone;
+            let old_id = existing.id.clone();
+            *existing = entry_clone.clone();
             existing.is_favorite = preserve_fav;
             existing.last_played = preserve_last_played;
             existing.last_played_ts = preserve_last_played;
@@ -6816,10 +6847,13 @@ async fn add_local_game(
             existing.launch_args = preserve_args;
             existing.sandbox_enabled = preserve_sandbox;
             existing.nvme_prefetch_enabled = preserve_prefetch;
+            sidebar_icons::invalidate_sidebar_icon(&app_clone, &old_id);
         } else {
-            library.push(entry_clone);
+            library.push(entry_clone.clone());
         }
-        save_library_to_disk(&app_clone, &library)
+        save_library_to_disk(&app_clone, &library)?;
+        sidebar_icons::invalidate_sidebar_icon(&app_clone, &entry_clone.id);
+        Ok(())
     })
     .await
     .map_err(|e| format!("Failed to save library state: {}", e))??;
@@ -7070,6 +7104,7 @@ async fn change_game_exe(
         .map_err(|e| format!("Failed to calculate directory size: {}", e))?;
 
     let mut library = load_library_from_disk(&app)?;
+    let mut updated_id: Option<String> = None;
     if let Some(entry) = library
         .iter_mut()
         .find(|g| g.id == game_id || g.exe_path.eq_ignore_ascii_case(&game_id))
@@ -7079,9 +7114,13 @@ async fn change_game_exe(
         entry.size_bytes = size_bytes;
         entry.size_formatted = format_bytes(size_bytes);
         entry.is_installed = true;
+        updated_id = Some(entry.id.clone());
     }
 
     save_library_to_disk(&app, &library)?;
+    if let Some(gid) = updated_id {
+        sidebar_icons::invalidate_sidebar_icon(&app, &gid);
+    }
     let _ = app.emit("library-updated", &library);
     Ok(library)
 }
@@ -9746,8 +9785,17 @@ async fn get_local_library(app: AppHandle) -> Result<Vec<GameEntry>, String> {
 async fn remove_local_game(app: AppHandle, id: String) -> Result<Vec<GameEntry>, String> {
     tokio::task::spawn_blocking(move || {
         let mut library = load_library_from_disk(&app)?;
+        let removed_ids: Vec<String> = library
+            .iter()
+            .filter(|g| !(g.id != id && !g.exe_path.eq_ignore_ascii_case(&id)))
+            .map(|g| g.id.clone())
+            .collect();
         library.retain(|g| g.id != id && !g.exe_path.eq_ignore_ascii_case(&id));
         save_library_to_disk(&app, &library)?;
+        sidebar_icons::invalidate_sidebar_icon(&app, &id);
+        for gid in removed_ids {
+            sidebar_icons::invalidate_sidebar_icon(&app, &gid);
+        }
         Ok(library)
     })
     .await
@@ -10066,8 +10114,12 @@ fn main() {
                 );
             }
 
-            // Ensure covers/ and backups/ directories exist (supports Portable Mode if portable.flag or data/ is present)
+            // Ensure covers/, sidebar_icons/, and backups/ directories exist (supports Portable Mode if portable.flag or data/ is present)
             let _ = get_covers_dir(app.handle());
+            let _ = sidebar_icons::get_sidebar_icons_dir(app.handle());
+            if resolve_portable_data_dir().is_some() {
+                sidebar_icons::allow_portable_sidebar_icons_scope(app.handle());
+            }
             let _ = get_backups_dir(app.handle());
 
             // Initialize cache-line-aligned lock-free Win32 shared memory event bus (`Local\duke-suite-shm-v1`).
@@ -10178,6 +10230,7 @@ fn main() {
             get_game_steam_details,
             sync_library_steam_prices,
             get_local_library,
+            sidebar_icons::get_sidebar_icons,
             remove_local_game,
             toggle_favorite_game,
             open_game_folder,

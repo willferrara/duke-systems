@@ -525,6 +525,20 @@ export async function openExternalUrl(url) {
   }
 }
 
+export function convertFileSrc(filePath) {
+  if (!filePath) return "";
+  if (window.__TAURI__?.core?.convertFileSrc) {
+    return window.__TAURI__.core.convertFileSrc(filePath);
+  }
+  return filePath;
+}
+
+export async function getSidebarIcons(gameIds = []) {
+  const ids = Array.isArray(gameIds) ? gameIds.filter(Boolean) : [];
+  if (ids.length === 0) return {};
+  return invokeCommand("get_sidebar_icons", { gameIds: ids });
+}
+
 export function escapeHtml(str) {
   return String(str ?? "")
     .replace(/&/g, "&amp;")

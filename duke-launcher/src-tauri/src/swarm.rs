@@ -1145,6 +1145,7 @@ pub async fn beam_game_from_peer(
                     ..GameEntry::default()
                 });
                 let _ = save_library_standalone(&library);
+                crate::sidebar_icons::invalidate_sidebar_icon_standalone(&id);
                 report.registered_game_id = Some(id);
             }
         }

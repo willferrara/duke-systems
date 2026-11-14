@@ -387,6 +387,8 @@ body {
   height: 18px;
   border-radius: 4px;
   object-fit: cover;
+  flex-shrink: 0;
+  display: block;
 }
 
 .titlebar-title {
@@ -583,8 +585,8 @@ body {
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
+  gap: 7px;
+  padding: 5px 8px;
   border-radius: var(--radius-control);
   border: 1px solid transparent;
   background: transparent;
@@ -608,12 +610,47 @@ body {
   font-weight: 600;
 }
 
+.sidebar-game-icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--bg-elevated);
+  display: block;
+}
+
+.sidebar-game-monogram {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-transform: uppercase;
+  user-select: none;
+}
+
 .sidebar-game-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--accent-emerald);
+  background: #6fa720;
   flex-shrink: 0;
+}
+
+body[data-theme="light"] .sidebar-game-icon,
+body[data-theme="light"] .sidebar-game-monogram {
+  border-color: var(--border-hairline);
 }
 
 .sidebar-game-title {

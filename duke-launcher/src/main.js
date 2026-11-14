@@ -8,6 +8,7 @@ import {
   bulkImportSearchSites,
   clearCompletedDownloads,
   compressGameFolder,
+  convertFileSrc,
   createDesktopShortcutWithIcon,
   createGameSnapshot,
   deleteGameSnapshot,
@@ -27,6 +28,7 @@ import {
   getImportedSources,
   getLauncherSettings,
   getSearchSites,
+  getSidebarIcons,
   getSwarmStatus,
   healGameRuntimeDlls,
   importExistingLibraries,
@@ -164,6 +166,10 @@ const state = {
     manualInspect: false
   },
   notifiedCompletedIds: new Set(),
+  sidebarIcons: Object.create(null),
+  sidebarIconsPending: new Set(),
+  sidebarIconsAttempted: new Set(),
+  sidebarIconVersion: 0,
   customSaveDir: localStorage.getItem("duke_launcher_dl_dir") || "",
   activeTheme: localStorage.getItem("duke_launcher_theme") || "dark",
   catalog: {
@@ -357,21 +363,142 @@ function getFilteredSortedGames() {
   return list;
 }
 
+function getGameMonogram(title) {
+  const match = String(title || "").trim().match(/[A-Za-z0-9]/);
+  return match ? match[0].toUpperCase() : "G";
+}
+
+function createSidebarMonogramEl(title) {
+  const span = document.createElement("span");
+  span.className = "sidebar-game-monogram";
+  span.setAttribute("aria-hidden", "true");
+  span.textContent = getGameMonogram(title);
+  return span;
+}
+
+function createSidebarIconImgEl(srcUrl) {
+  const img = document.createElement("img");
+  img.src = srcUrl;
+  img.alt = "";
+  img.className = "sidebar-game-icon";
+  img.loading = "lazy";
+  img.decoding = "async";
+  return img;
+}
+
+function bindSidebarIconErrorHandler(img, gameId, gameTitle) {
+  img.addEventListener(
+    "error",
+    () => {
+      delete state.sidebarIcons[gameId];
+      img.replaceWith(createSidebarMonogramEl(gameTitle));
+    },
+    { once: true }
+  );
+}
+
+function invalidateSidebarIcons(gameIds = null) {
+  state.sidebarIconVersion += 1;
+  if (Array.isArray(gameIds)) {
+    for (const id of gameIds) {
+      if (!id) continue;
+      delete state.sidebarIcons[id];
+      state.sidebarIconsAttempted.delete(id);
+    }
+  } else {
+    state.sidebarIcons = Object.create(null);
+    state.sidebarIconsAttempted.clear();
+  }
+}
+
+function scheduleSidebarIconsSync(gameIds = null) {
+  const sourceIds = Array.isArray(gameIds)
+    ? gameIds
+    : state.library.map((g) => g.id).filter(Boolean);
+  const missing = [];
+  for (const id of sourceIds) {
+    if (
+      !id ||
+      state.sidebarIcons[id] ||
+      state.sidebarIconsPending.has(id) ||
+      state.sidebarIconsAttempted.has(id)
+    ) {
+      continue;
+    }
+    state.sidebarIconsPending.add(id);
+    missing.push(id);
+  }
+  if (missing.length === 0) return;
+
+  getSidebarIcons(missing)
+    .then((resolved) => {
+      const container = el("sidebar-game-list");
+      const versionSuffix = state.sidebarIconVersion > 0 ? `?v=${state.sidebarIconVersion}` : "";
+      for (const id of missing) {
+        state.sidebarIconsPending.delete(id);
+        state.sidebarIconsAttempted.add(id);
+        const rawPath = resolved && typeof resolved === "object" ? resolved[id] : null;
+        if (!rawPath) continue;
+        const assetUrl = convertFileSrc(rawPath);
+        if (!assetUrl) continue;
+        const finalUrl = versionSuffix ? `${assetUrl}${versionSuffix}` : assetUrl;
+        state.sidebarIcons[id] = finalUrl;
+
+        if (container) {
+          const row = Array.from(container.querySelectorAll(".sidebar-game-item")).find(
+            (btn) => btn.dataset.gameId === id
+          );
+          if (row) {
+            const game = state.library.find((g) => g.id === id);
+            const title = game?.title || "";
+            const slot = row.querySelector(".sidebar-game-icon, .sidebar-game-monogram");
+            const img = createSidebarIconImgEl(finalUrl);
+            bindSidebarIconErrorHandler(img, id, title);
+            if (slot) {
+              slot.replaceWith(img);
+            } else {
+              row.prepend(img);
+            }
+          }
+        }
+      }
+    })
+    .catch(() => {
+      for (const id of missing) {
+        state.sidebarIconsPending.delete(id);
+      }
+    });
+}
+
 function renderSidebarGameList() {
   const container = el("sidebar-game-list");
   if (!container) return;
   const sorted = [...state.library].sort((a, b) => String(a.title).localeCompare(String(b.title)));
   container.innerHTML = sorted
-    .map(
-      (g) => `
+    .map((g) => {
+      const iconUrl = state.sidebarIcons[g.id];
+      const iconHtml = iconUrl
+        ? `<img src="${escapeHtml(iconUrl)}" alt="" class="sidebar-game-icon" loading="lazy" decoding="async" />`
+        : `<span class="sidebar-game-monogram" aria-hidden="true">${escapeHtml(getGameMonogram(g.title))}</span>`;
+      return `
       <button type="button" class="sidebar-game-item ${state.selectedDetailId === g.id ? "active" : ""}" data-game-id="${escapeHtml(g.id)}">
+        ${iconHtml}
         <span class="sidebar-game-dot"></span>
         <span class="sidebar-game-title">${escapeHtml(g.title)}</span>
         ${g.isFavorite ? `<svg class="icon sidebar-fav-pin" aria-hidden="true"><use href="#icon-pin"/></svg>` : ""}
       </button>
-    `
-    )
+    `;
+    })
     .join("");
+
+  container.querySelectorAll("img.sidebar-game-icon").forEach((img) => {
+    const row = img.closest(".sidebar-game-item");
+    const gid = row?.dataset.gameId || "";
+    const game = state.library.find((g) => g.id === gid);
+    bindSidebarIconErrorHandler(img, gid, game?.title || "");
+  });
+
+  scheduleSidebarIconsSync(sorted.map((g) => g.id));
 }
 
 function renderLibraryGrid() {
@@ -2169,6 +2296,9 @@ async function runImportLibrariesFlow() {
     } else {
       state.library = await invokeCommand("get_local_library");
     }
+    if (Number(res?.added || 0) > 0 || Number(res?.updated || 0) > 0) {
+      invalidateSidebarIcons();
+    }
     renderSidebarGameList();
     renderLibraryGrid();
     updateSidebarTelemetry();
@@ -2195,6 +2325,9 @@ async function addLocalGameFlow() {
       genre: "Installed"
     });
     state.library = await invokeCommand("get_local_library");
+    if (added?.id) {
+      invalidateSidebarIcons([added.id]);
+    }
     renderSidebarGameList();
     renderLibraryGrid();
     updateSidebarTelemetry();
@@ -2942,6 +3075,8 @@ function wireEvents() {
     showToast("Refreshing covers...", "info");
     try {
       state.library = await invokeCommand("auto_fix_all_covers");
+      invalidateSidebarIcons();
+      renderSidebarGameList();
       renderLibraryGrid();
       showToast("Cover cache updated.", "success");
     } catch (err) {
@@ -3107,6 +3242,8 @@ function wireEvents() {
     const chosen = await pickExecutableFile();
     if (!chosen) return;
     state.library = await invokeCommand("change_game_exe", { gameId: game.id, newExePath: chosen });
+    invalidateSidebarIcons([game.id]);
+    renderSidebarGameList();
     openGameDetailView(game.id);
     showToast("Executable target updated.", "success");
   };
@@ -3130,6 +3267,8 @@ function wireEvents() {
   el("btn-detail-remove")?.addEventListener("click", () =>
     withSelectedGame(async (g) => {
       state.library = await invokeCommand("remove_local_game", { id: g.id });
+      delete state.sidebarIcons[g.id];
+      state.sidebarIconsAttempted.delete(g.id);
       state.selectedDetailId = null;
       switchTab("library");
       renderSidebarGameList();
@@ -3588,6 +3727,8 @@ function wireEvents() {
     const q = el("input-cover-query")?.value || "";
     try {
       state.library = await invokeCommand("find_and_apply_cover", { id: state.modalGameId, customQuery: q });
+      invalidateSidebarIcons([state.modalGameId]);
+      renderSidebarGameList();
       renderLibraryGrid();
       if (state.selectedDetailId === state.modalGameId) {
         openGameDetailView(state.modalGameId);
@@ -3627,12 +3768,19 @@ function wireEvents() {
     }
     showToast("Downloading and applying custom SteamGridDB artwork...", "info", 2200);
     try {
-      state.library = await applyCustomArtwork({
+      const updated = await applyCustomArtwork({
         gameId: state.modalGameId,
         coverUrl,
         heroUrl,
         iconUrl
       });
+      if (Array.isArray(updated)) {
+        state.library = updated;
+      } else if (updated && updated.id) {
+        const idx = state.library.findIndex((g) => g.id === updated.id);
+        if (idx >= 0) state.library[idx] = updated;
+      }
+      invalidateSidebarIcons([state.modalGameId]);
       renderSidebarGameList();
       renderLibraryGrid();
       if (state.selectedDetailId === state.modalGameId) {
@@ -3665,6 +3813,8 @@ function wireEvents() {
     else if (act === "change-exe") await changeExeFlow(game);
     else if (act === "remove") {
       state.library = await invokeCommand("remove_local_game", { id: game.id });
+      delete state.sidebarIcons[game.id];
+      state.sidebarIconsAttempted.delete(game.id);
       renderSidebarGameList();
       renderLibraryGrid();
       updateSidebarTelemetry();
@@ -4177,6 +4327,17 @@ async function init() {
 
   await listenEvent("library-updated", (lib) => {
     if (Array.isArray(lib)) {
+      const activeIds = new Set(lib.map((g) => g.id));
+      for (const cachedId of Object.keys(state.sidebarIcons)) {
+        if (!activeIds.has(cachedId)) {
+          delete state.sidebarIcons[cachedId];
+        }
+      }
+      for (const attemptedId of Array.from(state.sidebarIconsAttempted)) {
+        if (!activeIds.has(attemptedId)) {
+          state.sidebarIconsAttempted.delete(attemptedId);
+        }
+      }
       state.library = lib;
       renderSidebarGameList();
       renderLibraryGrid();
