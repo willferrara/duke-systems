@@ -1,5 +1,5 @@
 /* ==========================================================================
-   DUKE LAUNCHER — NATIVE WINDOWS 11 DESKTOP UI & 10 MULTI-LAYERED SVG THEMES
+   DUKE LAUNCHER — NATIVE WINDOWS 11 DESKTOP UI & 11 ZERO-RAM THEMES
    ========================================================================== */
 
 :root {
@@ -250,13 +250,44 @@ body[data-theme="frost"] {
   --bg-wallpaper: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="nfAur1" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="%2310b981" stop-opacity="0.38"/><stop offset="50%" stop-color="%2338bdf8" stop-opacity="0.48"/><stop offset="100%" stop-color="%23a855f7" stop-opacity="0.36"/></linearGradient></defs><rect width="1600" height="900" fill="%230f1520"/><path d="M0 220 Q 380 60, 820 210 T 1600 130 L 1600 310 Q 1160 410, 740 270 T 0 360 Z" fill="url(%23nfAur1)"/><polygon points="0,780 0,610 310,380 620,640 970,350 1310,610 1600,430 1600,780" fill="%231b2434"/><rect x="0" y="780" width="1600" height="120" fill="%23111927"/></svg>');
 }
 
+/* 11. Obsidian Frosted Glass (Windows 11 DWM Acrylic + Backdrop Filter) */
+body[data-theme="frosted-obsidian"] {
+  --bg-canvas: rgba(12, 15, 20, 0.56);
+  --bg-sidebar: rgba(17, 21, 29, 0.62);
+  --bg-surface: rgba(20, 25, 34, 0.64);
+  --bg-elevated: rgba(30, 37, 50, 0.72);
+  --bg-input: rgba(15, 20, 28, 0.64);
+  --bg-hover: rgba(255, 255, 255, 0.08);
+  --border-hairline: rgba(255, 255, 255, 0.11);
+  --border-strong: rgba(255, 255, 255, 0.19);
+  --shadow-surface: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 8px 24px rgba(0, 0, 0, 0.34);
+  --text-main: #f3f6fb;
+  --text-muted: #aebad0;
+  --text-dim: #7c8aa3;
+  --accent-primary: #38bdf8;
+  --accent-primary-text: #ffffff;
+  --steam-green-grad: linear-gradient(90deg, rgba(92, 126, 16, 0.92) 0%, rgba(111, 167, 32, 0.92) 100%);
+  --steam-green-hover: linear-gradient(90deg, rgba(107, 148, 20, 0.98) 0%, rgba(130, 196, 39, 0.98) 100%);
+  --accent-gold: #facc15;
+  --accent-emerald: #34d399;
+  --accent-crimson: #f87171;
+  --bg-wallpaper: radial-gradient(circle at 18% 12%, rgba(56, 189, 248, 0.09), transparent 46%), radial-gradient(circle at 84% 88%, rgba(129, 140, 248, 0.07), transparent 48%), linear-gradient(160deg, rgba(16, 20, 28, 0.34), rgba(10, 12, 17, 0.42));
+}
+
 *, *::before, *::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
 }
 
-html, body {
+html {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+body {
   width: 100%;
   height: 100%;
   overflow: hidden;
@@ -1493,6 +1524,10 @@ body[data-theme="light"] .subbar {
   background-color: #121722;
   background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 220" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="pNfAur1" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="%2310b981" stop-opacity="0.62"/><stop offset="50%" stop-color="%2338bdf8" stop-opacity="0.7"/><stop offset="100%" stop-color="%23a855f7" stop-opacity="0.58"/></linearGradient></defs><rect width="480" height="220" fill="%230f1521"/><path d="M0 54 Q 120 12, 250 52 T 480 30 L 480 80 Q 350 108, 230 70 T 0 92 Z" fill="url(%23pNfAur1)"/><polygon points="0,192 0,144 96,86 192,154 298,74 396,146 480,100 480,192" fill="%231b2434"/></svg>');
 }
+.theme-preview[data-preview-theme="frosted-obsidian"] {
+  background-color: #0c0f14;
+  background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 220" preserveAspectRatio="xMidYMid slice"><defs><radialGradient id="pObsG1" cx="24%" cy="22%" r="60%"><stop offset="0%" stop-color="%2338bdf8" stop-opacity="0.34"/><stop offset="100%" stop-color="%230c0f14" stop-opacity="0"/></radialGradient><radialGradient id="pObsG2" cx="82%" cy="80%" r="55%"><stop offset="0%" stop-color="%23818cf8" stop-opacity="0.28"/><stop offset="100%" stop-color="%230c0f14" stop-opacity="0"/></radialGradient></defs><rect width="480" height="220" fill="%230c0f14"/><rect width="480" height="220" fill="url(%23pObsG1)"/><rect width="480" height="220" fill="url(%23pObsG2)"/><rect x="34" y="28" width="136" height="164" rx="10" fill="%23161b25" fill-opacity="0.64" stroke="%23ffffff" stroke-opacity="0.16" stroke-width="1.2"/><rect x="186" y="28" width="260" height="72" rx="10" fill="%231b2230" fill-opacity="0.58" stroke="%23ffffff" stroke-opacity="0.18" stroke-width="1.2"/><rect x="186" y="114" width="124" height="78" rx="10" fill="%23161b25" fill-opacity="0.62" stroke="%23ffffff" stroke-opacity="0.15" stroke-width="1.2"/><rect x="322" y="114" width="124" height="78" rx="10" fill="%23161b25" fill-opacity="0.62" stroke="%2338bdf8" stroke-opacity="0.45" stroke-width="1.2"/></svg>');
+}
 
 .theme-meta { padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
 .theme-name { font-size: 12.5px; font-weight: 600; color: var(--text-main); }
@@ -1636,17 +1671,121 @@ body.game-running-idle * {
   padding-left: 32px;
 }
 
-.catalog-mode-row,
-.catalog-genre-row {
+.catalog-quant-filters-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.catalog-hide-installed-btn {
+  margin-left: auto;
+}
+
+.catalog-genres-drawer {
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-control);
+  background: rgba(255, 255, 255, 0.02);
+  padding: 8px 10px;
+}
+
+.catalog-genres-drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.catalog-genres-toggle-btn {
+  width: auto;
+  padding: 2px 4px;
+  gap: 7px;
+  color: var(--text-main);
+  font-size: 12.5px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.catalog-active-genres-preview {
   display: flex;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+  flex: 1;
+  min-width: 180px;
 }
 
-.catalog-genre-row {
-  padding-top: 6px;
+.catalog-active-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  background: rgba(26, 159, 255, 0.14);
+  color: var(--text-main);
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+
+.catalog-active-chip:hover {
+  background: rgba(26, 159, 255, 0.24);
+  border-color: var(--accent-primary);
+}
+
+.catalog-active-chip .icon {
+  width: 11px;
+  height: 11px;
+}
+
+.catalog-genres-drawer-body {
+  padding-top: 10px;
+  margin-top: 8px;
   border-top: 1px solid var(--border-hairline);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.catalog-tag-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.catalog-tag-search-wrap {
+  position: relative;
+  width: 100%;
+  max-width: 420px;
+}
+
+.catalog-genre-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.catalog-genre-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.catalog-genre-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+.catalog-genre-pills-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .catalog-status-strip {
@@ -2686,6 +2825,144 @@ body.couch-mode .filter-pill {
 .engine-telemetry-line {
   padding-top: 4px;
   opacity: 0.8;
+}
+
+/* ==========================================================================
+   OBSIDIAN FROSTED GLASS — TRANSLUCENT ACRYLIC SURFACE SYSTEM
+   ========================================================================== */
+body[data-theme="frosted-obsidian"] .titlebar {
+  background: rgba(14, 17, 22, 0.68);
+  backdrop-filter: blur(18px) saturate(145%);
+  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.11);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+body[data-theme="frosted-obsidian"] .sidebar {
+  background: rgba(17, 21, 29, 0.62);
+  backdrop-filter: blur(18px) saturate(145%);
+  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  border-right: 1px solid rgba(255, 255, 255, 0.11);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+body[data-theme="frosted-obsidian"] .subbar,
+body[data-theme="frosted-obsidian"] .clipboard-banner,
+body[data-theme="frosted-obsidian"] .sources-game-banner {
+  background: rgba(17, 21, 29, 0.56);
+  backdrop-filter: blur(18px) saturate(145%);
+  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  border-color: rgba(255, 255, 255, 0.11);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+body[data-theme="frosted-obsidian"] .game-card,
+body[data-theme="frosted-obsidian"] .catalog-card,
+body[data-theme="frosted-obsidian"] .theme-option-card,
+body[data-theme="frosted-obsidian"] .directory-card,
+body[data-theme="frosted-obsidian"] .source-card,
+body[data-theme="frosted-obsidian"] .source-result-card,
+body[data-theme="frosted-obsidian"] .dl-job-card,
+body[data-theme="frosted-obsidian"] .swarm-peer-card,
+body[data-theme="frosted-obsidian"] .sgdb-thumb-card {
+  background: rgba(22, 27, 37, 0.58);
+  backdrop-filter: blur(18px) saturate(145%);
+  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 8px 24px rgba(0, 0, 0, 0.34);
+}
+
+body[data-theme="frosted-obsidian"] .game-card:hover,
+body[data-theme="frosted-obsidian"] .catalog-card:hover,
+body[data-theme="frosted-obsidian"] .theme-option-card:hover,
+body[data-theme="frosted-obsidian"] .theme-option-card.active,
+body[data-theme="frosted-obsidian"] .directory-card:hover,
+body[data-theme="frosted-obsidian"] .source-card:hover,
+body[data-theme="frosted-obsidian"] .source-result-card:hover,
+body[data-theme="frosted-obsidian"] .dl-job-card:hover,
+body[data-theme="frosted-obsidian"] .swarm-peer-card:hover,
+body[data-theme="frosted-obsidian"] .sgdb-thumb-card:hover {
+  background: rgba(30, 37, 50, 0.72);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+body[data-theme="frosted-obsidian"] .panel-card,
+body[data-theme="frosted-obsidian"] .detail-hero,
+body[data-theme="frosted-obsidian"] .detail-action-bar,
+body[data-theme="frosted-obsidian"] .news-item,
+body[data-theme="frosted-obsidian"] .sidebar-stats,
+body[data-theme="frosted-obsidian"] .setting-toggle-row,
+body[data-theme="frosted-obsidian"] .bookmarklet-card,
+body[data-theme="frosted-obsidian"] .catalog-genres-drawer,
+body[data-theme="frosted-obsidian"] .dl-onboarding-step,
+body[data-theme="frosted-obsidian"] .save-path-row,
+body[data-theme="frosted-obsidian"] .restore-snapshot-item,
+body[data-theme="frosted-obsidian"] .source-feed-chip,
+body[data-theme="frosted-obsidian"] .empty-card {
+  background: rgba(20, 25, 34, 0.62);
+  backdrop-filter: blur(18px) saturate(145%);
+  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 6px 20px rgba(0, 0, 0, 0.28);
+}
+
+body[data-theme="frosted-obsidian"] .news-item:hover,
+body[data-theme="frosted-obsidian"] .setting-toggle-row:hover,
+body[data-theme="frosted-obsidian"] .source-feed-chip:hover {
+  background: rgba(28, 35, 48, 0.72);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+body[data-theme="frosted-obsidian"] .modal-backdrop {
+  background: rgba(6, 9, 14, 0.52);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+body[data-theme="frosted-obsidian"] .modal-card,
+body[data-theme="frosted-obsidian"] .modal-foot,
+body[data-theme="frosted-obsidian"] .toast {
+  background: rgba(20, 25, 34, 0.68);
+  backdrop-filter: blur(18px) saturate(145%);
+  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  border-color: rgba(255, 255, 255, 0.11);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 18px 46px rgba(0, 0, 0, 0.52);
+}
+
+body[data-theme="frosted-obsidian"] .input-control,
+body[data-theme="frosted-obsidian"] .select-control,
+body[data-theme="frosted-obsidian"] .titlebar-search-wrap,
+body[data-theme="frosted-obsidian"] .titlebar-version,
+body[data-theme="frosted-obsidian"] .path-code,
+body[data-theme="frosted-obsidian"] .filter-pill,
+body[data-theme="frosted-obsidian"] .btn-secondary,
+body[data-theme="frosted-obsidian"] .pill,
+body[data-theme="frosted-obsidian"] .nav-count {
+  background: rgba(15, 20, 28, 0.64);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  border-color: rgba(255, 255, 255, 0.11);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+body[data-theme="frosted-obsidian"] .select-control option {
+  background-color: #131822;
+  color: #f3f6fb;
+}
+
+body[data-theme="frosted-obsidian"] .filter-pill:hover,
+body[data-theme="frosted-obsidian"] .btn-secondary:hover,
+body[data-theme="frosted-obsidian"] .nav-item:hover,
+body[data-theme="frosted-obsidian"] .sidebar-game-item:hover {
+  background: rgba(30, 38, 52, 0.74);
+  border-color: rgba(255, 255, 255, 0.19);
+}
+
+body[data-theme="frosted-obsidian"] .filter-pill.active,
+body[data-theme="frosted-obsidian"] .catalog-active-chip {
+  background: rgba(56, 189, 248, 0.2);
+  border-color: rgba(56, 189, 248, 0.72);
+  color: #f8fafc;
 }
 
 @media (max-width: 1020px) {

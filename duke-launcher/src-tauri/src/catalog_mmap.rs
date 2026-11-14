@@ -9,26 +9,354 @@ use std::time::Instant;
 use crate::{get_app_data_file_standalone, CatalogCacheFile, CatalogGameEntry};
 
 pub const DKCAT_MAGIC: [u8; 8] = *b"DKCAT001";
-pub const DKCAT_VERSION: u32 = 1;
+pub const DKCAT_VERSION: u32 = 2;
 const FLAG_IS_FREE: u32 = 1 << 0;
 const FLAG_SINGLEPLAYER: u32 = 1 << 1;
 const FLAG_COOP: u32 = 1 << 2;
 const FLAG_MULTIPLAYER: u32 = 1 << 3;
 const FLAG_ONLINE_ONLY_PVP: u32 = 1 << 4;
 const FLAG_DETAILS_ENRICHED: u32 = 1 << 5;
-const GENRE_MASK_POPULATED: u32 = 1 << 31;
-const STANDARD_GENRE_BITS: [(&str, u32); 10] = [
-    ("action", 1 << 0),
-    ("adventure", 1 << 1),
-    ("rpg", 1 << 2),
-    ("simulation", 1 << 3),
-    ("open world", 1 << 4),
-    ("horror", 1 << 5),
-    ("survival", 1 << 6),
-    ("indie", 1 << 7),
-    ("racing", 1 << 8),
-    ("strategy", 1 << 9),
+const GENRE_MASK_POPULATED: u64 = 1u64 << 63;
+
+pub struct GenreBitDef {
+    pub name: &'static str,
+    pub bit: u64,
+    pub synonyms: &'static [&'static str],
+}
+
+/// 36-genre/sub-genre taxonomy mapped into `CatalogRecord::genre_bits` (`u64`) for O(1) bitwise filtering.
+pub const GENRE_BIT_DEFS: [GenreBitDef; 36] = [
+    // Engineering & Building (12)
+    GenreBitDef {
+        name: "Engineering",
+        bit: 1u64 << 0,
+        synonyms: &[
+            "engineering",
+            "programming",
+            "automation",
+            "robotics",
+            "electronics",
+            "vehicular combat",
+            "space sim",
+            "rocket",
+            "building",
+            "logic",
+            "coding",
+            "hardware",
+        ],
+    },
+    GenreBitDef {
+        name: "Sandbox",
+        bit: 1u64 << 1,
+        synonyms: &[
+            "sandbox",
+            "open world survival craft",
+            "moddable",
+            "physics",
+            "voxel",
+            "level editor",
+        ],
+    },
+    GenreBitDef {
+        name: "Automation",
+        bit: 1u64 << 2,
+        synonyms: &[
+            "automation",
+            "factory",
+            "logistics",
+            "programming",
+            "conveyor",
+            "resource management",
+        ],
+    },
+    GenreBitDef {
+        name: "Building",
+        bit: 1u64 << 3,
+        synonyms: &[
+            "building",
+            "base building",
+            "base-building",
+            "city builder",
+            "colony sim",
+            "construction",
+        ],
+    },
+    GenreBitDef {
+        name: "Physics",
+        bit: 1u64 << 4,
+        synonyms: &["physics", "destruction", "ragdoll"],
+    },
+    GenreBitDef {
+        name: "Space",
+        bit: 1u64 << 5,
+        synonyms: &[
+            "space",
+            "space sim",
+            "spaceships",
+            "rocket",
+            "orbital",
+            "astronomy",
+            "mars",
+        ],
+    },
+    GenreBitDef {
+        name: "Flight",
+        bit: 1u64 << 6,
+        synonyms: &[
+            "flight",
+            "aviation",
+            "jet",
+            "helicopter",
+            "dogfight",
+            "flying",
+            "air combat",
+        ],
+    },
+    GenreBitDef {
+        name: "Crafting",
+        bit: 1u64 << 7,
+        synonyms: &["crafting", "open world survival craft", "smithing"],
+    },
+    GenreBitDef {
+        name: "Survival",
+        bit: 1u64 << 8,
+        synonyms: &["survival", "open world survival craft", "survival horror"],
+    },
+    GenreBitDef {
+        name: "City Builder",
+        bit: 1u64 << 9,
+        synonyms: &["city builder", "city-builder", "colony sim"],
+    },
+    GenreBitDef {
+        name: "Management",
+        bit: 1u64 << 10,
+        synonyms: &[
+            "management",
+            "tycoon",
+            "colony sim",
+            "time management",
+            "resource management",
+        ],
+    },
+    GenreBitDef {
+        name: "Economy",
+        bit: 1u64 << 11,
+        synonyms: &["economy", "trading", "capitalism", "tycoon"],
+    },
+    // Core Genres (15)
+    GenreBitDef {
+        name: "Action",
+        bit: 1u64 << 12,
+        synonyms: &["action", "hack and slash", "beat 'em up", "character action"],
+    },
+    GenreBitDef {
+        name: "Adventure",
+        bit: 1u64 << 13,
+        synonyms: &["adventure", "action-adventure", "point & click", "exploration"],
+    },
+    GenreBitDef {
+        name: "RPG",
+        bit: 1u64 << 14,
+        synonyms: &[
+            "rpg",
+            "role-playing",
+            "jrpg",
+            "action rpg",
+            "crpg",
+            "party-based rpg",
+        ],
+    },
+    GenreBitDef {
+        name: "Strategy",
+        bit: 1u64 << 15,
+        synonyms: &["strategy", "rts", "real time tactics", "grand strategy", "4x"],
+    },
+    GenreBitDef {
+        name: "Simulation",
+        bit: 1u64 << 16,
+        synonyms: &[
+            "simulation",
+            "life sim",
+            "farming sim",
+            "immersive sim",
+            "space sim",
+            "colony sim",
+            "automobile sim",
+            "dating sim",
+            "job simulator",
+            "flight",
+        ],
+    },
+    GenreBitDef {
+        name: "Shooter",
+        bit: 1u64 << 17,
+        synonyms: &[
+            "shooter",
+            "shoot 'em up",
+            "twin stick shooter",
+            "hero shooter",
+            "looter shooter",
+            "fps",
+            "third-person shooter",
+        ],
+    },
+    GenreBitDef {
+        name: "FPS",
+        bit: 1u64 << 18,
+        synonyms: &["fps", "first-person shooter", "boomer shooter", "arena shooter"],
+    },
+    GenreBitDef {
+        name: "Third-Person",
+        bit: 1u64 << 19,
+        synonyms: &[
+            "third-person",
+            "third person",
+            "3rd person",
+            "third-person shooter",
+        ],
+    },
+    GenreBitDef {
+        name: "Puzzle",
+        bit: 1u64 << 20,
+        synonyms: &["puzzle", "puzzle-platformer", "logic", "sokoban", "escape room"],
+    },
+    GenreBitDef {
+        name: "Platformer",
+        bit: 1u64 << 21,
+        synonyms: &[
+            "platformer",
+            "2d platformer",
+            "3d platformer",
+            "precision platformer",
+            "puzzle-platformer",
+        ],
+    },
+    GenreBitDef {
+        name: "Racing",
+        bit: 1u64 << 22,
+        synonyms: &[
+            "racing",
+            "driving",
+            "motorsport",
+            "offroad",
+            "kart racing",
+            "rally",
+        ],
+    },
+    GenreBitDef {
+        name: "Sports",
+        bit: 1u64 << 23,
+        synonyms: &[
+            "sports",
+            "football",
+            "soccer",
+            "basketball",
+            "baseball",
+            "golf",
+            "tennis",
+            "skateboarding",
+        ],
+    },
+    GenreBitDef {
+        name: "Fighting",
+        bit: 1u64 << 24,
+        synonyms: &[
+            "fighting",
+            "2d fighter",
+            "3d fighter",
+            "martial arts",
+            "beat 'em up",
+        ],
+    },
+    GenreBitDef {
+        name: "Horror",
+        bit: 1u64 << 25,
+        synonyms: &[
+            "horror",
+            "survival horror",
+            "psychological horror",
+            "lovecraftian",
+            "cosmic horror",
+        ],
+    },
+    GenreBitDef {
+        name: "Stealth",
+        bit: 1u64 << 26,
+        synonyms: &["stealth", "assassination", "heist", "espionage"],
+    },
+    // Sub-Genres & Structure (9)
+    GenreBitDef {
+        name: "Open World",
+        bit: 1u64 << 27,
+        synonyms: &["open world", "open-world", "open world survival craft"],
+    },
+    GenreBitDef {
+        name: "Souls-like",
+        bit: 1u64 << 28,
+        synonyms: &["souls-like", "soulslike", "soulsborne"],
+    },
+    GenreBitDef {
+        name: "Metroidvania",
+        bit: 1u64 << 29,
+        synonyms: &["metroidvania"],
+    },
+    GenreBitDef {
+        name: "Roguelike",
+        bit: 1u64 << 30,
+        synonyms: &[
+            "roguelike",
+            "roguelite",
+            "rogue-like",
+            "rogue-lite",
+            "action roguelike",
+            "roguelike deckbuilder",
+        ],
+    },
+    GenreBitDef {
+        name: "Tactical",
+        bit: 1u64 << 31,
+        synonyms: &[
+            "tactical",
+            "tactics",
+            "real time tactics",
+            "tactical rpg",
+            "turn-based tactics",
+        ],
+    },
+    GenreBitDef {
+        name: "Turn-Based",
+        bit: 1u64 << 32,
+        synonyms: &[
+            "turn-based",
+            "turn based",
+            "turn-based strategy",
+            "turn-based combat",
+            "turn-based tactics",
+        ],
+    },
+    GenreBitDef {
+        name: "Tower Defense",
+        bit: 1u64 << 33,
+        synonyms: &["tower defense", "tower-defense"],
+    },
+    GenreBitDef {
+        name: "Story Rich",
+        bit: 1u64 << 34,
+        synonyms: &[
+            "story rich",
+            "narrative",
+            "visual novel",
+            "interactive fiction",
+            "choices matter",
+        ],
+    },
+    GenreBitDef {
+        name: "Indie",
+        bit: 1u64 << 35,
+        synonyms: &["indie"],
+    },
 ];
+
 const FIELD_SEP: char = '\x1f';
 const LIST_SEP: char = '\x1e';
 
@@ -56,6 +384,7 @@ pub struct CatalogRecord {
     pub negative: u64,
     pub value_score: f64,
     pub updated_at: u64,
+    pub genre_bits: u64,
     pub appid: u32,
     pub price_cents: u32,
     pub initial_price_cents: u32,
@@ -66,7 +395,6 @@ pub struct CatalogRecord {
     pub tags_len: u32,
     pub meta_off: u32,
     pub meta_len: u32,
-    pub _reserved: u32,
 }
 
 #[repr(C)]
@@ -104,6 +432,10 @@ pub struct CatalogQueryParams {
     pub installed_app_ids: Vec<u32>,
     pub installed_titles_norm: Vec<String>,
     pub min_price_cents: u32,
+    pub price_tier: String,
+    pub min_rating_pct: u32,
+    pub min_reviews: u64,
+    pub player_mode: String,
     pub min_ccu: u64,
     pub genres: Vec<String>,
     pub offset: usize,
@@ -253,20 +585,56 @@ fn normalize_alnum_ascii(input: &str, scratch: &mut String) {
     }
 }
 
-fn pack_genre_bits(entry: &CatalogGameEntry) -> u32 {
+fn pack_genre_bits(entry: &CatalogGameEntry) -> u64 {
     let mut mask = GENRE_MASK_POPULATED;
-    for &(needle, bit) in &STANDARD_GENRE_BITS {
-        if entry
+    for def in &GENRE_BIT_DEFS {
+        let matched = entry
             .genres
             .iter()
             .chain(entry.tags.iter())
             .chain(entry.categories.iter())
-            .any(|item| contains_ignore_ascii_case(item, needle))
-        {
-            mask |= bit;
+            .any(|item| {
+                def.synonyms
+                    .iter()
+                    .any(|needle| contains_ignore_ascii_case(item, needle))
+            });
+        if matched {
+            mask |= def.bit;
         }
     }
     mask
+}
+
+#[inline]
+fn pack_title_8(bytes: &[u8], offset: usize) -> u64 {
+    let mut v = 0u64;
+    for i in 0..8 {
+        let b = bytes
+            .get(offset + i)
+            .copied()
+            .map(|c| c.to_ascii_lowercase())
+            .unwrap_or(0);
+        v = (v << 8) | (b as u64);
+    }
+    !v
+}
+
+#[inline]
+fn cmp_ignore_ascii_case(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut ia = a.bytes().map(|c| c.to_ascii_lowercase());
+    let mut ib = b.bytes().map(|c| c.to_ascii_lowercase());
+    loop {
+        match (ia.next(), ib.next()) {
+            (Some(ca), Some(cb)) => {
+                if ca != cb {
+                    return ca.cmp(&cb);
+                }
+            }
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (None, None) => return std::cmp::Ordering::Equal,
+        }
+    }
 }
 
 #[inline]
@@ -397,6 +765,7 @@ pub fn serialize_dkcat(cache: &CatalogCacheFile) -> Result<Vec<u8>, String> {
             negative: entry.negative,
             value_score: entry.value_score,
             updated_at: entry.updated_at,
+            genre_bits: pack_genre_bits(entry),
             appid: entry.app_id,
             price_cents: entry.price_cents,
             initial_price_cents: entry.initial_price_cents,
@@ -407,7 +776,6 @@ pub fn serialize_dkcat(cache: &CatalogCacheFile) -> Result<Vec<u8>, String> {
             tags_len,
             meta_off,
             meta_len,
-            _reserved: pack_genre_bits(entry),
         });
     }
 
@@ -764,12 +1132,11 @@ impl MappedCatalog {
             };
         }
 
-        let effective_min_price = if params.paid_only {
-            params.min_price_cents.max(1)
-        } else {
-            params.min_price_cents
-        };
         let min_ccu = params.min_ccu;
+        let price_tier = params.price_tier.trim();
+        let player_mode = params.player_mode.trim();
+        let min_rating_pct = params.min_rating_pct;
+        let min_reviews = params.min_reviews;
 
         let installed_ids: HashSet<u32> = if params.hide_installed {
             params.installed_app_ids.iter().copied().collect()
@@ -787,7 +1154,7 @@ impl MappedCatalog {
             HashSet::new()
         };
 
-        let mut req_standard_mask = 0u32;
+        let mut req_standard_mask = 0u64;
         let mut all_standard_genres = true;
         let mut all_genres_lower: Vec<String> = Vec::with_capacity(params.genres.len());
         for g in &params.genres {
@@ -795,8 +1162,11 @@ impl MappedCatalog {
             if low.is_empty() {
                 continue;
             }
-            if let Some(&(_, bit)) = STANDARD_GENRE_BITS.iter().find(|&&(name, _)| name == low) {
-                req_standard_mask |= bit;
+            if let Some(def) = GENRE_BIT_DEFS
+                .iter()
+                .find(|d| d.name.eq_ignore_ascii_case(&low))
+            {
+                req_standard_mask |= def.bit;
             } else {
                 all_standard_genres = false;
             }
@@ -886,26 +1256,77 @@ impl MappedCatalog {
                 continue;
             };
 
-            if params.paid_only && (rec.price_cents == 0 || (rec.flags & FLAG_IS_FREE) != 0) {
-                continue;
+            let is_free_rec = rec.price_cents == 0 || (rec.flags & FLAG_IS_FREE) != 0;
+            match price_tier {
+                "paid" => {
+                    if is_free_rec {
+                        continue;
+                    }
+                }
+                "free" => {
+                    if !is_free_rec {
+                        continue;
+                    }
+                }
+                "under_10" => {
+                    if is_free_rec || rec.price_cents > 1000 {
+                        continue;
+                    }
+                }
+                "under_20" => {
+                    if is_free_rec || rec.price_cents > 2000 {
+                        continue;
+                    }
+                }
+                "over_30" => {
+                    if is_free_rec || rec.price_cents < 3000 {
+                        continue;
+                    }
+                }
+                _ => {
+                    if params.paid_only && is_free_rec {
+                        continue;
+                    }
+                }
             }
-            if effective_min_price > 0 && rec.price_cents < effective_min_price {
+            if params.min_price_cents > 0 && rec.price_cents < params.min_price_cents {
                 continue;
             }
             if min_ccu > 0 && rec.ccu < min_ccu {
                 continue;
             }
+
+            let total_reviews = rec.positive.saturating_add(rec.negative);
+            if min_reviews > 0 && total_reviews < min_reviews {
+                continue;
+            }
+            if min_rating_pct > 0 {
+                if total_reviews == 0 {
+                    continue;
+                }
+                if (rec.positive as u128) * 100 < (min_rating_pct as u128) * (total_reviews as u128) {
+                    continue;
+                }
+            }
+
             if params.exclude_pvp && (rec.flags & FLAG_ONLINE_ONLY_PVP) != 0 {
                 continue;
             }
 
             let is_sp = (rec.flags & FLAG_SINGLEPLAYER) != 0;
             let is_coop = (rec.flags & FLAG_COOP) != 0;
-            let mode_ok = match (params.singleplayer, params.coop) {
-                (true, true) => is_sp || is_coop,
-                (true, false) => is_sp,
-                (false, true) => is_coop,
-                (false, false) => true,
+            let is_mp = (rec.flags & FLAG_MULTIPLAYER) != 0;
+            let mode_ok = match player_mode {
+                "singleplayer" => is_sp,
+                "coop" => is_coop,
+                "multiplayer" => is_mp,
+                "all" => true,
+                _ => match (params.singleplayer, params.coop) {
+                    (true, true) => is_sp || is_coop,
+                    (true, false) => is_sp,
+                    (false, true) => is_coop,
+                    (false, false) => true,
+                },
             };
             if !mode_ok {
                 continue;
@@ -921,8 +1342,8 @@ impl MappedCatalog {
             let mut cached_devs: Option<&str> = None;
 
             if !all_genres_lower.is_empty() {
-                if all_standard_genres && (rec._reserved & GENRE_MASK_POPULATED) != 0 {
-                    if (rec._reserved & req_standard_mask) == 0 {
+                if all_standard_genres && (rec.genre_bits & GENRE_MASK_POPULATED) != 0 {
+                    if (rec.genre_bits & req_standard_mask) != req_standard_mask {
                         continue;
                     }
                 } else {
@@ -940,7 +1361,7 @@ impl MappedCatalog {
                     cached_categories = Some(categories_str);
                     cached_devs = Some(devs_str);
 
-                    let genre_ok = all_genres_lower.iter().any(|g_low| {
+                    let genre_ok = all_genres_lower.iter().all(|g_low| {
                         contains_ignore_ascii_case(genres_str, g_low)
                             || contains_ignore_ascii_case(tags_str, g_low)
                             || contains_ignore_ascii_case(categories_str, g_low)
@@ -990,32 +1411,95 @@ impl MappedCatalog {
                 }
             }
 
+            let rating_tenths = if total_reviews > 0 {
+                ((rec.positive as u128 * 1000 + (total_reviews as u128 / 2))
+                    / total_reviews as u128) as u64
+            } else {
+                0
+            };
+
             let (k1, k2, k3) = match sort_mode {
-                "ccu" => (
+                "ccu_desc" | "ccu" => (
                     rec.ccu,
                     f64_to_sortable_u64(rec.value_score),
                     rec.owners_min,
                 ),
+                "rating_desc" | "rating" => (rating_tenths, total_reviews, rec.ccu),
+                "reviews_desc" => (total_reviews, rec.positive, rec.ccu),
+                "hidden_gems" => {
+                    let tier = if rating_tenths >= 880
+                        && total_reviews >= 20
+                        && rec.ccu <= 2_500
+                        && rec.owners_min <= 1_000_000
+                    {
+                        3u64
+                    } else if rating_tenths >= 880 && total_reviews >= 10 && rec.ccu <= 5_000 {
+                        2u64
+                    } else if rating_tenths >= 880 {
+                        1u64
+                    } else {
+                        0u64
+                    };
+                    let confidence_pts = if total_reviews > 0 {
+                        (((total_reviews.min(10_000) as f64) + 1.0).log10() * 350.0) as u64
+                    } else {
+                        0
+                    };
+                    let gem_score = rating_tenths
+                        .saturating_mul(10)
+                        .saturating_add(confidence_pts)
+                        .saturating_add(if rec.ccu > 0 && rec.ccu <= 2_500 {
+                            400
+                        } else {
+                            0
+                        });
+                    (tier, gem_score, u64::MAX - rec.ccu.min(u64::MAX - 1))
+                }
+                "trending" => {
+                    let ccu_pts = (((rec.ccu as f64) + 1.0).log10() * 1400.0) as u64;
+                    let recency_pts =
+                        (((rec.appid as f64).min(4_000_000.0) / 4_000_000.0) * 3200.0) as u64;
+                    let discount_pts = if ((rec.flags >> 8) & 0xFF) >= 20 { 450 } else { 0 };
+                    let rating_pts = if total_reviews >= 20 {
+                        rating_tenths * 2
+                    } else {
+                        0
+                    };
+                    let trend_score = if rec.ccu >= 10 {
+                        ccu_pts + recency_pts + discount_pts + rating_pts
+                    } else {
+                        ccu_pts + (rating_pts / 2)
+                    };
+                    (trend_score, rec.ccu, rec.appid as u64)
+                }
+                "price_desc" | "price" => (
+                    rec.price_cents as u64,
+                    f64_to_sortable_u64(rec.value_score),
+                    rec.ccu,
+                ),
+                "price_asc" => (
+                    u64::MAX - (rec.price_cents as u64),
+                    f64_to_sortable_u64(rec.value_score),
+                    rec.ccu,
+                ),
+                "newest_appid" => (
+                    rec.appid as u64,
+                    rec.ccu,
+                    f64_to_sortable_u64(rec.value_score),
+                ),
+                "title_asc" => {
+                    let nb = name_str.as_bytes();
+                    (
+                        pack_title_8(nb, 0),
+                        pack_title_8(nb, 8),
+                        pack_title_8(nb, 16),
+                    )
+                }
                 "owners" => (
                     rec.owners_min.saturating_add(rec.owners_max),
                     rec.ccu,
                     f64_to_sortable_u64(rec.value_score),
                 ),
-                "price" => (
-                    rec.price_cents as u64,
-                    f64_to_sortable_u64(rec.value_score),
-                    rec.ccu,
-                ),
-                "rating" => {
-                    let total_reviews = rec.positive.saturating_add(rec.negative);
-                    let rating_tenths = if total_reviews > 0 {
-                        ((rec.positive as u128 * 1000 + (total_reviews as u128 / 2))
-                            / total_reviews as u128) as u64
-                    } else {
-                        0
-                    };
-                    (rating_tenths, total_reviews, rec.ccu)
-                }
                 "relevancy" => {
                     let rank = compute_relevancy_rank(name_str, &q_lower, &q_tokens);
                     (rank, f64_to_sortable_u64(rec.value_score), rec.ccu)
@@ -1036,11 +1520,30 @@ impl MappedCatalog {
         }
 
         let total_matches = matched.len();
+        let is_title_asc = sort_mode == "title_asc";
         let cmp_desc = |a: &CandidateKey, b: &CandidateKey| {
-            b.k1.cmp(&a.k1)
+            let ord = b
+                .k1
+                .cmp(&a.k1)
                 .then_with(|| b.k2.cmp(&a.k2))
-                .then_with(|| b.k3.cmp(&a.k3))
-                .then_with(|| a.rec_idx.cmp(&b.rec_idx))
+                .then_with(|| b.k3.cmp(&a.k3));
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+            if is_title_asc {
+                if let (Ok(ra), Ok(rb)) = (
+                    self.read_record(a.rec_idx as usize),
+                    self.read_record(b.rec_idx as usize),
+                ) {
+                    let na = self.pool_str(ra.name_off, ra.name_len);
+                    let nb = self.pool_str(rb.name_off, rb.name_len);
+                    let tie = cmp_ignore_ascii_case(na, nb);
+                    if tie != std::cmp::Ordering::Equal {
+                        return tie;
+                    }
+                }
+            }
+            a.rec_idx.cmp(&b.rec_idx)
         };
 
         let end = offset.saturating_add(limit).min(total_matches);
@@ -1639,6 +2142,283 @@ mod tests {
             tri_page.query_time_us < 5000,
             "30k trigram query took {} us (expected < 5000 us)",
             tri_page.query_time_us
+        );
+
+        drop(mapped);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dkcat_36_genre_bitmask_quantitative_filters_and_10_sorts() {
+        let dir = std::env::temp_dir().join(format!(
+            "duke_dkcat_36g_test_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dkcat_path = dir.join("catalog.dkcat");
+
+        let make_entry = |app_id: u32,
+                          name: &str,
+                          price_cents: u32,
+                          ccu: u64,
+                          positive: u64,
+                          negative: u64,
+                          owners_min: u64,
+                          value_score: f64,
+                          is_sp: bool,
+                          is_coop: bool,
+                          is_mp: bool,
+                          genres: Vec<&str>,
+                          tags: Vec<&str>| {
+            let total = positive + negative;
+            let review_pct = if total > 0 {
+                ((positive as f64 / total as f64) * 1000.0).round() / 10.0
+            } else {
+                0.0
+            };
+            CatalogGameEntry {
+                app_id,
+                name: name.to_string(),
+                price_cents,
+                initial_price_cents: price_cents,
+                discount_percent: 0,
+                price_formatted: if price_cents == 0 {
+                    "Free".to_string()
+                } else {
+                    format!("${:.2}", price_cents as f64 / 100.0)
+                },
+                is_free: price_cents == 0,
+                ccu,
+                owners_min,
+                owners_max: owners_min * 2,
+                owners_label: "100K - 200K".to_string(),
+                positive,
+                negative,
+                review_pct,
+                is_singleplayer: is_sp,
+                is_coop,
+                is_multiplayer: is_mp,
+                is_online_only_pvp: false,
+                genres: genres.into_iter().map(String::from).collect(),
+                tags: tags.into_iter().map(String::from).collect(),
+                categories: Vec::new(),
+                short_description: String::new(),
+                developers: vec!["Duke Studio".to_string()],
+                publishers: vec!["Duke Pub".to_string()],
+                release_date: String::new(),
+                cover_url: String::new(),
+                header_url: String::new(),
+                hero_url: String::new(),
+                value_score,
+                details_enriched: true,
+                updated_at: 1_700_000_000,
+            }
+        };
+
+        let entries = vec![
+            // Engineering + Sandbox + Singleplayer (via synonyms Space Sim & Moddable), Hidden Gem (95%+, low CCU)
+            make_entry(
+                220200,
+                "Orbital Rocket Lab",
+                1999,
+                420,
+                1900,
+                100,
+                200_000,
+                91.2,
+                true,
+                false,
+                false,
+                vec!["Simulation", "Indie"],
+                vec!["Space Sim", "Moddable", "Physics"],
+            ),
+            // Engineering + Automation + Co-op, Mega Hit (98%+, high CCU & reviews)
+            make_entry(
+                427520,
+                "Factory Blueprint",
+                3499,
+                45000,
+                196_000,
+                4_000,
+                5_000_000,
+                98.5,
+                true,
+                true,
+                true,
+                vec!["Strategy", "Simulation"],
+                vec!["Automation", "Base Building", "Logistics"],
+            ),
+            // Sandbox + Survival + Crafting, Free, Mixed Rating (72%)
+            make_entry(
+                1500000,
+                "Alpha Voxel World",
+                0,
+                1200,
+                720,
+                280,
+                500_000,
+                42.0,
+                true,
+                true,
+                true,
+                vec!["Adventure"],
+                vec!["Open World Survival Craft", "Sandbox"],
+            ),
+            // Souls-like + Metroidvania + Action, Under $10, Newest AppID, Trending
+            make_entry(
+                3100000,
+                "Zeta Hollow Blade",
+                899,
+                8500,
+                1350,
+                150,
+                200_000,
+                88.0,
+                true,
+                false,
+                false,
+                vec!["Action"],
+                vec!["Souls-like", "Metroidvania", "Roguelike"],
+            ),
+        ];
+
+        assert_eq!(GENRE_BIT_DEFS.len(), 36);
+        let cache = CatalogCacheFile {
+            fetched_at: 1_700_000_100,
+            fetched_pages: vec![0],
+            entries,
+        };
+        let bytes = serialize_dkcat(&cache).unwrap();
+        fs::write(&dkcat_path, bytes).unwrap();
+        let mapped = MappedCatalog::open(&dkcat_path).unwrap();
+
+        // 1. Multi-genre bitwise intersection: Engineering + Sandbox + Singleplayer
+        let eng_sb = mapped.query(&CatalogQueryParams {
+            genres: vec!["Engineering".to_string(), "Sandbox".to_string()],
+            player_mode: "singleplayer".to_string(),
+            sort_by: "value_score".to_string(),
+            limit: 60,
+            ..CatalogQueryParams::default()
+        });
+        assert_eq!(eng_sb.total_matches, 1);
+        assert_eq!(eng_sb.items[0].app_id, 220200);
+
+        // 2. Engineering single tag matches both Orbital Rocket Lab (Space Sim) and Factory Blueprint (Automation + Base Building)
+        let eng_only = mapped.query(&CatalogQueryParams {
+            genres: vec!["Engineering".to_string()],
+            limit: 60,
+            ..CatalogQueryParams::default()
+        });
+        assert_eq!(eng_only.total_matches, 2);
+
+        // 3. Hidden Gems puts Orbital Rocket Lab (95%+, 2000 reviews, CCU 420) ahead of mega-hit Factory Blueprint (CCU 45000) and <88% Alpha Voxel World
+        let gems = mapped.query(&CatalogQueryParams {
+            sort_by: "hidden_gems".to_string(),
+            limit: 60,
+            ..CatalogQueryParams::default()
+        });
+        assert_eq!(gems.items[0].app_id, 220200);
+
+        // 4. Review Score (% Positive) puts Factory Blueprint (98.0%) first
+        let by_rating = mapped.query(&CatalogQueryParams {
+            sort_by: "rating_desc".to_string(),
+            limit: 60,
+            ..CatalogQueryParams::default()
+        });
+        assert_eq!(by_rating.items[0].app_id, 427520);
+        assert_eq!(by_rating.items.last().unwrap().app_id, 1500000);
+
+        // 5. Title A->Z puts Alpha Voxel World first and Zeta Hollow Blade last
+        let by_title = mapped.query(&CatalogQueryParams {
+            sort_by: "title_asc".to_string(),
+            limit: 60,
+            ..CatalogQueryParams::default()
+        });
+        assert_eq!(by_title.items[0].name, "Alpha Voxel World");
+        assert_eq!(by_title.items.last().unwrap().name, "Zeta Hollow Blade");
+
+        // 6. Price Asc puts Free first, then $8.99; Price Desc puts $34.99 first
+        let by_price_asc = mapped.query(&CatalogQueryParams {
+            sort_by: "price_asc".to_string(),
+            limit: 60,
+            ..CatalogQueryParams::default()
+        });
+        assert_eq!(by_price_asc.items[0].app_id, 1500000);
+        assert_eq!(by_price_asc.items[1].app_id, 3100000);
+
+        let by_price_desc = mapped.query(&CatalogQueryParams {
+            sort_by: "price_desc".to_string(),
+            limit: 60,
+            ..CatalogQueryParams::default()
+        });
+        assert_eq!(by_price_desc.items[0].app_id, 427520);
+
+        // 7. Newest AppID puts 3100000 first
+        let newest = mapped.query(&CatalogQueryParams {
+            sort_by: "newest_appid".to_string(),
+            limit: 60,
+            ..CatalogQueryParams::default()
+        });
+        assert_eq!(newest.items[0].app_id, 3100000);
+
+        // 8. Quantitative filters: under_10, free, over_30, min_rating_pct=95, min_reviews=10000, min_ccu=5000, hide_installed
+        assert_eq!(
+            mapped
+                .query(&CatalogQueryParams {
+                    price_tier: "under_10".to_string(),
+                    ..CatalogQueryParams::default()
+                })
+                .items
+                .into_iter()
+                .map(|e| e.app_id)
+                .collect::<Vec<_>>(),
+            vec![3100000]
+        );
+        assert_eq!(
+            mapped
+                .query(&CatalogQueryParams {
+                    price_tier: "free".to_string(),
+                    ..CatalogQueryParams::default()
+                })
+                .items
+                .into_iter()
+                .map(|e| e.app_id)
+                .collect::<Vec<_>>(),
+            vec![1500000]
+        );
+        assert_eq!(
+            mapped
+                .query(&CatalogQueryParams {
+                    price_tier: "over_30".to_string(),
+                    ..CatalogQueryParams::default()
+                })
+                .items
+                .into_iter()
+                .map(|e| e.app_id)
+                .collect::<Vec<_>>(),
+            vec![427520]
+        );
+        assert_eq!(
+            mapped
+                .query(&CatalogQueryParams {
+                    min_rating_pct: 95,
+                    min_reviews: 10_000,
+                    min_ccu: 5_000,
+                    ..CatalogQueryParams::default()
+                })
+                .total_matches,
+            1
+        );
+        assert_eq!(
+            mapped
+                .query(&CatalogQueryParams {
+                    hide_installed: true,
+                    installed_app_ids: vec![427520],
+                    ..CatalogQueryParams::default()
+                })
+                .total_matches,
+            3
         );
 
         drop(mapped);

@@ -111,6 +111,10 @@ export async function queryCatalogMmap(params) {
   return invokeCommand("query_catalog_mmap", { params });
 }
 
+export async function applyWindowBackdrop(themeId) {
+  return invokeCommand("apply_window_backdrop", { themeId: String(themeId || "dark") });
+}
+
 export async function enrichCatalogQuery(query) {
   return invokeCommand("enrich_catalog_query", { query: String(query || "") });
 }
@@ -594,5 +598,6 @@ export const THEME_PRESETS = [
   { id: "terminal", name: "Retro CRT Amber", desc: "Phosphor oscilloscope sweep with scanline grid" },
   { id: "crimson", name: "Redline Carbon", desc: "Woven carbon texture and high-RPM redline arc" },
   { id: "ocean", name: "Abyssal Ocean", desc: "Deep-sea trench contours and sonar telemetry" },
-  { id: "frost", name: "Nordic Frost", desc: "Arctic aurora ribbons over alpine peaks" }
+  { id: "frost", name: "Nordic Frost", desc: "Arctic aurora ribbons over alpine peaks" },
+  { id: "frosted-obsidian", name: "Obsidian Frosted Glass", desc: "Translucent Windows 11 acrylic backdrop with frosted glass panels" }
 ];

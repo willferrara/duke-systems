@@ -2,6 +2,7 @@ import {
   THEME_PRESETS,
   addSearchSite,
   applyCustomArtwork,
+  applyWindowBackdrop,
   beamGameFromPeer,
   buildDirectorySearchUrl,
   bulkImportSearchSites,
@@ -87,15 +88,21 @@ const SUPPORTED_ARCHIVE_EXT_RE = /\.(zip|rar|7z|exe|msi|iso)$/i;
 
 const DEFAULT_CATALOG_FILTERS = Object.freeze({
   searchQuery: "",
-  sortBy: "value",
-  paidOnly: true,
-  singleplayer: true,
-  coop: true,
-  excludePvp: true,
+  sortBy: "value_score",
+  priceTier: "all",
+  minRatingPct: 0,
+  minReviews: 0,
+  playerMode: "all",
+  paidOnly: false,
+  singleplayer: false,
+  coop: false,
+  excludePvp: false,
   hideInstalled: false,
-  minPriceCents: 1,
+  minPriceCents: 0,
   minCcu: 0,
-  selectedGenres: []
+  selectedGenres: [],
+  tagSearch: "",
+  genresDrawerOpen: false
 });
 
 const state = {
@@ -211,6 +218,7 @@ function applyTheme(themeId) {
   state.activeTheme = valid;
   document.body.setAttribute("data-theme", valid);
   localStorage.setItem("duke_launcher_theme", valid);
+  applyWindowBackdrop(valid).catch(() => {});
 }
 
 function renderThemes() {
@@ -1233,17 +1241,23 @@ function isCatalogGameInstalled(entry, matchers) {
 function buildCatalogQueryParams(offset = 0) {
   const c = state.catalog;
   const matchers = getInstalledCatalogMatchers();
+  const priceTier = String(c.priceTier || "all");
+  const playerMode = String(c.playerMode || "all");
   return {
     query: String(c.searchQuery || "").trim(),
-    sortBy: c.sortBy || "value",
-    paidOnly: Boolean(c.paidOnly),
-    singleplayer: Boolean(c.singleplayer),
-    coop: Boolean(c.coop),
+    sortBy: c.sortBy || "value_score",
+    paidOnly: priceTier === "paid",
+    singleplayer: playerMode === "singleplayer",
+    coop: playerMode === "coop",
     excludePvp: Boolean(c.excludePvp),
     hideInstalled: Boolean(c.hideInstalled),
     installedAppIds: c.hideInstalled ? Array.from(matchers.appIds) : [],
     installedTitlesNorm: c.hideInstalled ? Array.from(matchers.titles) : [],
     minPriceCents: Number(c.minPriceCents || 0),
+    priceTier,
+    minRatingPct: Number(c.minRatingPct || 0),
+    minReviews: Number(c.minReviews || 0),
+    playerMode,
     minCcu: Number(c.minCcu || 0),
     genres: Array.isArray(c.selectedGenres) ? [...c.selectedGenres] : [],
     offset: Math.max(0, Number(offset || 0)),
@@ -1350,12 +1364,12 @@ function updateCatalogResultsSummary() {
     if (c.loading && c.totalCached === 0 && c.renderedCount === 0) {
       summary.textContent = "Indexing SteamSpy & Steam Store catalog...";
     } else {
-      const presetActive = c.paidOnly && c.singleplayer && c.coop && c.excludePvp;
-      const presetTag = presetActive ? " · Preset: Paid SP / Co-op Value" : "";
+      const shownCount = Math.min(c.renderedCount, c.totalMatches);
+      const indexedDisplay = Math.max(c.totalCached, c.totalMatches).toLocaleString();
       const liveTag = c.enrichingLive ? " · Querying live Steam Store..." : "";
       const latencyTag =
         c.lastQueryTimeUs > 0 ? ` · ${(c.lastQueryTimeUs / 1000).toFixed(2)} ms` : "";
-      summary.textContent = `${c.totalMatches.toLocaleString()} matching titles · Showing ${Math.min(c.renderedCount, c.totalMatches).toLocaleString()} of ${c.totalCached.toLocaleString()} indexed${presetTag}${latencyTag}${liveTag}`;
+      summary.textContent = `Showing ${shownCount.toLocaleString()} of ${c.totalMatches.toLocaleString()} matching titles across ${indexedDisplay} indexed${latencyTag}${liveTag}`;
     }
   }
 
@@ -1548,21 +1562,73 @@ function syncCatalogFilterControlsToDom() {
     el("input-catalog-search").value = c.searchQuery;
   }
   if (el("select-catalog-sort")) el("select-catalog-sort").value = c.sortBy;
-  if (el("select-catalog-min-price")) el("select-catalog-min-price").value = String(c.minPriceCents);
+  if (el("select-catalog-price-tier")) el("select-catalog-price-tier").value = c.priceTier;
+  if (el("select-catalog-min-rating")) el("select-catalog-min-rating").value = String(c.minRatingPct);
+  if (el("select-catalog-min-reviews")) el("select-catalog-min-reviews").value = String(c.minReviews);
+  if (el("select-catalog-player-mode")) el("select-catalog-player-mode").value = c.playerMode;
   if (el("select-catalog-min-ccu")) el("select-catalog-min-ccu").value = String(c.minCcu);
 
-  document.querySelectorAll("#catalog-mode-toggles .filter-pill[data-catalog-mode]").forEach((btn) => {
-    const key = btn.dataset.catalogMode;
-    btn.classList.toggle("active", Boolean(c[key]));
+  const hideBtn = el("btn-catalog-hide-installed");
+  if (hideBtn) {
+    const active = Boolean(c.hideInstalled);
+    hideBtn.classList.toggle("active", active);
+    hideBtn.setAttribute("aria-pressed", active ? "true" : "false");
+  }
+
+  const drawer = el("catalog-genres-drawer");
+  const toggleBtn = el("btn-toggle-catalog-genres");
+  const drawerBody = el("catalog-genres-drawer-body");
+  const isOpen = Boolean(c.genresDrawerOpen);
+  if (drawer) drawer.classList.toggle("is-open", isOpen);
+  if (toggleBtn) toggleBtn.setAttribute("aria-expanded", isOpen ? "true" : "false");
+  if (drawerBody) drawerBody.classList.toggle("hidden", !isOpen);
+
+  const selected = Array.isArray(c.selectedGenres) ? c.selectedGenres : [];
+  const countBadge = el("catalog-genre-count-badge");
+  if (countBadge) {
+    countBadge.textContent = `${selected.length} Selected`;
+    countBadge.classList.toggle("accent", selected.length > 0);
+  }
+
+  const clearBtn = el("btn-catalog-clear-genres");
+  if (clearBtn) {
+    clearBtn.classList.toggle("hidden", selected.length === 0 && !String(c.tagSearch || "").trim());
+  }
+
+  const preview = el("catalog-active-genres-preview");
+  if (preview) {
+    if (selected.length === 0) {
+      preview.innerHTML = `<span class="panel-sub">Click to combine 36 genres &amp; technical tags in O(1) bitmask speed</span>`;
+    } else {
+      preview.innerHTML = selected
+        .map(
+          (g) => `
+            <button type="button" class="catalog-active-chip" data-remove-genre="${escapeHtml(g)}" title="Remove ${escapeHtml(g)} filter">
+              <span>${escapeHtml(g)}</span>
+              <svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg>
+            </button>
+          `
+        )
+        .join("");
+    }
+  }
+
+  const tagInput = el("input-catalog-tag-filter");
+  if (tagInput && tagInput.value !== (c.tagSearch || "")) {
+    tagInput.value = c.tagSearch || "";
+  }
+  const tagFilterLower = String(c.tagSearch || "").trim().toLowerCase();
+
+  document.querySelectorAll("#catalog-genre-groups .catalog-tag-pill[data-catalog-genre]").forEach((btn) => {
+    const g = btn.dataset.catalogGenre || "";
+    btn.classList.toggle("active", selected.includes(g));
+    const matchesSearch = !tagFilterLower || g.toLowerCase().includes(tagFilterLower);
+    btn.classList.toggle("hidden", !matchesSearch);
   });
 
-  document.querySelectorAll("#catalog-genre-pills .filter-pill[data-catalog-genre]").forEach((btn) => {
-    const g = btn.dataset.catalogGenre;
-    if (g === "all") {
-      btn.classList.toggle("active", c.selectedGenres.length === 0);
-    } else {
-      btn.classList.toggle("active", c.selectedGenres.includes(g));
-    }
+  document.querySelectorAll("#catalog-genre-groups .catalog-genre-group").forEach((group) => {
+    const visiblePills = group.querySelectorAll(".catalog-tag-pill:not(.hidden)");
+    group.classList.toggle("hidden", visiblePills.length === 0);
   });
 }
 
@@ -2417,16 +2483,29 @@ function wireEvents() {
     renderCatalogView(true);
   });
 
-  el("select-catalog-min-price")?.addEventListener("change", (e) => {
-    const val = Number(e.target.value || 0);
-    state.catalog.minPriceCents = val;
-    if (val === 0 && state.catalog.paidOnly) {
-      state.catalog.paidOnly = false;
-      syncCatalogFilterControlsToDom();
-    } else if (val >= 1 && !state.catalog.paidOnly) {
-      state.catalog.paidOnly = true;
-      syncCatalogFilterControlsToDom();
-    }
+  el("select-catalog-price-tier")?.addEventListener("change", (e) => {
+    const tier = e.target.value || "all";
+    state.catalog.priceTier = tier;
+    state.catalog.paidOnly = tier === "paid";
+    state.catalog.minPriceCents = 0;
+    renderCatalogView(true);
+  });
+
+  el("select-catalog-min-rating")?.addEventListener("change", (e) => {
+    state.catalog.minRatingPct = Number(e.target.value || 0);
+    renderCatalogView(true);
+  });
+
+  el("select-catalog-min-reviews")?.addEventListener("change", (e) => {
+    state.catalog.minReviews = Number(e.target.value || 0);
+    renderCatalogView(true);
+  });
+
+  el("select-catalog-player-mode")?.addEventListener("change", (e) => {
+    const mode = e.target.value || "all";
+    state.catalog.playerMode = mode;
+    state.catalog.singleplayer = mode === "singleplayer";
+    state.catalog.coop = mode === "coop";
     renderCatalogView(true);
   });
 
@@ -2435,40 +2514,70 @@ function wireEvents() {
     renderCatalogView(true);
   });
 
-  el("catalog-mode-toggles")?.addEventListener("click", (e) => {
-    const pill = e.target.closest(".filter-pill[data-catalog-mode]");
+  el("btn-catalog-hide-installed")?.addEventListener("click", () => {
+    state.catalog.hideInstalled = !state.catalog.hideInstalled;
+    syncCatalogFilterControlsToDom();
+    renderCatalogView(true);
+  });
+
+  el("btn-toggle-catalog-genres")?.addEventListener("click", () => {
+    state.catalog.genresDrawerOpen = !state.catalog.genresDrawerOpen;
+    syncCatalogFilterControlsToDom();
+    if (state.catalog.genresDrawerOpen) {
+      el("input-catalog-tag-filter")?.focus();
+    }
+  });
+
+  el("input-catalog-tag-filter")?.addEventListener("input", (e) => {
+    state.catalog.tagSearch = e.target.value || "";
+    syncCatalogFilterControlsToDom();
+  });
+
+  el("catalog-genre-groups")?.addEventListener("click", (e) => {
+    const pill = e.target.closest(".catalog-tag-pill[data-catalog-genre]");
     if (!pill) return;
-    const key = pill.dataset.catalogMode;
-    state.catalog[key] = !state.catalog[key];
-    if (key === "paidOnly") {
-      state.catalog.minPriceCents = state.catalog.paidOnly
-        ? Math.max(1, Number(state.catalog.minPriceCents || 0))
-        : 0;
+    const genre = pill.dataset.catalogGenre;
+    if (!genre) return;
+    const idx = state.catalog.selectedGenres.indexOf(genre);
+    if (idx >= 0) {
+      state.catalog.selectedGenres.splice(idx, 1);
+    } else {
+      state.catalog.selectedGenres.push(genre);
     }
     syncCatalogFilterControlsToDom();
     renderCatalogView(true);
   });
 
-  el("catalog-genre-pills")?.addEventListener("click", (e) => {
-    const pill = e.target.closest(".filter-pill[data-catalog-genre]");
-    if (!pill) return;
-    const genre = pill.dataset.catalogGenre;
-    if (genre === "all") {
-      state.catalog.selectedGenres = [];
-    } else {
-      const idx = state.catalog.selectedGenres.indexOf(genre);
-      if (idx >= 0) {
-        state.catalog.selectedGenres.splice(idx, 1);
-      } else {
-        state.catalog.selectedGenres.push(genre);
-      }
+  el("catalog-active-genres-preview")?.addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-remove-genre]");
+    if (!chip) return;
+    const genre = chip.dataset.removeGenre;
+    const idx = state.catalog.selectedGenres.indexOf(genre);
+    if (idx >= 0) {
+      state.catalog.selectedGenres.splice(idx, 1);
+      syncCatalogFilterControlsToDom();
+      renderCatalogView(true);
     }
+  });
+
+  el("btn-catalog-clear-genres")?.addEventListener("click", () => {
+    state.catalog.selectedGenres = [];
+    state.catalog.tagSearch = "";
     syncCatalogFilterControlsToDom();
     renderCatalogView(true);
   });
 
   el("btn-catalog-reset-filters")?.addEventListener("click", () => {
-    Object.assign(state.catalog, { ...DEFAULT_CATALOG_FILTERS, selectedGenres: [] });
+    const keepOpen = Boolean(state.catalog.genresDrawerOpen);
+    Object.assign(state.catalog, {
+      ...DEFAULT_CATALOG_FILTERS,
+      selectedGenres: [],
+      genresDrawerOpen: keepOpen
+    });
+    if (el("search-input") && state.activeTab === "catalog") {
+      el("search-input").value = "";
+      state.searchQuery = "";
+    }
     syncCatalogFilterControlsToDom();
     renderCatalogView(true);
   });

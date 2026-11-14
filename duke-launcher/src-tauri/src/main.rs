@@ -167,6 +167,116 @@ extern "system" {
     ) -> u32;
 }
 
+const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
+const DWMSBT_NONE: i32 = 1;
+const DWMSBT_TRANSIENTWINDOW: i32 = 3;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DwmMargins {
+    cx_left_width: i32,
+    cx_right_width: i32,
+    cy_top_height: i32,
+    cy_bottom_height: i32,
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "dwmapi")]
+extern "system" {
+    fn DwmSetWindowAttribute(
+        hwnd: isize,
+        dw_attribute: u32,
+        pv_attribute: *const core::ffi::c_void,
+        cb_attribute: u32,
+    ) -> i32;
+    fn DwmExtendFrameIntoClientArea(hwnd: isize, p_mar_inset: *const DwmMargins) -> i32;
+}
+
+#[inline]
+pub(crate) fn resolve_backdrop_type_for_theme(theme_id: &str) -> i32 {
+    if theme_id.trim().eq_ignore_ascii_case("frosted-obsidian") {
+        DWMSBT_TRANSIENTWINDOW
+    } else {
+        DWMSBT_NONE
+    }
+}
+
+fn apply_backdrop_with<FAttr, FMargin>(
+    hwnd: isize,
+    theme_id: &str,
+    mut set_attr: FAttr,
+    mut extend_margins: FMargin,
+) -> Result<i32, String>
+where
+    FAttr: FnMut(isize, u32, i32) -> i32,
+    FMargin: FnMut(isize, DwmMargins) -> i32,
+{
+    if hwnd == 0 {
+        return Err("Invalid window handle (HWND = 0)".to_string());
+    }
+    let backdrop_type = resolve_backdrop_type_for_theme(theme_id);
+    let dark_mode: i32 = if theme_id.trim().eq_ignore_ascii_case("light") {
+        0
+    } else {
+        1
+    };
+    let _ = set_attr(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, dark_mode);
+    let margins = if backdrop_type == DWMSBT_TRANSIENTWINDOW {
+        DwmMargins {
+            cx_left_width: -1,
+            cx_right_width: -1,
+            cy_top_height: -1,
+            cy_bottom_height: -1,
+        }
+    } else {
+        DwmMargins {
+            cx_left_width: 0,
+            cx_right_width: 0,
+            cy_top_height: 0,
+            cy_bottom_height: 0,
+        }
+    };
+    let _ = extend_margins(hwnd, margins);
+    let _hr = set_attr(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, backdrop_type);
+    Ok(backdrop_type)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn apply_backdrop_to_hwnd(hwnd: isize, theme_id: &str) -> Result<i32, String> {
+    apply_backdrop_with(
+        hwnd,
+        theme_id,
+        |h, attr, val| unsafe {
+            DwmSetWindowAttribute(
+                h,
+                attr,
+                (&val as *const i32).cast::<core::ffi::c_void>(),
+                core::mem::size_of::<i32>() as u32,
+            )
+        },
+        |h, margins| unsafe { DwmExtendFrameIntoClientArea(h, &margins) },
+    )
+}
+
+#[tauri::command]
+fn apply_window_backdrop(app: AppHandle, theme_id: String) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("main") {
+        #[cfg(target_os = "windows")]
+        {
+            let hwnd = win
+                .hwnd()
+                .map_err(|e| format!("Failed to read main window HWND: {e}"))?;
+            let _ = apply_backdrop_to_hwnd(hwnd.0 as isize, &theme_id)?;
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (win, theme_id);
+        }
+    }
+    Ok(())
+}
+
 /// Native Windows 11 working-set RAM trimmer via `duke-core`.
 pub fn trim_process_working_set() {
     duke_core::win32_ffi::trim_current_working_set();
@@ -8811,17 +8921,28 @@ async fn enrich_catalog_entry_from_steam(
     Some(target)
 }
 
-const CATALOG_GENRE_QUERIES: [(&str, &str, bool); 10] = [
+const CATALOG_GENRE_QUERIES: [(&str, &str, bool); 21] = [
     ("Action", "Action", false),
     ("Adventure", "Adventure", false),
     ("RPG", "RPG", false),
     ("Simulation", "Simulation", false),
-    ("Open+World", "Open World", true),
-    ("Horror", "Horror", true),
-    ("Survival", "Survival", true),
     ("Indie", "Indie", false),
     ("Racing", "Racing", false),
     ("Strategy", "Strategy", false),
+    ("Engineering", "Engineering", true),
+    ("Sandbox", "Sandbox", true),
+    ("Automation", "Automation", true),
+    ("Physics", "Physics", true),
+    ("Space", "Space", true),
+    ("Building", "Building", true),
+    ("Survival", "Survival", true),
+    ("Crafting", "Crafting", true),
+    ("City+Builder", "City Builder", true),
+    ("Open+World", "Open World", true),
+    ("Horror", "Horror", true),
+    ("Souls-like", "Souls-like", true),
+    ("Metroidvania", "Metroidvania", true),
+    ("Roguelike", "Roguelike", true),
 ];
 
 struct CatalogSyncActiveGuard;
@@ -9100,7 +9221,7 @@ async fn run_catalog_background_harvest(job: BackgroundHarvestJob) {
             let take_genres = if chunk_idx + 1 == total_chunks {
                 CATALOG_GENRE_QUERIES.len() - genre_idx
             } else {
-                2.min(CATALOG_GENRE_QUERIES.len() - genre_idx)
+                4.min(CATALOG_GENRE_QUERIES.len() - genre_idx)
             };
             for &(q_tag, display_genre, is_tag_only) in
                 &CATALOG_GENRE_QUERIES[genre_idx..genre_idx + take_genres]
@@ -10028,6 +10149,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            apply_window_backdrop,
             enqueue_download,
             install_downloaded_job,
             clear_completed_downloads,
@@ -10431,5 +10553,99 @@ mod tests {
             .iter()
             .any(|d| d.contains("Shannon Entropy:") && d.contains("bits/byte")));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_apply_window_backdrop_attributes() {
+        assert_eq!(
+            resolve_backdrop_type_for_theme("frosted-obsidian"),
+            DWMSBT_TRANSIENTWINDOW
+        );
+        for solid in [
+            "dark",
+            "light",
+            "minecraft",
+            "sunset",
+            "aerospace",
+            "cyberpunk",
+            "terminal",
+            "crimson",
+            "ocean",
+            "frost",
+        ] {
+            assert_eq!(resolve_backdrop_type_for_theme(solid), DWMSBT_NONE);
+        }
+
+        // Invalid HWND guard
+        let err = apply_backdrop_with(0, "frosted-obsidian", |_, _, _| 0, |_, _| 0).unwrap_err();
+        assert!(err.contains("HWND"));
+
+        // Verify exact Win32 DwmSetWindowAttribute + margin values for frosted-obsidian
+        let mut attrs = Vec::new();
+        let mut margins_log = Vec::new();
+        let chosen = apply_backdrop_with(
+            0x1234isize,
+            "frosted-obsidian",
+            |_, attr, val| {
+                attrs.push((attr, val));
+                0
+            },
+            |_, m| {
+                margins_log.push(m);
+                0
+            },
+        )
+        .unwrap();
+        assert_eq!(chosen, DWMSBT_TRANSIENTWINDOW);
+        assert_eq!(
+            attrs,
+            vec![
+                (DWMWA_USE_IMMERSIVE_DARK_MODE, 1),
+                (DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW),
+            ]
+        );
+        assert_eq!(
+            margins_log,
+            vec![DwmMargins {
+                cx_left_width: -1,
+                cx_right_width: -1,
+                cy_top_height: -1,
+                cy_bottom_height: -1,
+            }]
+        );
+
+        // Verify opaque reset for solid themes
+        attrs.clear();
+        margins_log.clear();
+        let solid_chosen = apply_backdrop_with(
+            0x1234isize,
+            "dark",
+            |_, attr, val| {
+                attrs.push((attr, val));
+                0
+            },
+            |_, m| {
+                margins_log.push(m);
+                0
+            },
+        )
+        .unwrap();
+        assert_eq!(solid_chosen, DWMSBT_NONE);
+        assert_eq!(
+            attrs,
+            vec![
+                (DWMWA_USE_IMMERSIVE_DARK_MODE, 1),
+                (DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE),
+            ]
+        );
+        assert_eq!(
+            margins_log,
+            vec![DwmMargins {
+                cx_left_width: 0,
+                cx_right_width: 0,
+                cy_top_height: 0,
+                cy_bottom_height: 0,
+            }]
+        );
     }
 }

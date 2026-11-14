@@ -19,8 +19,8 @@
         "resizable": true,
         "fullscreen": false,
         "decorations": false,
-        "center": true,
-        "backgroundColor": "#0e1116"
+        "transparent": true,
+        "center": true
       }
     ],
     "security": {

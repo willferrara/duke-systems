@@ -277,7 +277,7 @@ fn bench_dkcat_mmap() -> Result<(u32, f64, f64, usize), String> {
 
     let query_params = CatalogQueryParams {
         query: "elden ring".to_string(),
-        sort_by: "value".to_string(),
+        sort_by: "value_score".to_string(),
         paid_only: true,
         singleplayer: true,
         coop: true,
@@ -290,6 +290,7 @@ fn bench_dkcat_mmap() -> Result<(u32, f64, f64, usize), String> {
         genres: Vec::new(),
         offset: 0,
         limit: 60,
+        ..CatalogQueryParams::default()
     };
 
     // Warm once to fault trigram index pages before timing steady-state queries.

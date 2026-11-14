@@ -455,7 +455,8 @@
                 </div>
                 <div class="catalog-head-actions">
                   <button type="button" class="btn btn-secondary btn-sm" id="btn-catalog-reset-filters">
-                    <span>Reset Preset</span>
+                    <svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg>
+                    <span>Clear Filters</span>
                   </button>
                   <button type="button" class="btn btn-secondary btn-sm" id="btn-catalog-refresh">
                     <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
@@ -476,58 +477,168 @@
                   />
                 </div>
                 <div class="catalog-select-group">
-                  <label for="select-catalog-sort" class="sort-label">Sort</label>
+                  <label for="select-catalog-sort" class="sort-label">Sort By</label>
                   <select id="select-catalog-sort" class="select-control">
-                    <option value="value">Paid SP / Co-op Value (Default)</option>
-                    <option value="ccu">Current Player Count (Live CCU)</option>
-                    <option value="owners">Total Owners / Popularity</option>
-                    <option value="price">Highest Retail Price</option>
-                    <option value="rating">Top User Rating</option>
-                    <option value="relevancy">Relevancy</option>
-                  </select>
-                </div>
-                <div class="catalog-select-group">
-                  <label for="select-catalog-min-price" class="sort-label">Price</label>
-                  <select id="select-catalog-min-price" class="select-control">
-                    <option value="1">Any Paid</option>
-                    <option value="0">All Prices</option>
-                    <option value="1000">$10+</option>
-                    <option value="2000">$20+</option>
-                    <option value="4000">$40+</option>
-                    <option value="6000">$60+ AAA</option>
-                  </select>
-                </div>
-                <div class="catalog-select-group">
-                  <label for="select-catalog-min-ccu" class="sort-label">Players</label>
-                  <select id="select-catalog-min-ccu" class="select-control">
-                    <option value="0">Any</option>
-                    <option value="100">100+ Playing</option>
-                    <option value="1000">1,000+ Playing</option>
-                    <option value="10000">10,000+ Playing</option>
+                    <option value="value_score">Value Score (Best Overall)</option>
+                    <option value="ccu_desc">Live Players (Highest CCU)</option>
+                    <option value="rating_desc">Review Score (% Positive)</option>
+                    <option value="reviews_desc">Most Reviewed (Total Reviews)</option>
+                    <option value="hidden_gems">Hidden Gems (88%+ Positive, Under-the-Radar CCU)</option>
+                    <option value="trending">Trending &amp; Hot Releases</option>
+                    <option value="price_desc">Retail Price: High to Low</option>
+                    <option value="price_asc">Retail Price: Low to High</option>
+                    <option value="newest_appid">Newest Releases (AppID Desc)</option>
+                    <option value="title_asc">Title: A &rarr; Z</option>
                   </select>
                 </div>
               </div>
 
-              <div class="catalog-mode-row" id="catalog-mode-toggles">
-                <button type="button" class="filter-pill active" data-catalog-mode="paidOnly">Paid Only (&gt;$0)</button>
-                <button type="button" class="filter-pill active" data-catalog-mode="singleplayer">Single-player</button>
-                <button type="button" class="filter-pill active" data-catalog-mode="coop">Co-op / LAN</button>
-                <button type="button" class="filter-pill active" data-catalog-mode="excludePvp">Exclude PvP / MMO Only</button>
-                <button type="button" class="filter-pill" data-catalog-mode="hideInstalled">Hide Already Installed</button>
+              <div class="catalog-quant-filters-row">
+                <div class="catalog-select-group">
+                  <label for="select-catalog-price-tier" class="sort-label">Price Tier</label>
+                  <select id="select-catalog-price-tier" class="select-control select-compact">
+                    <option value="all">All Prices</option>
+                    <option value="paid">Paid Only ($0.01+)</option>
+                    <option value="free">Free to Play</option>
+                    <option value="under_10">Under $10</option>
+                    <option value="under_20">Under $20</option>
+                    <option value="over_30">$30+ Premium</option>
+                  </select>
+                </div>
+                <div class="catalog-select-group">
+                  <label for="select-catalog-min-rating" class="sort-label">Rating</label>
+                  <select id="select-catalog-min-rating" class="select-control select-compact">
+                    <option value="0">Any Rating</option>
+                    <option value="95">Overwhelmingly Positive (95%+)</option>
+                    <option value="85">Very Positive (85%+)</option>
+                    <option value="70">Mostly Positive (70%+)</option>
+                  </select>
+                </div>
+                <div class="catalog-select-group">
+                  <label for="select-catalog-min-reviews" class="sort-label">Reviews</label>
+                  <select id="select-catalog-min-reviews" class="select-control select-compact">
+                    <option value="0">Any Reviews</option>
+                    <option value="100">100+ Reviews</option>
+                    <option value="1000">1,000+ Reviews</option>
+                    <option value="10000">10,000+ Reviews</option>
+                  </select>
+                </div>
+                <div class="catalog-select-group">
+                  <label for="select-catalog-player-mode" class="sort-label">Mode</label>
+                  <select id="select-catalog-player-mode" class="select-control select-compact">
+                    <option value="all">All Modes</option>
+                    <option value="singleplayer">Singleplayer</option>
+                    <option value="coop">Co-op</option>
+                    <option value="multiplayer">Online Multiplayer</option>
+                  </select>
+                </div>
+                <div class="catalog-select-group">
+                  <label for="select-catalog-min-ccu" class="sort-label">Min CCU</label>
+                  <select id="select-catalog-min-ccu" class="select-control select-compact">
+                    <option value="0">Any CCU</option>
+                    <option value="50">50+ Online</option>
+                    <option value="500">500+ Online</option>
+                    <option value="5000">5,000+ Online</option>
+                  </select>
+                </div>
+                <button type="button" class="filter-pill catalog-hide-installed-btn" id="btn-catalog-hide-installed" aria-pressed="false">
+                  Hide Already Installed
+                </button>
               </div>
 
-              <div class="catalog-genre-row" id="catalog-genre-pills">
-                <button type="button" class="filter-pill active" data-catalog-genre="all">All Genres</button>
-                <button type="button" class="filter-pill" data-catalog-genre="Action">Action</button>
-                <button type="button" class="filter-pill" data-catalog-genre="Adventure">Adventure</button>
-                <button type="button" class="filter-pill" data-catalog-genre="RPG">RPG</button>
-                <button type="button" class="filter-pill" data-catalog-genre="Simulation">Simulation</button>
-                <button type="button" class="filter-pill" data-catalog-genre="Open World">Open World</button>
-                <button type="button" class="filter-pill" data-catalog-genre="Horror">Horror</button>
-                <button type="button" class="filter-pill" data-catalog-genre="Survival">Survival</button>
-                <button type="button" class="filter-pill" data-catalog-genre="Indie">Indie</button>
-                <button type="button" class="filter-pill" data-catalog-genre="Racing">Racing</button>
-                <button type="button" class="filter-pill" data-catalog-genre="Strategy">Strategy</button>
+              <div class="catalog-genres-drawer" id="catalog-genres-drawer">
+                <div class="catalog-genres-drawer-head">
+                  <button
+                    type="button"
+                    class="collapsible-toggle-btn catalog-genres-toggle-btn"
+                    id="btn-toggle-catalog-genres"
+                    aria-expanded="false"
+                    aria-controls="catalog-genres-drawer-body"
+                  >
+                    <svg class="icon collapsible-chevron" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
+                    <svg class="icon" aria-hidden="true"><use href="#icon-layers"/></svg>
+                    <span>Genres &amp; Tags</span>
+                    <span class="pill accent mono-num" id="catalog-genre-count-badge">0 Selected</span>
+                  </button>
+                  <div class="catalog-active-genres-preview" id="catalog-active-genres-preview">
+                    <span class="panel-sub">Click to combine 36 genres &amp; technical tags in O(1) bitmask speed</span>
+                  </div>
+                  <button type="button" class="btn btn-secondary btn-xs hidden" id="btn-catalog-clear-genres">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg>
+                    <span>Clear Filters</span>
+                  </button>
+                </div>
+
+                <div class="catalog-genres-drawer-body hidden" id="catalog-genres-drawer-body">
+                  <div class="catalog-tag-filter-row">
+                    <div class="catalog-tag-search-wrap">
+                      <svg class="icon catalog-search-icon" aria-hidden="true"><use href="#icon-search"/></svg>
+                      <input
+                        type="search"
+                        id="input-catalog-tag-filter"
+                        class="input-control catalog-search-input"
+                        placeholder="Filter 36 genres &amp; tags (e.g. Engineering, Sandbox, Souls-like)..."
+                        autocomplete="off"
+                      />
+                    </div>
+                  </div>
+
+                  <div class="catalog-genre-groups" id="catalog-genre-groups">
+                    <div class="catalog-genre-group" data-genre-group="engineering">
+                      <div class="catalog-genre-group-label">Engineering &amp; Building</div>
+                      <div class="catalog-genre-pills-grid">
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Engineering">Engineering</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Sandbox">Sandbox</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Automation">Automation</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Building">Building</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Physics">Physics</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Space">Space</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Flight">Flight</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Crafting">Crafting</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Survival">Survival</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="City Builder">City Builder</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Management">Management</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Economy">Economy</button>
+                      </div>
+                    </div>
+
+                    <div class="catalog-genre-group" data-genre-group="core">
+                      <div class="catalog-genre-group-label">Core Genres</div>
+                      <div class="catalog-genre-pills-grid">
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Action">Action</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Adventure">Adventure</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="RPG">RPG</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Strategy">Strategy</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Simulation">Simulation</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Shooter">Shooter</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="FPS">FPS</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Third-Person">Third-Person</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Puzzle">Puzzle</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Platformer">Platformer</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Racing">Racing</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Sports">Sports</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Fighting">Fighting</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Horror">Horror</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Stealth">Stealth</button>
+                      </div>
+                    </div>
+
+                    <div class="catalog-genre-group" data-genre-group="subgenres">
+                      <div class="catalog-genre-group-label">Sub-Genres &amp; Structure</div>
+                      <div class="catalog-genre-pills-grid">
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Open World">Open World</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Souls-like">Souls-like</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Metroidvania">Metroidvania</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Roguelike">Roguelike</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Tactical">Tactical</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Turn-Based">Turn-Based</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Tower Defense">Tower Defense</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Story Rich">Story Rich</button>
+                        <button type="button" class="filter-pill catalog-tag-pill" data-catalog-genre="Indie">Indie</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -967,7 +1078,7 @@
               <div class="panel-head">
                 <div>
                   <h2>Appearance &amp; Vector Themes</h2>
-                  <p class="panel-sub">10 zero-RAM inline SVG themes with Obsidian Dark, Clean Daylight, and layered art presets.</p>
+                  <p class="panel-sub">11 zero-RAM themes including Obsidian Frosted Glass acrylic translucency, Obsidian Dark, Clean Daylight, and layered art presets.</p>
                 </div>
               </div>
               <div class="theme-grid" id="theme-grid"></div>
