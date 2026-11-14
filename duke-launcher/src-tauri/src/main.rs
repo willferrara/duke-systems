@@ -1,13 +1,17 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod achievements;
 mod artwork;
 mod bench;
 mod catalog_mmap;
 mod delta_patch;
+mod friends;
 mod importers;
 mod ludusavi;
 mod mcp;
+mod metadata_ext;
+mod ntfs_compress;
 mod pe_inspect;
 mod sidebar_icons;
 mod sites;
@@ -319,6 +323,8 @@ pub struct GameEntry {
     pub genre: String,
     pub platform: String,
     pub source: String,
+    #[serde(alias = "acquisition_source")]
+    pub acquisition_source: String,
     pub is_favorite: bool,
     pub is_installed: bool,
     pub added_at: u64,
@@ -326,6 +332,10 @@ pub struct GameEntry {
     pub steam_app_id: Option<u64>,
     pub app_id: Option<u32>,
     pub playtime_seconds: u64,
+    #[serde(alias = "imported_playtime_secs")]
+    pub imported_playtime_secs: u64,
+    #[serde(alias = "duke_playtime_secs")]
+    pub duke_playtime_secs: u64,
     pub last_played_ts: Option<u64>,
     #[serde(alias = "steam_price_cents")]
     pub steam_price_cents: Option<u32>,
@@ -337,6 +347,29 @@ pub struct GameEntry {
     pub sandbox_enabled: bool,
     #[serde(alias = "nvme_prefetch_enabled")]
     pub nvme_prefetch_enabled: Option<bool>,
+    #[serde(alias = "version_tag")]
+    pub version_tag: String,
+    #[serde(alias = "update_feed_url")]
+    pub update_feed_url: String,
+    #[serde(alias = "latest_version_tag")]
+    pub latest_version_tag: String,
+    #[serde(alias = "update_available")]
+    pub update_available: bool,
+    #[serde(alias = "achievements_path")]
+    pub achievements_path: String,
+}
+
+impl GameEntry {
+    pub fn total_playtime_secs(&self) -> u64 {
+        let split = self
+            .imported_playtime_secs
+            .saturating_add(self.duke_playtime_secs);
+        if split > 0 {
+            split
+        } else {
+            self.playtime_seconds
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -435,6 +468,52 @@ pub struct LauncherSettings {
     pub swarm_node_name: String,
     #[serde(alias = "swarm_peers")]
     pub swarm_peers: Vec<String>,
+    #[serde(alias = "steam_api_key")]
+    pub steam_api_key: Option<String>,
+    #[serde(alias = "steam_id_override")]
+    pub steam_id_override: Option<String>,
+    #[serde(alias = "xbox_api_key")]
+    pub xbox_api_key: Option<String>,
+    #[serde(alias = "psn_npsso")]
+    pub psn_npsso: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub steam_api_key_configured: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub xbox_api_key_configured: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub psn_npsso_configured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_steam_id: Option<String>,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+impl LauncherSettings {
+    pub fn to_ipc_safe(&self) -> Self {
+        let mut copy = self.clone();
+        copy.steam_api_key_configured = copy
+            .steam_api_key
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        copy.xbox_api_key_configured = copy
+            .xbox_api_key
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        copy.psn_npsso_configured = copy
+            .psn_npsso
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        copy.steam_api_key = None;
+        copy.xbox_api_key = None;
+        copy.psn_npsso = None;
+        copy.detected_steam_id = friends::detect_local_steam_id64();
+        copy
+    }
 }
 
 impl Default for LauncherSettings {
@@ -449,6 +528,14 @@ impl Default for LauncherSettings {
             swarm_enabled: false,
             swarm_node_name: String::new(),
             swarm_peers: Vec::new(),
+            steam_api_key: None,
+            steam_id_override: None,
+            xbox_api_key: None,
+            psn_npsso: None,
+            steam_api_key_configured: false,
+            xbox_api_key_configured: false,
+            psn_npsso_configured: false,
+            detected_steam_id: None,
         }
     }
 }
@@ -1157,13 +1244,14 @@ async fn auto_install_downloaded_file(
 
     // Case 1: Downloaded file is already a direct .exe
     if lower_name.ends_with(".exe") {
-        let added = add_local_game(
+        let added = add_local_game_with_origin(
             app.clone(),
             downloaded_file_path.to_string(),
             Some(clean_title),
             None,
             Some("Ready".to_string()),
             None,
+            Some("turbo_downloader"),
         )
         .await?;
         if let Ok(lib) = load_library_from_disk(app) {
@@ -1208,13 +1296,14 @@ async fn auto_install_downloaded_file(
     };
 
     let exe_str = target_exe.to_string_lossy().to_string();
-    let added = add_local_game(
+    let added = add_local_game_with_origin(
         app.clone(),
         exe_str,
         Some(clean_title),
         None,
         Some("Ready".to_string()),
         None,
+        Some("turbo_downloader"),
     )
     .await?;
 
@@ -1524,6 +1613,26 @@ pub(crate) fn normalize_game_entry(entry: &mut GameEntry) {
             "Portable".to_string()
         };
     }
+    if entry.acquisition_source.trim().is_empty() {
+        let src_lower = entry.source.trim().to_ascii_lowercase();
+        entry.acquisition_source = match src_lower.as_str() {
+            "turbo downloader" | "turbo_downloader" | "downloader" => {
+                "turbo_downloader".to_string()
+            }
+            "steam" => "steam".to_string(),
+            "epic" | "epic games" => "epic".to_string(),
+            "gog" | "gog galaxy" => "gog".to_string(),
+            "xbox" | "xbox game pass" => "xbox".to_string(),
+            "duke swarm" | "swarm" => "swarm".to_string(),
+            _ => "manual".to_string(),
+        };
+    }
+    if entry.imported_playtime_secs == 0 && entry.duke_playtime_secs == 0 && entry.playtime_seconds > 0 {
+        entry.duke_playtime_secs = entry.playtime_seconds;
+    }
+    entry.playtime_seconds = entry
+        .imported_playtime_secs
+        .saturating_add(entry.duke_playtime_secs);
     if entry.app_id.is_none() {
         if let Some(sid) = entry.steam_app_id {
             entry.app_id = u32::try_from(sid).ok();
@@ -4999,13 +5108,14 @@ async fn execute_resumable_matrix_job(
 
         if scan_verdict != "DANGER" {
             if let Some(exe) = detected_exe {
-                if let Ok(added) = add_local_game(
+                if let Ok(added) = add_local_game_with_origin(
                     app.clone(),
                     exe.to_string_lossy().into_owned(),
                     Some(stream_clean_title.clone()),
                     None,
                     Some("Ready".to_string()),
                     None,
+                    Some("turbo_downloader"),
                 )
                 .await
                 {
@@ -5351,7 +5461,7 @@ async fn clear_completed_downloads(app: AppHandle) -> Result<Vec<DownloadJob>, S
 #[tauri::command]
 async fn get_launcher_settings(app: AppHandle) -> Result<LauncherSettings, String> {
     let app_clone = app.clone();
-    tokio::task::spawn_blocking(move || load_settings_from_disk(&app_clone))
+    tokio::task::spawn_blocking(move || load_settings_from_disk(&app_clone).to_ipc_safe())
         .await
         .map_err(|e| format!("Failed to read settings: {}", e))
 }
@@ -5369,6 +5479,13 @@ async fn update_launcher_settings(
     swarm_enabled: Option<bool>,
     swarm_node_name: Option<String>,
     swarm_peers: Option<Vec<String>>,
+    steam_api_key: Option<String>,
+    clear_steam_api_key: Option<bool>,
+    steam_id_override: Option<String>,
+    xbox_api_key: Option<String>,
+    clear_xbox_api_key: Option<bool>,
+    psn_npsso: Option<String>,
+    clear_psn_npsso: Option<bool>,
 ) -> Result<LauncherSettings, String> {
     let app_for_save = app.clone();
     let updated = tokio::task::spawn_blocking(move || -> Result<LauncherSettings, String> {
@@ -5412,11 +5529,43 @@ async fn update_launcher_settings(
                 .filter(|p| !p.is_empty())
                 .collect();
         }
+        if clear_steam_api_key.unwrap_or(false) {
+            current.steam_api_key = None;
+        } else if let Some(key) = steam_api_key {
+            let trimmed = key.trim().to_string();
+            if !trimmed.is_empty() {
+                current.steam_api_key = Some(trimmed);
+            }
+        }
+        if let Some(sid) = steam_id_override {
+            let trimmed = sid.trim().to_string();
+            current.steam_id_override = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            };
+        }
+        if clear_xbox_api_key.unwrap_or(false) {
+            current.xbox_api_key = None;
+        } else if let Some(key) = xbox_api_key {
+            let trimmed = key.trim().to_string();
+            if !trimmed.is_empty() {
+                current.xbox_api_key = Some(trimmed);
+            }
+        }
+        if clear_psn_npsso.unwrap_or(false) {
+            current.psn_npsso = None;
+        } else if let Some(tok) = psn_npsso {
+            let trimmed = tok.trim().to_string();
+            if !trimmed.is_empty() {
+                current.psn_npsso = Some(trimmed);
+            }
+        }
         save_settings_to_disk(&app_for_save, &current)?;
         if let Ok(mut guard) = get_active_hotkey_cell().lock() {
             *guard = current.suspend_hotkey.clone();
         }
-        Ok(current)
+        Ok(current.to_ipc_safe())
     })
     .await
     .map_err(|e| format!("Failed to save settings: {}", e))??;
@@ -6682,6 +6831,112 @@ async fn get_directory_size(path: String) -> Result<u64, String> {
         .map_err(|e| format!("Directory size task failed: {}", e))
 }
 
+/// Resolves retail price first via `0 ms` memory-mapped `catalog.dkcat`, falling back to Steam store search/details over `net-doh`.
+async fn resolve_game_retail_price_fast(
+    app_id_hint: Option<u32>,
+    title: &str,
+) -> (Option<u32>, u32, String) {
+    let mut resolved_aid = app_id_hint.filter(|&id| id > 0);
+    if let Some(entry) = catalog_mmap::lookup_entry_by_title_or_appid_via_mmap(resolved_aid, title) {
+        if resolved_aid.is_none() && entry.app_id > 0 {
+            resolved_aid = Some(entry.app_id);
+        }
+        let retail_cents = entry.initial_price_cents.max(entry.price_cents);
+        if retail_cents > 0 {
+            let formatted = format!("${:.2}", retail_cents as f64 / 100.0);
+            return (resolved_aid, retail_cents, formatted);
+        }
+    }
+
+    if resolved_aid.is_none() {
+        if let Some((aid, _)) = resolve_steam_appid_by_title(title).await {
+            resolved_aid = Some(aid);
+        }
+    }
+    if let Some(aid) = resolved_aid {
+        let (cents, fmt) = fetch_steam_app_retail_price(aid).await;
+        return (Some(aid), cents, fmt);
+    }
+    (None, 0, "$0.00".to_string())
+}
+
+pub fn compute_money_saved_cents(library: &[GameEntry]) -> u64 {
+    library
+        .iter()
+        .filter(|g| g.acquisition_source == "turbo_downloader")
+        .map(|g| u64::from(g.steam_price_cents.unwrap_or(0)))
+        .sum()
+}
+
+fn spawn_startup_turbo_price_resolution(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let candidates: Vec<(String, String, Option<u32>)> = {
+            let Ok(lib) = load_library_from_disk(&app) else {
+                return;
+            };
+            lib.into_iter()
+                .filter(|g| {
+                    g.acquisition_source == "turbo_downloader"
+                        && g.steam_price_cents.unwrap_or(0) == 0
+                })
+                .map(|g| {
+                    let aid = g
+                        .app_id
+                        .or_else(|| g.steam_app_id.and_then(|v| u32::try_from(v).ok()));
+                    (g.id, g.title, aid)
+                })
+                .collect()
+        };
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        let mut updates: HashMap<String, (Option<u32>, u32, String)> = HashMap::new();
+        for (gid, title, aid_opt) in candidates {
+            let (resolved_aid, cents, fmt) =
+                resolve_game_retail_price_fast(aid_opt, &title).await;
+            if cents > 0 || (aid_opt.is_none() && resolved_aid.is_some()) {
+                updates.insert(gid, (resolved_aid, cents, fmt));
+            }
+        }
+
+        if updates.is_empty() {
+            return;
+        }
+
+        let app_for_save = app.clone();
+        if let Ok(Ok(updated_lib)) = tokio::task::spawn_blocking(move || -> Result<Vec<GameEntry>, String> {
+            let mut library = load_library_from_disk(&app_for_save)?;
+            let mut changed = false;
+            for entry in &mut library {
+                if let Some((aid_opt, cents, fmt)) = updates.get(&entry.id) {
+                    if *cents > 0 && entry.steam_price_cents.unwrap_or(0) == 0 {
+                        entry.steam_price_cents = Some(*cents);
+                        entry.steam_price_formatted = Some(fmt.clone());
+                        changed = true;
+                    }
+                    if let Some(aid) = aid_opt {
+                        if entry.app_id.is_none() {
+                            entry.app_id = Some(*aid);
+                            entry.steam_app_id = Some(*aid as u64);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if changed {
+                save_library_to_disk(&app_for_save, &library)?;
+            }
+            Ok(library)
+        })
+        .await
+        {
+            let _ = app.emit("library-updated", &updated_lib);
+        }
+    });
+}
+
 #[tauri::command]
 async fn add_local_game(
     app: AppHandle,
@@ -6690,6 +6945,27 @@ async fn add_local_game(
     custom_cover: Option<String>,
     genre: Option<String>,
     steam_app_id: Option<u32>,
+) -> Result<GameEntry, String> {
+    add_local_game_with_origin(
+        app,
+        exe_path,
+        custom_title,
+        custom_cover,
+        genre,
+        steam_app_id,
+        Some("manual"),
+    )
+    .await
+}
+
+async fn add_local_game_with_origin(
+    app: AppHandle,
+    exe_path: String,
+    custom_title: Option<String>,
+    custom_cover: Option<String>,
+    genre: Option<String>,
+    steam_app_id: Option<u32>,
+    origin: Option<&str>,
 ) -> Result<GameEntry, String> {
     let trimmed_path = exe_path.trim().trim_matches('"').to_string();
     let exe_file = PathBuf::from(&trimmed_path);
@@ -6766,19 +7042,23 @@ async fn add_local_game(
 
     let mut app_id_u32 =
         explicit_appid.or_else(|| detected_steam_app_id.and_then(|sid| u32::try_from(sid).ok()));
+    let (resolved_aid, resolved_cents, resolved_fmt) =
+        resolve_game_retail_price_fast(app_id_u32, &title).await;
     if app_id_u32.is_none() {
-        if let Some((resolved_id, _)) = resolve_steam_appid_by_title(&title).await {
-            app_id_u32 = Some(resolved_id);
-        }
+        app_id_u32 = resolved_aid;
     }
     let final_steam_app_id = detected_steam_app_id.or_else(|| app_id_u32.map(|id| id as u64));
+    let (steam_price_cents, steam_price_formatted) = (Some(resolved_cents), Some(resolved_fmt));
 
-    let (steam_price_cents, steam_price_formatted) = match app_id_u32 {
-        Some(aid) => {
-            let (cents, fmt) = fetch_steam_app_retail_price(aid).await;
-            (Some(cents), Some(fmt))
-        }
-        None => (Some(0), Some("$0.00".to_string())),
+    let acq_origin = origin
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("manual")
+        .to_string();
+    let display_source = if acq_origin == "turbo_downloader" {
+        "Turbo Downloader".to_string()
+    } else {
+        "Portable".to_string()
     };
 
     let new_entry = GameEntry {
@@ -6800,7 +7080,8 @@ async fn add_local_game(
             .filter(|g| !g.trim().is_empty())
             .unwrap_or_else(|| "Ready".to_string()),
         platform: "Windows".to_string(),
-        source: "Portable".to_string(),
+        source: display_source,
+        acquisition_source: acq_origin,
         is_favorite: false,
         is_installed: true,
         added_at: now,
@@ -6808,12 +7089,15 @@ async fn add_local_game(
         steam_app_id: final_steam_app_id,
         app_id: app_id_u32,
         playtime_seconds: 0,
+        imported_playtime_secs: 0,
+        duke_playtime_secs: 0,
         last_played_ts: None,
         steam_price_cents,
         steam_price_formatted,
         launch_args: None,
         sandbox_enabled: false,
         nvme_prefetch_enabled: None,
+        ..Default::default()
     };
 
     let app_clone = app.clone();
@@ -6827,26 +7111,66 @@ async fn add_local_game(
         }) {
             let preserve_fav = existing.is_favorite;
             let preserve_last_played = existing.last_played_ts.or(existing.last_played);
-            let preserve_playtime = existing.playtime_seconds;
-            let preserve_price_cents = entry_clone.steam_price_cents.or(existing.steam_price_cents);
-            let preserve_price_fmt = entry_clone
-                .steam_price_formatted
-                .clone()
+            let preserve_imported_pt = existing.imported_playtime_secs;
+            let preserve_duke_pt = if existing.duke_playtime_secs > 0 {
+                existing.duke_playtime_secs
+            } else if existing.imported_playtime_secs == 0 {
+                existing.playtime_seconds
+            } else {
+                0
+            };
+            let preserve_playtime = preserve_imported_pt.saturating_add(preserve_duke_pt);
+            let preserve_price_cents = match (entry_clone.steam_price_cents, existing.steam_price_cents) {
+                (Some(new_c), Some(old_c)) if new_c == 0 && old_c > 0 => Some(old_c),
+                (new_opt, old_opt) => new_opt.or(old_opt),
+            };
+            let preserve_price_fmt = preserve_price_cents
+                .map(|c| format!("${:.2}", c as f64 / 100.0))
                 .or_else(|| existing.steam_price_formatted.clone());
             let preserve_args = existing.launch_args.clone();
             let preserve_sandbox = existing.sandbox_enabled;
             let preserve_prefetch = existing.nvme_prefetch_enabled;
+            let preserve_acq = if existing.acquisition_source == "turbo_downloader"
+                || entry_clone.acquisition_source == "turbo_downloader"
+            {
+                "turbo_downloader".to_string()
+            } else if !existing.acquisition_source.trim().is_empty() {
+                existing.acquisition_source.clone()
+            } else {
+                entry_clone.acquisition_source.clone()
+            };
+            let preserve_src = if preserve_acq == "turbo_downloader" {
+                "Turbo Downloader".to_string()
+            } else {
+                existing.source.clone()
+            };
+            let preserve_ver = existing.version_tag.clone();
+            let preserve_feed = existing.update_feed_url.clone();
+            let preserve_latest = existing.latest_version_tag.clone();
+            let preserve_upd = existing.update_available;
+            let preserve_ach = existing.achievements_path.clone();
             let old_id = existing.id.clone();
             *existing = entry_clone.clone();
             existing.is_favorite = preserve_fav;
             existing.last_played = preserve_last_played;
             existing.last_played_ts = preserve_last_played;
+            existing.imported_playtime_secs = preserve_imported_pt;
+            existing.duke_playtime_secs = preserve_duke_pt;
             existing.playtime_seconds = preserve_playtime;
             existing.steam_price_cents = preserve_price_cents;
             existing.steam_price_formatted = preserve_price_fmt;
             existing.launch_args = preserve_args;
             existing.sandbox_enabled = preserve_sandbox;
             existing.nvme_prefetch_enabled = preserve_prefetch;
+            existing.acquisition_source = preserve_acq;
+            if !preserve_src.trim().is_empty() {
+                existing.source = preserve_src;
+            }
+            existing.version_tag = preserve_ver;
+            existing.update_feed_url = preserve_feed;
+            existing.latest_version_tag = preserve_latest;
+            existing.update_available = preserve_upd;
+            existing.achievements_path = preserve_ach;
             sidebar_icons::invalidate_sidebar_icon(&app_clone, &old_id);
         } else {
             library.push(entry_clone.clone());
@@ -7010,18 +7334,15 @@ async fn compress_game_folder(app: AppHandle, game_id: String) -> Result<Value, 
     let initial_recorded_size = target_entry.size_bytes;
 
     tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        let before_bytes = calculate_dir_size_sync(&game_dir).max(initial_recorded_size);
-        let dir_arg = format!("/s:{}", game_dir.to_string_lossy());
-
-        let mut cmd = Command::new("compact.exe");
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        let _ = cmd
-            .args(["/c", &dir_arg, "/a", "/i", "/exe:xpress8k"])
-            .output()
-            .map_err(|e| format!("Failed to invoke Windows compact.exe: {}", e))?;
-
-        let after_bytes = calculate_dir_size_sync(&game_dir);
-        let saved_bytes = before_bytes.saturating_sub(after_bytes);
+        let report = ntfs_compress::run_wof_operation_sync(
+            Some(&app_clone),
+            &gid_clone,
+            &game_dir,
+            true,
+            ntfs_compress::WofAlgorithm::Xpress8k,
+        );
+        let after_bytes = report.compressed_bytes;
+        let saved_bytes = report.saved_bytes;
         let after_formatted = format_bytes(after_bytes);
         let saved_formatted = format_bytes(saved_bytes);
 
@@ -7036,7 +7357,7 @@ async fn compress_game_folder(app: AppHandle, game_id: String) -> Result<Value, 
 
         Ok(serde_json::json!({
             "gameId": gid_clone,
-            "beforeBytes": before_bytes,
+            "beforeBytes": initial_recorded_size.max(report.logical_bytes),
             "afterBytes": after_bytes,
             "savedBytes": saved_bytes,
             "savedFormatted": saved_formatted,
@@ -7305,6 +7626,14 @@ async fn launch_game_internal(
         }
     }
     spawn_hotkey_watcher_if_needed(app.clone());
+    if let Ok(lib) = load_library_standalone() {
+        if let Some(matched) = lib.iter().find(|g| {
+            game_id.as_ref().map(|id| g.id == *id).unwrap_or(false)
+                || g.exe_path.eq_ignore_ascii_case(&trimmed)
+        }) {
+            achievements::start_achievement_watcher(app.clone(), matched);
+        }
+    }
 
     if let Some(bus) = DUKE_BUS.get() {
         bus.publish(DukeEvent::GameStarted {
@@ -7462,6 +7791,7 @@ async fn launch_game_internal(
             &shm_exit_tag,
         );
         if let Some(ref gid) = gid_after {
+            achievements::stop_achievement_watcher(gid);
             swarm::spawn_game_stopped_mesh_sync(gid.clone());
         }
 
@@ -7472,7 +7802,16 @@ async fn launch_game_internal(
                     gid_after.as_ref().map(|id| g.id == *id).unwrap_or(false)
                         || g.exe_path.eq_ignore_ascii_case(&path_after)
                 }) {
-                    item.playtime_seconds = item.playtime_seconds.saturating_add(elapsed_secs);
+                    if item.imported_playtime_secs == 0
+                        && item.duke_playtime_secs == 0
+                        && item.playtime_seconds > 0
+                    {
+                        item.duke_playtime_secs = item.playtime_seconds;
+                    }
+                    item.duke_playtime_secs = item.duke_playtime_secs.saturating_add(elapsed_secs);
+                    item.playtime_seconds = item
+                        .imported_playtime_secs
+                        .saturating_add(item.duke_playtime_secs);
                     item.last_played = Some(end_ts);
                     item.last_played_ts = Some(end_ts);
                     let _ = save_library_to_disk(&app_disk, &library);
@@ -9878,6 +10217,638 @@ async fn get_system_telemetry() -> Result<Value, String> {
     }))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UpdateFeedMetadata {
+    pub version: String,
+    pub notes: String,
+    pub manifest_url: Option<String>,
+    pub delta_url: Option<String>,
+    pub archive_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GameUpdateCheckResult {
+    pub game_id: String,
+    pub current_version: String,
+    pub latest_version: String,
+    pub update_available: bool,
+    pub notes: String,
+    pub has_delta_patch: bool,
+    pub download_url: String,
+    pub games: Vec<GameEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GameUpdateApplyReport {
+    pub game_id: String,
+    pub previous_version: String,
+    pub new_version: String,
+    pub method: String,
+    pub snapshot_id: String,
+    pub message: String,
+    pub games: Vec<GameEntry>,
+}
+
+fn parse_version_parts(raw: &str) -> Vec<u64> {
+    let trimmed = raw
+        .trim()
+        .trim_start_matches(['v', 'V'])
+        .split(['-', '+'])
+        .next()
+        .unwrap_or("");
+    let mut parts = Vec::new();
+    for seg in trimmed.split('.') {
+        if let Ok(n) = seg.trim().parse::<u64>() {
+            parts.push(n);
+        } else {
+            return Vec::new();
+        }
+    }
+    parts
+}
+
+pub fn is_newer_version(current: &str, candidate: &str) -> bool {
+    let cur = current.trim();
+    let cand = candidate.trim();
+    if cand.is_empty() {
+        return false;
+    }
+    if cur.is_empty() {
+        return true;
+    }
+    if cur.trim_start_matches(['v', 'V']).eq_ignore_ascii_case(cand.trim_start_matches(['v', 'V'])) {
+        return false;
+    }
+    let a = parse_version_parts(cur);
+    let b = parse_version_parts(cand);
+    if !a.is_empty() && !b.is_empty() {
+        let len = a.len().max(b.len());
+        for idx in 0..len {
+            let av = *a.get(idx).unwrap_or(&0);
+            let bv = *b.get(idx).unwrap_or(&0);
+            if bv != av {
+                return bv > av;
+            }
+        }
+        return false;
+    }
+    cand != cur
+}
+
+pub fn parse_update_feed_metadata(val: &Value) -> Result<UpdateFeedMetadata, String> {
+    let version = val
+        .get("version")
+        .or_else(|| val.get("versionTag"))
+        .or_else(|| val.get("latestVersion"))
+        .or_else(|| val.get("tag_name"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Update feed JSON missing 'version' or 'tag_name' field".to_string())?
+        .to_string();
+
+    let notes = val
+        .get("notes")
+        .or_else(|| val.get("changelog"))
+        .or_else(|| val.get("body"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    let pick_str = |keys: &[&str]| -> Option<String> {
+        keys.iter().find_map(|k| {
+            val.get(*k)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
+                .map(ToString::to_string)
+        })
+    };
+
+    let mut manifest_url = pick_str(&["manifestUrl", "manifest_url", "dkmanifestUrl"]);
+    let mut delta_url = pick_str(&["deltaUrl", "delta_url", "dkdeltaUrl", "patchUrl"]);
+    let mut archive_url = pick_str(&["archiveUrl", "archive_url", "downloadUrl", "download_url", "url"]);
+
+    if let Some(assets) = val.get("assets").and_then(|v| v.as_array()) {
+        for asset in assets {
+            let url = asset
+                .get("browser_download_url")
+                .or_else(|| asset.get("url"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .unwrap_or_default();
+            if !url.starts_with("http") {
+                continue;
+            }
+            let lower = url.to_ascii_lowercase();
+            if lower.ends_with(".dkmanifest") && manifest_url.is_none() {
+                manifest_url = Some(url.to_string());
+            } else if lower.ends_with(".dkdelta") && delta_url.is_none() {
+                delta_url = Some(url.to_string());
+            } else if (lower.ends_with(".tar.zst") || lower.ends_with(".tzst") || lower.ends_with(".zip"))
+                && archive_url.is_none()
+            {
+                archive_url = Some(url.to_string());
+            }
+        }
+    }
+
+    Ok(UpdateFeedMetadata {
+        version,
+        notes,
+        manifest_url,
+        delta_url,
+        archive_url,
+    })
+}
+
+async fn download_url_bytes_via_doh(url: &str, dest: &Path) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed creating staging directory {}: {}", parent.display(), e))?;
+    }
+    let client = duke_core::net_doh::build_doh_client_with_timeouts(
+        url,
+        Duration::from_secs(12),
+        Duration::from_secs(120),
+        true,
+    )
+    .await;
+    let resp = client
+        .get(url)
+        .header(USER_AGENT, "Duke-Launcher/0.2")
+        .send()
+        .await
+        .map_err(|e| format!("Download request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Server returned HTTP {}", resp.status().as_u16()));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed reading update payload: {e}"))?;
+    fs::write(dest, &bytes)
+        .map_err(|e| format!("Failed writing staged update {}: {}", dest.display(), e))?;
+    Ok(())
+}
+
+struct DukeProfilePreserveGuard {
+    game_dir: PathBuf,
+    backup_dir: PathBuf,
+    moved: bool,
+}
+
+impl DukeProfilePreserveGuard {
+    fn protect(game_dir: &Path) -> Result<Self, String> {
+        let profile = game_dir.join(".duke-profile");
+        let backup = game_dir.join(".duke-profile-preserve-tmp");
+        let mut moved = false;
+        if profile.is_dir() {
+            if backup.exists() {
+                let _ = fs::remove_dir_all(&backup);
+            }
+            fs::rename(&profile, &backup)
+                .map_err(|e| format!("Failed protecting .duke-profile saves before update: {e}"))?;
+            moved = true;
+        }
+        Ok(Self {
+            game_dir: game_dir.to_path_buf(),
+            backup_dir: backup,
+            moved,
+        })
+    }
+}
+
+impl Drop for DukeProfilePreserveGuard {
+    fn drop(&mut self) {
+        if self.moved && self.backup_dir.is_dir() {
+            let profile = self.game_dir.join(".duke-profile");
+            if profile.exists() {
+                let _ = fs::remove_dir_all(&profile);
+            }
+            let _ = fs::rename(&self.backup_dir, &profile);
+        }
+    }
+}
+
+#[tauri::command]
+async fn set_game_update_config(
+    app: AppHandle,
+    game_id: String,
+    version_tag: String,
+    update_feed_url: String,
+) -> Result<Vec<GameEntry>, String> {
+    let mut library = load_library_from_disk(&app)?;
+    let entry = library
+        .iter_mut()
+        .find(|g| g.id == game_id)
+        .ok_or_else(|| "Game not found in library.".to_string())?;
+    entry.version_tag = version_tag.trim().to_string();
+    entry.update_feed_url = update_feed_url.trim().to_string();
+    if entry.update_feed_url.is_empty() {
+        entry.latest_version_tag.clear();
+        entry.update_available = false;
+    } else if !entry.latest_version_tag.is_empty() {
+        entry.update_available = is_newer_version(&entry.version_tag, &entry.latest_version_tag);
+    }
+    save_library_to_disk(&app, &library)?;
+    let _ = app.emit("library-updated", &library);
+    Ok(library)
+}
+
+#[tauri::command]
+async fn check_game_updates(
+    app: AppHandle,
+    game_id: Option<String>,
+) -> Result<GameUpdateCheckResult, String> {
+    let mut library = load_library_from_disk(&app)?;
+    let targets: Vec<(usize, String, String, String)> = library
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| {
+            !g.update_feed_url.trim().is_empty()
+                && game_id
+                    .as_deref()
+                    .map(|id| g.id == id)
+                    .unwrap_or(true)
+        })
+        .map(|(i, g)| {
+            (
+                i,
+                g.id.clone(),
+                g.version_tag.clone(),
+                g.update_feed_url.clone(),
+            )
+        })
+        .collect();
+
+    if targets.is_empty() {
+        return Err("No update feed URL configured for target game.".to_string());
+    }
+
+    let mut primary_result = GameUpdateCheckResult::default();
+    let mut any_changed = false;
+
+    for (idx, gid, cur_ver, feed_url) in targets {
+        let json_val = fetch_doh_json(&feed_url).await?;
+        let meta = parse_update_feed_metadata(&json_val)?;
+        let avail = is_newer_version(&cur_ver, &meta.version);
+
+        library[idx].latest_version_tag = meta.version.clone();
+        library[idx].update_available = avail;
+        any_changed = true;
+
+        if game_id.as_deref() == Some(gid.as_str()) || primary_result.game_id.is_empty() {
+            primary_result = GameUpdateCheckResult {
+                game_id: gid,
+                current_version: cur_ver,
+                latest_version: meta.version,
+                update_available: avail,
+                notes: meta.notes,
+                has_delta_patch: meta.delta_url.is_some(),
+                download_url: meta
+                    .delta_url
+                    .or(meta.archive_url)
+                    .unwrap_or_default(),
+                games: Vec::new(),
+            };
+        }
+    }
+
+    if any_changed {
+        save_library_to_disk(&app, &library)?;
+        let _ = app.emit("library-updated", &library);
+    }
+    primary_result.games = library;
+    Ok(primary_result)
+}
+
+#[tauri::command]
+async fn apply_game_update(
+    app: AppHandle,
+    game_id: String,
+) -> Result<GameUpdateApplyReport, String> {
+    let library = load_library_from_disk(&app)?;
+    let game = library
+        .iter()
+        .find(|g| g.id == game_id)
+        .cloned()
+        .ok_or_else(|| "Game not found in library.".to_string())?;
+    let feed_url = game.update_feed_url.trim().to_string();
+    if feed_url.is_empty() {
+        return Err("Configure an Update Feed URL first.".to_string());
+    }
+
+    let game_dir = if !game.install_dir.trim().is_empty() {
+        PathBuf::from(game.install_dir.trim())
+    } else {
+        resolve_game_root_dir(Path::new(game.exe_path.trim()))
+    };
+    if !game_dir.is_dir() {
+        return Err(format!("Game directory missing: {}", game_dir.display()));
+    }
+
+    let feed_json = fetch_doh_json(&feed_url).await?;
+    let meta = parse_update_feed_metadata(&feed_json)?;
+
+    // Always create a zero-duplication BLAKE3 hardlink snapshot BEFORE touching game files.
+    let dir_for_snap = game_dir.clone();
+    let gid_for_snap = game.id.clone();
+    let snap = tokio::task::spawn_blocking(move || {
+        snapshots::create_snapshot_in_dir(
+            &gid_for_snap,
+            &dir_for_snap,
+            &dir_for_snap.join(snapshots::CAS_DIR_NAME),
+            Some("Auto-Backup Before Portable Update"),
+        )
+    })
+    .await
+    .map_err(|e| format!("Pre-update snapshot task failed: {e}"))??;
+
+    let tmp_dir = game_dir.join(".duke-patch-tmp");
+    let _ = fs::create_dir_all(&tmp_dir);
+
+    let method_used: String;
+    if let (Some(delta_url), Some(manifest_url)) = (meta.delta_url.clone(), meta.manifest_url.clone()) {
+        let manifest_path = tmp_dir.join("target.dkmanifest");
+        let delta_path = tmp_dir.join("patch.dkdelta");
+        download_url_bytes_via_doh(&manifest_url, &manifest_path).await?;
+        download_url_bytes_via_doh(&delta_url, &delta_path).await?;
+        let dir_clone = game_dir.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            let manifest = delta_patch::read_dkmanifest_file(&manifest_path)?;
+            delta_patch::apply_delta_with_local_stitching(&dir_clone, &manifest, Some(delta_path.as_path()))
+        })
+        .await
+        .map_err(|e| format!("Delta apply worker failed: {e}"))??;
+        method_used = format!(
+            "FastCDC Delta ({} files patched, {} chunks reused)",
+            report.files_patched, report.chunks_reused_from_disk
+        );
+    } else if let Some(archive_url) = meta.archive_url.clone() {
+        let lower_url = archive_url.to_ascii_lowercase();
+        let dir_for_guard = game_dir.clone();
+        let _save_guard = DukeProfilePreserveGuard::protect(&dir_for_guard)?;
+
+        if lower_url.ends_with(".tar.zst") || lower_url.ends_with(".tzst") {
+            let pipeline = stream_extract::InFlightZstPipeline::start(
+                stream_extract::StreamArchiveFormat::TarZst,
+                game_dir.clone(),
+                game_dir.join("update.tar.zst"),
+            );
+            let client = duke_core::net_doh::build_doh_client_with_timeouts(
+                &archive_url,
+                Duration::from_secs(12),
+                Duration::from_secs(180),
+                true,
+            )
+            .await;
+            let mut resp = client
+                .get(&archive_url)
+                .header(USER_AGENT, "Duke-Launcher/0.2")
+                .send()
+                .await
+                .map_err(|e| format!("Streaming update download failed: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("Server returned HTTP {}", resp.status().as_u16()));
+            }
+            let mut offset = 0u64;
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|e| format!("Stream read failed: {e}"))?
+            {
+                pipeline.submit_range(offset, &chunk)?;
+                offset += chunk.len() as u64;
+            }
+            let stats = pipeline.finish()?;
+            method_used = format!(
+                "In-Flight .tar.zst ({} files extracted)",
+                stats.files_extracted
+            );
+        } else {
+            let ext = if lower_url.ends_with(".7z") {
+                "7z"
+            } else if lower_url.ends_with(".rar") {
+                "rar"
+            } else {
+                "zip"
+            };
+            let pkg_path = tmp_dir.join(format!("update.{ext}"));
+            download_url_bytes_via_doh(&archive_url, &pkg_path).await?;
+            let pkg_clone = pkg_path.clone();
+            let dest_clone = game_dir.clone();
+            tokio::task::spawn_blocking(move || extract_archive_to_folder_sync(&pkg_clone, &dest_clone))
+                .await
+                .map_err(|e| format!("Update extraction task failed: {e}"))??;
+            method_used = format!("Archive Overlay (.{ext})");
+        }
+    } else {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err("Update feed specifies neither a FastCDC deltaUrl nor an archiveUrl.".to_string());
+    }
+
+    let _ = fs::remove_dir_all(&tmp_dir);
+
+    let dir_for_size = game_dir.clone();
+    let new_size = tokio::task::spawn_blocking(move || calculate_dir_size_sync(&dir_for_size))
+        .await
+        .unwrap_or(game.size_bytes);
+
+    let mut updated_lib = load_library_from_disk(&app)?;
+    if let Some(entry) = updated_lib.iter_mut().find(|g| g.id == game.id) {
+        entry.version_tag = meta.version.clone();
+        entry.latest_version_tag = meta.version.clone();
+        entry.update_available = false;
+        entry.size_bytes = new_size;
+        entry.size_formatted = format_bytes(new_size);
+    }
+    save_library_to_disk(&app, &updated_lib)?;
+    let _ = app.emit("library-updated", &updated_lib);
+    trim_process_working_set();
+
+    Ok(GameUpdateApplyReport {
+        game_id: game.id,
+        previous_version: game.version_tag,
+        new_version: meta.version,
+        method: method_used.clone(),
+        snapshot_id: snap.id.clone(),
+        message: format!(
+            "Updated via {method_used} (.duke-cas snapshot {} created; .duke-profile saves preserved).",
+            snap.id
+        ),
+        games: updated_lib,
+    })
+}
+
+#[tauri::command]
+async fn toggle_overlay_window(app: AppHandle, visible: Option<bool>) -> Result<bool, String> {
+    let overlay = app
+        .get_webview_window("overlay")
+        .ok_or_else(|| "Overlay window not registered".to_string())?;
+    let currently_visible = overlay.is_visible().unwrap_or(false);
+    let target_visible = visible.unwrap_or(!currently_visible);
+
+    if target_visible {
+        let _ = overlay.set_always_on_top(true);
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(hwnd) = overlay.hwnd() {
+                let _ = apply_backdrop_to_hwnd(hwnd.0 as isize, "frosted-obsidian");
+            }
+        }
+        let _ = overlay.show();
+        let _ = overlay.set_focus();
+        let _ = app.emit("overlay-opened", serde_json::json!({ "visible": true }));
+    } else {
+        let _ = overlay.hide();
+        let _ = app.emit("overlay-opened", serde_json::json!({ "visible": false }));
+        trim_process_working_set();
+    }
+    Ok(target_visible)
+}
+
+#[tauri::command]
+async fn hide_overlay_window(app: AppHandle) -> Result<(), String> {
+    if let Some(overlay) = app.get_webview_window("overlay") {
+        let _ = overlay.hide();
+    }
+    trim_process_working_set();
+    Ok(())
+}
+
+#[tauri::command]
+async fn trigger_replay_clip_ipc() -> Result<Value, String> {
+    let active_title = get_active_sessions()
+        .lock()
+        .ok()
+        .and_then(|map| map.values().next().map(|s| s.title.clone()));
+
+    let pid = active_title
+        .as_ref()
+        .and(Some(std::process::id()))
+        .unwrap_or_else(std::process::id);
+    publish_shm_event_tagged(
+        ShmEventType::ReplaySaveRequested,
+        pid,
+        0,
+        0,
+        active_title.as_deref().unwrap_or("OverlayClip"),
+    );
+
+    if let Some(bus) = DUKE_BUS.get() {
+        bus.publish(DukeEvent::ReplaySaveRequested {
+            game_title: active_title.clone(),
+            source: "duke-launcher-overlay".to_string(),
+        });
+    }
+
+    Ok(serde_json::json!({
+        "dispatched": true,
+        "gameTitle": active_title,
+        "message": "Instant Replay save signal transmitted over Duke SHM & IPC buses."
+    }))
+}
+
+#[tauri::command]
+async fn purge_suite_ram_ipc(app: AppHandle) -> Result<Value, String> {
+    let before_mb = get_process_working_set_mb();
+    trim_process_working_set();
+    let after_mb = get_process_working_set_mb();
+    let freed_mb = (before_mb - after_mb).max(0.0);
+
+    publish_shm_event(
+        ShmEventType::RamPurge,
+        std::process::id(),
+        after_mb.to_bits(),
+        0,
+    );
+    if let Some(bus) = DUKE_BUS.get() {
+        bus.publish(DukeEvent::RamPurgeRequested {
+            source: "duke-launcher-overlay".to_string(),
+        });
+    }
+
+    let payload = serde_json::json!({
+        "beforeMb": before_mb,
+        "workingSetMb": after_mb,
+        "freedMb": freed_mb,
+        "status": "SUITE PURGED"
+    });
+    let _ = app.emit("memory-telemetry", &payload);
+    Ok(payload)
+}
+
+fn spawn_overlay_trigger_watcher(app: AppHandle) {
+    #[cfg(target_os = "windows")]
+    std::thread::Builder::new()
+        .name("duke-overlay-trigger".to_string())
+        .spawn(move || {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{
+                RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_NOREPEAT,
+            };
+            use windows::Win32::UI::WindowsAndMessaging::{
+                PeekMessageW, MSG, PM_REMOVE, WM_HOTKEY,
+            };
+
+            const HOTKEY_ID: i32 = 0x444B;
+            let registered = unsafe {
+                RegisterHotKey(
+                    None,
+                    HOTKEY_ID,
+                    HOT_KEY_MODIFIERS(MOD_ALT.0 | MOD_NOREPEAT.0),
+                    0x47, // 'G'
+                )
+                .is_ok()
+            };
+
+            let mut guide_was_down = false;
+            loop {
+                let mut should_toggle = false;
+
+                if registered {
+                    let mut msg = MSG::default();
+                    unsafe {
+                        while PeekMessageW(&mut msg, None, WM_HOTKEY, WM_HOTKEY, PM_REMOVE).as_bool() {
+                            if msg.message == WM_HOTKEY && msg.wParam.0 as i32 == HOTKEY_ID {
+                                should_toggle = true;
+                            }
+                        }
+                    }
+                }
+
+                let pad = duke_core::win32_ffi::poll_xinput_state();
+                if pad.connected && pad.guide && !guide_was_down {
+                    should_toggle = true;
+                }
+                guide_was_down = pad.connected && pad.guide;
+
+                if should_toggle {
+                    let app_toggle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = toggle_overlay_window(app_toggle, None).await;
+                    });
+                }
+
+                std::thread::sleep(Duration::from_millis(55));
+            }
+            #[allow(unreachable_code)]
+            if registered {
+                unsafe {
+                    let _ = UnregisterHotKey(None, HOTKEY_ID);
+                }
+            }
+        })
+        .ok();
+
+    #[cfg(not(target_os = "windows"))]
+    let _ = app;
+}
+
 pub(crate) fn crc32_ieee(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in data {
@@ -10139,6 +11110,12 @@ fn main() {
                 swarm::start_swarm_background_services();
             }
 
+            // Resolve missing retail prices for `turbo_downloader` games non-blockingly (`catalog.dkcat` -> DoH).
+            spawn_startup_turbo_price_resolution(app.handle().clone());
+
+            // Start XInput Guide button (`0x0400`) + global `Alt+G` hotkey listener for quick overlay HUD.
+            spawn_overlay_trigger_watcher(app.handle().clone());
+
             // Start leader-elected Duke Suite IPC bus
             let _ = DUKE_BUS.get_or_init(|| {
                 DukeBus::start("duke-launcher", move |event| {
@@ -10282,12 +11259,45 @@ fn main() {
             swarm::beam_game_from_peer,
             swarm::sync_game_saves_mesh,
             pe_inspect::preflight_check_exe,
-            pe_inspect::heal_game_runtime_dlls
+            pe_inspect::heal_game_runtime_dlls,
+            pe_inspect::get_game_compat_status,
+            pe_inspect::toggle_game_laa_patch,
+            pe_inspect::toggle_game_dxvk_wrapper,
+            friends::get_unified_friends,
+            friends::join_friend_session,
+            importers::sync_storefront_playtime,
+            achievements::get_game_achievements,
+            achievements::set_game_achievements_path,
+            ntfs_compress::get_game_storage_stats,
+            ntfs_compress::compress_game_wof,
+            ntfs_compress::decompress_game_wof,
+            metadata_ext::get_game_extended_telemetry,
+            set_game_update_config,
+            check_game_updates,
+            apply_game_update,
+            toggle_overlay_window,
+            hide_overlay_window,
+            trigger_replay_clip_ipc,
+            purge_suite_ram_ipc
         ])
         .build(tauri::generate_context!())
         .expect("error while building Duke Launcher Tauri application");
 
     app.run(move |app_handle, event| {
+        if let tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::CloseRequested { api, .. },
+            ..
+        } = &event
+        {
+            if label == "overlay" {
+                api.prevent_close();
+                if let Some(overlay_win) = app_handle.get_webview_window("overlay") {
+                    let _ = overlay_win.hide();
+                }
+                return;
+            }
+        }
         let exit_cb = || shutdown_flush_downloads(app_handle);
         duke_core::tray_daemon::handle_run_event(
             app_handle,
@@ -10700,5 +11710,54 @@ mod tests {
                 cy_bottom_height: 0,
             }]
         );
+    }
+
+    #[test]
+    fn test_money_saved_scoped_to_turbo_downloader() {
+        let lib = vec![
+            GameEntry {
+                id: "dl_1".to_string(),
+                title: "Downloaded Game".to_string(),
+                acquisition_source: "turbo_downloader".to_string(),
+                steam_price_cents: Some(5999),
+                ..Default::default()
+            },
+            GameEntry {
+                id: "steam_1".to_string(),
+                title: "Imported Steam Game".to_string(),
+                acquisition_source: "steam".to_string(),
+                steam_price_cents: Some(6999),
+                ..Default::default()
+            },
+            GameEntry {
+                id: "manual_1".to_string(),
+                title: "Manual Game".to_string(),
+                acquisition_source: "manual".to_string(),
+                steam_price_cents: Some(3999),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(compute_money_saved_cents(&lib), 5999);
+    }
+
+    #[test]
+    fn test_normalize_migrates_playtime_and_version_comparison() {
+        let mut legacy = GameEntry {
+            id: "old_1".to_string(),
+            title: "Legacy Entry".to_string(),
+            source: "Steam".to_string(),
+            playtime_seconds: 5400,
+            ..Default::default()
+        };
+        normalize_game_entry(&mut legacy);
+        assert_eq!(legacy.acquisition_source, "steam");
+        assert_eq!(legacy.duke_playtime_secs, 5400);
+        assert_eq!(legacy.imported_playtime_secs, 0);
+        assert_eq!(legacy.playtime_seconds, 5400);
+
+        assert!(is_newer_version("1.0.9", "v1.0.10"));
+        assert!(is_newer_version("", "0.1.0"));
+        assert!(!is_newer_version("v2.1.0", "2.1.0"));
+        assert!(!is_newer_version("2.1.0", "2.0.9"));
     }
 }

@@ -643,7 +643,9 @@ mod ext_ffi {
                     .or_else(|_| LoadLibraryA(PCSTR::from_raw(c"xinput1_3.dll".as_ptr().cast())))
                     .or_else(|_| LoadLibraryA(PCSTR::from_raw(c"xinput9_1_0.dll".as_ptr().cast())))
                     .ok()?;
-            let proc = GetProcAddress(hmod, PCSTR::from_raw(c"XInputGetState".as_ptr().cast()))?;
+            // Ordinal 100 (`XInputGetStateEx`) exposes the Xbox Guide button bit (0x0400).
+            let proc = GetProcAddress(hmod, PCSTR::from_raw(100usize as *const u8))
+                .or_else(|| GetProcAddress(hmod, PCSTR::from_raw(c"XInputGetState".as_ptr().cast())))?;
             Some(std::mem::transmute::<
                 unsafe extern "system" fn() -> isize,
                 XInputGetStateFn,
@@ -771,6 +773,7 @@ mod ext_ffi {
                     b: (b & 0x2000) != 0,
                     x: (b & 0x4000) != 0,
                     y: (b & 0x8000) != 0,
+                    guide: (b & 0x0400) != 0,
                     thumb_lx: raw.gamepad.thumb_lx,
                     thumb_ly: raw.gamepad.thumb_ly,
                 };
@@ -1380,6 +1383,8 @@ pub struct XInputPadState {
     pub b: bool,
     pub x: bool,
     pub y: bool,
+    #[serde(default)]
+    pub guide: bool,
     pub lb: bool,
     pub rb: bool,
     pub start: bool,

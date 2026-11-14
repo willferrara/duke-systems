@@ -37,6 +37,10 @@ pub enum DukeEvent {
     RamPurgeRequested {
         source: String,
     },
+    ReplaySaveRequested {
+        game_title: Option<String>,
+        source: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

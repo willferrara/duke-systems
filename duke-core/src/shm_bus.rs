@@ -24,6 +24,7 @@ pub enum ShmEventType {
     RamPurge = 4,
     TelemetryTick = 5,
     GameResumed = 6,
+    ReplaySaveRequested = 7,
 }
 
 impl ShmEventType {
@@ -35,6 +36,7 @@ impl ShmEventType {
             4 => Self::RamPurge,
             5 => Self::TelemetryTick,
             6 => Self::GameResumed,
+            7 => Self::ReplaySaveRequested,
             _ => Self::None,
         }
     }

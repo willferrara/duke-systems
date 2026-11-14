@@ -47,6 +47,12 @@
     <symbol id="icon-win-min" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25"><line x1="3" y1="8" x2="13" y2="8"/></symbol>
     <symbol id="icon-win-max" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25"><rect x="3.5" y="3.5" width="9" height="9" rx="0.5"/></symbol>
     <symbol id="icon-win-close" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25"><path d="M12 4 4 12"/><path d="m4 4 8 8"/></symbol>
+    <symbol id="icon-users" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+    <symbol id="icon-trophy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 19.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 19.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></symbol>
+    <symbol id="icon-wrench" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></symbol>
+    <symbol id="icon-hard-drive" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="12" x2="2" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" y1="16" x2="6.01" y2="16"/><line x1="10" y1="16" x2="10.01" y2="16"/></symbol>
+    <symbol id="icon-tag" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/></symbol>
+    <symbol id="icon-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
   </svg>
 
   <div class="window-shell">
@@ -74,6 +80,11 @@
 
       <div class="titlebar-right">
         <div class="titlebar-drag-filler" data-tauri-drag-region></div>
+        <button type="button" class="titlebar-friends-btn" id="btn-toggle-friends" aria-expanded="false" aria-controls="friends-drawer" title="Toggle Live Multi-Platform Friends Panel (Steam, Xbox, PSN, Duke Swarm)">
+          <svg class="icon" aria-hidden="true"><use href="#icon-users"/></svg>
+          <span>Friends</span>
+          <span class="friends-count-pill mono-num" id="friends-online-pill">0</span>
+        </button>
         <button type="button" class="titlebar-status-pill hidden" id="titlebar-suspend-pill" title="Freeze or resume active game process">
           <svg class="icon" aria-hidden="true"><use href="#icon-pause"/></svg>
           <span>Suspend Game</span>
@@ -212,6 +223,10 @@
             <button type="button" class="filter-pill" data-filter="xbox">Xbox</button>
           </div>
           <div class="sort-wrap">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-sync-playtime" title="Sync historical hours from Steam, GOG Galaxy, Epic & Xbox without overwriting Duke hours">
+              <svg class="icon" aria-hidden="true"><use href="#icon-clock"/></svg>
+              <span>Sync Playtime</span>
+            </button>
             <button type="button" class="btn btn-secondary btn-sm" id="btn-import-libraries" title="Scan Steam, Epic, GOG, and Xbox Game Pass libraries">
               <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
               <span>Import Libraries</span>
@@ -442,6 +457,178 @@
                   <span class="pill" id="detail-news-status">Steam Feed</span>
                 </div>
                 <div class="news-list" id="detail-news-list"></div>
+              </div>
+            </div>
+
+            <div class="detail-columns detail-columns-extra">
+              <div class="panel-card" id="detail-ext-telemetry-card">
+                <div class="panel-head">
+                  <h3>HowLongToBeat &amp; PCGamingWiki</h3>
+                  <div class="detail-head-actions-inline">
+                    <span class="pill" id="detail-ext-telemetry-status">Checking...</span>
+                    <button type="button" class="btn btn-secondary btn-xs" id="btn-refresh-ext-telemetry" title="Refresh HLTB & PCGamingWiki metadata">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                      <span>Refresh</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="hltb-metrics-grid">
+                  <div class="hltb-stat-tile">
+                    <span class="detail-metric-label">Main Story</span>
+                    <strong class="detail-metric-val mono-num" id="detail-hltb-main-hours">--</strong>
+                  </div>
+                  <div class="hltb-stat-tile">
+                    <span class="detail-metric-label">Main + Extras</span>
+                    <strong class="detail-metric-val mono-num" id="detail-hltb-extras-hours">--</strong>
+                  </div>
+                  <div class="hltb-stat-tile">
+                    <span class="detail-metric-label">Completionist</span>
+                    <strong class="detail-metric-val mono-num" id="detail-hltb-comp-hours">--</strong>
+                  </div>
+                </div>
+                <div class="hltb-progress-wrap">
+                  <div class="detail-field-head">
+                    <span class="field-label">Unified Playtime vs Main Story</span>
+                    <span class="mono-num panel-sub" id="detail-hltb-progress-label">0.0h / --</span>
+                  </div>
+                  <div class="progress-track">
+                    <div class="progress-fill" id="detail-hltb-progress-fill" style="width:0%"></div>
+                  </div>
+                </div>
+                <div class="kv-rows pcgw-kv-rows">
+                  <div class="kv-row">
+                    <span class="kv-k">Engine</span>
+                    <span class="kv-v mono-num" id="detail-pcgw-engine">--</span>
+                  </div>
+                  <div class="kv-row">
+                    <span class="kv-k">Controller</span>
+                    <span class="kv-v" id="detail-pcgw-controller">--</span>
+                  </div>
+                </div>
+                <div class="detail-save-actions">
+                  <button type="button" class="btn btn-secondary btn-xs hidden" id="btn-open-pcgw-wiki">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-external-link"/></svg>
+                    <span>Open PCGamingWiki</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="panel-card" id="detail-achievements-card">
+                <div class="panel-head">
+                  <h3>Achievements &amp; Trophies</h3>
+                  <div class="detail-head-actions-inline">
+                    <span class="pill" id="detail-ach-status-pill">Ready</span>
+                    <button type="button" class="btn btn-secondary btn-xs" id="btn-refresh-achievements">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-trophy"/></svg>
+                      <span>Scan</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="hltb-progress-wrap">
+                  <div class="detail-field-head">
+                    <span class="field-label">Unified Unlock Progress</span>
+                    <span class="mono-num panel-sub" id="detail-ach-progress-label">0 / 0 (0%)</span>
+                  </div>
+                  <div class="progress-track">
+                    <div class="progress-fill done" id="detail-ach-progress-fill" style="width:0%"></div>
+                  </div>
+                </div>
+                <div id="detail-ach-recent-list" class="ach-recent-list">
+                  <div class="panel-sub">Scanning local achievements.json / stats.ini &amp; connected storefronts...</div>
+                </div>
+                <div class="detail-field-block">
+                  <div class="detail-field-head">
+                    <span class="field-label">Custom Telemetry File / Folder</span>
+                    <button type="button" class="btn btn-secondary btn-xs" id="btn-save-ach-path">Save Path</button>
+                  </div>
+                  <input type="text" id="detail-ach-path" class="input-control mono-num" placeholder="Optional path to achievements.json or stats.ini" />
+                </div>
+              </div>
+
+              <div class="panel-card" id="detail-updates-card">
+                <div class="panel-head">
+                  <h3>Build &amp; Portable Updates</h3>
+                  <span class="pill" id="detail-update-status-pill">Unconfigured</span>
+                </div>
+                <div class="detail-field-block">
+                  <span class="field-label">Installed Version Tag</span>
+                  <input type="text" id="detail-version-tag" class="input-control mono-num" placeholder="e.g. 1.0.4 or v2.1" />
+                </div>
+                <div class="detail-field-block">
+                  <span class="field-label">Update Feed JSON URL (Manifest / FastCDC / Release)</span>
+                  <input type="url" id="detail-update-feed-url" class="input-control mono-num" placeholder="https://example.com/release-feed.json" />
+                </div>
+                <div class="detail-save-actions">
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-save-update-config">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-tag"/></svg>
+                    <span>Save Build</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-check-game-update">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                    <span>Check Updates</span>
+                  </button>
+                  <button type="button" class="btn btn-primary btn-xs hidden" id="btn-apply-game-update">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
+                    <span>Apply Update</span>
+                  </button>
+                </div>
+                <p class="panel-sub hidden" id="detail-update-notes"></p>
+              </div>
+
+              <div class="panel-card" id="detail-compat-card">
+                <div class="panel-head">
+                  <h3>Legacy Compatibility &amp; Wrappers</h3>
+                  <span class="pill mono-num" id="detail-compat-arch-pill">PE32</span>
+                </div>
+                <p class="panel-sub" id="detail-compat-status">Inspecting executable PE header &amp; DirectX imports...</p>
+                <div class="compat-badge-strip" id="detail-compat-dx-list"></div>
+                <div class="detail-save-actions">
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-toggle-laa">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-wrench"/></svg>
+                    <span>Patch 4GB LAA</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-toggle-dxvk">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-layers"/></svg>
+                    <span>Deploy DXVK</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="panel-card detail-card-span2" id="detail-wof-card">
+                <div class="panel-head">
+                  <h3>Storage &amp; Windows 11 WOF Compression</h3>
+                  <span class="pill mono-num" id="detail-wof-status-pill">Uncompressed</span>
+                </div>
+                <div class="hltb-metrics-grid">
+                  <div class="hltb-stat-tile">
+                    <span class="detail-metric-label">Logical Size</span>
+                    <strong class="detail-metric-val mono-num" id="detail-wof-logical">--</strong>
+                  </div>
+                  <div class="hltb-stat-tile">
+                    <span class="detail-metric-label">Actual SSD Footprint</span>
+                    <strong class="detail-metric-val mono-num" id="detail-wof-compressed">--</strong>
+                  </div>
+                  <div class="hltb-stat-tile">
+                    <span class="detail-metric-label">Space Reclaimed</span>
+                    <strong class="detail-metric-val mono-num emerald" id="detail-wof-saved">0.00 GB (0%)</strong>
+                  </div>
+                </div>
+                <div class="wof-controls-row">
+                  <select id="select-wof-algorithm" class="select-control select-compact">
+                    <option value="LZX">LZX (Maximum Ratio)</option>
+                    <option value="XPRESS16K">XPRESS 16K (Balanced)</option>
+                    <option value="XPRESS8K" selected>XPRESS 8K (Fast Gaming Default)</option>
+                    <option value="XPRESS4K">XPRESS 4K (Ultra Low CPU)</option>
+                  </select>
+                  <button type="button" class="btn btn-primary btn-xs" id="btn-compress-wof">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-hard-drive"/></svg>
+                    <span>Compress Game (WOF)</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-decompress-wof">
+                    <span>Decompress</span>
+                  </button>
+                </div>
+                <p class="panel-sub mono-num hidden" id="detail-wof-progress"></p>
               </div>
             </div>
           </section>
@@ -988,6 +1175,71 @@
                 <input type="checkbox" id="setting-auto-detect-clipboard" class="setting-checkbox" checked />
               </label>
 
+              <div class="setting-integration-group">
+                <div class="setting-toggle-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Steam Web API Key &amp; Local SteamID64</div>
+                    <div class="setting-toggle-desc">Enables Steam Friends, Lobby Join &amp; Achievement Sync. Detected ID: <code class="mono-num" id="setting-detected-steam-id">Scanning...</code></div>
+                  </div>
+                  <div class="setting-inline-controls">
+                    <span class="pill mono-num" id="setting-steam-key-status">Not Set</span>
+                    <input type="password" id="setting-steam-api-key" class="input-control mono-num" placeholder="Paste Steam Web API key..." autocomplete="off" />
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-save-steam-api-key">Save Key</button>
+                    <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-clear-steam-api-key">Clear</button>
+                  </div>
+                </div>
+
+                <div class="setting-toggle-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Manual 64-bit SteamID Override (Optional)</div>
+                    <div class="setting-toggle-desc">Overrides the SteamID64 auto-detected from local <code>Steam\config\loginusers.vdf</code>.</div>
+                  </div>
+                  <div class="setting-inline-controls">
+                    <input type="text" id="setting-steam-id-override" class="input-control mono-num" placeholder="7656119xxxxxxxxxx" autocomplete="off" />
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-save-steam-id-override">Save ID</button>
+                  </div>
+                </div>
+
+                <div class="setting-toggle-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Xbox Live API Key (xbl.io)</div>
+                    <div class="setting-toggle-desc">Enables Xbox Friends Rich Presence, Xbox Achievements &amp; TitleHub Playtime Sync.</div>
+                  </div>
+                  <div class="setting-inline-controls">
+                    <span class="pill mono-num" id="setting-xbox-key-status">Not Set</span>
+                    <input type="password" id="setting-xbox-api-key" class="input-control mono-num" placeholder="Paste xbl.io API key..." autocomplete="off" />
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-save-xbox-api-key">Save Key</button>
+                    <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-clear-xbox-api-key">Clear</button>
+                  </div>
+                </div>
+
+                <div class="setting-toggle-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">PlayStation Network Token (64-char NPSSO)</div>
+                    <div class="setting-toggle-desc">Exchanged securely over DoH for PSN Friends Presence (PS4/PS5 badges) &amp; Trophy Sync.</div>
+                  </div>
+                  <div class="setting-inline-controls">
+                    <span class="pill mono-num" id="setting-psn-npsso-status">Not Set</span>
+                    <input type="password" id="setting-psn-npsso" class="input-control mono-num" placeholder="Paste 64-char NPSSO token..." autocomplete="off" />
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-save-psn-npsso">Save Token</button>
+                    <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-clear-psn-npsso">Clear</button>
+                  </div>
+                </div>
+
+                <div class="setting-toggle-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Multi-Launcher Playtime Sync</div>
+                    <div class="setting-toggle-desc">Read Steam <code>localconfig.vdf</code>, GOG <code>galaxy-2.0.db</code>, Epic metadata &amp; Xbox TitleHub hours non-destructively.</div>
+                  </div>
+                  <div class="setting-inline-controls">
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-settings-sync-playtime">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-clock"/></svg>
+                      <span>Sync Storefront Hours</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
               <div class="bookmarklet-card bookmarklet-card-settings">
                 <div class="bookmarklet-copy">
                   <div class="bookmarklet-title">
@@ -1087,6 +1339,26 @@
           </section>
         </div>
       </main>
+
+      <!-- Collapsible Multi-Platform Friends Drawer -->
+      <aside id="friends-drawer" class="friends-drawer hidden" aria-label="Live Multi-Platform Friends Panel">
+        <div class="friends-drawer-head">
+          <div class="friends-drawer-title-row">
+            <svg class="icon" aria-hidden="true"><use href="#icon-users"/></svg>
+            <h3>Friends</h3>
+          </div>
+          <div class="friends-drawer-head-actions">
+            <button type="button" class="win-btn" id="btn-refresh-friends" title="Refresh Steam, Xbox, PSN & Swarm Presence">
+              <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+            </button>
+            <button type="button" class="win-btn" id="btn-close-friends" title="Close Friends Drawer">
+              <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="friends-status-summary panel-sub" id="friends-drawer-summary">Connecting multi-platform presence...</div>
+        <div class="friends-drawer-list" id="friends-drawer-list"></div>
+      </aside>
     </div>
   </div>
 
@@ -1336,6 +1608,47 @@
       </div>
     </div>
   </div>
+
+  <!-- Quick In-Game Guide / Alt+G Overlay HUD (?mode=overlay) -->
+  <section id="overlay-hud-shell" class="overlay-hud-shell hidden" aria-label="Duke Quick In-Game Overlay">
+    <div class="overlay-hud-head" data-tauri-drag-region>
+      <div class="overlay-hud-brand">
+        <span class="brand-glyph small" aria-hidden="true">D</span>
+        <div>
+          <div class="overlay-hud-title">Duke Quick Overlay</div>
+          <div class="overlay-hud-sub mono-num" id="overlay-active-game">Idle Session</div>
+        </div>
+      </div>
+      <button type="button" class="win-btn" id="btn-overlay-close" title="Close Overlay (Guide / Alt+G / Esc)">
+        <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
+      </button>
+    </div>
+    <div class="overlay-actions-grid">
+      <button type="button" class="overlay-action-btn" id="btn-overlay-suspend">
+        <svg class="icon" aria-hidden="true"><use href="#icon-pause"/></svg>
+        <span>Freeze / Resume Game</span>
+      </button>
+      <button type="button" class="overlay-action-btn" id="btn-overlay-purge-ram">
+        <svg class="icon" aria-hidden="true"><use href="#icon-cpu"/></svg>
+        <span>Purge Standby RAM</span>
+      </button>
+      <button type="button" class="overlay-action-btn" id="btn-overlay-replay-clip">
+        <svg class="icon" aria-hidden="true"><use href="#icon-video"/></svg>
+        <span>Save Replay Clip</span>
+      </button>
+      <button type="button" class="overlay-action-btn" id="btn-overlay-refresh-friends">
+        <svg class="icon" aria-hidden="true"><use href="#icon-users"/></svg>
+        <span>Refresh Online Friends</span>
+      </button>
+    </div>
+    <div class="overlay-friends-section">
+      <div class="overlay-section-label">Online Friends &amp; Lobby Join</div>
+      <div id="overlay-friends-list" class="overlay-friends-list">
+        <div class="panel-sub">Loading presence...</div>
+      </div>
+    </div>
+    <div class="overlay-status-line mono-num" id="overlay-status-line">Ready (Alt+G or Guide button)</div>
+  </section>
 
   <div id="toast-container" class="toast-container"></div>
   <script type="module" src="main.js"></script>

@@ -2,15 +2,19 @@ import {
   THEME_PRESETS,
   addSearchSite,
   applyCustomArtwork,
+  applyGameUpdate,
   applyWindowBackdrop,
   beamGameFromPeer,
   buildDirectorySearchUrl,
   bulkImportSearchSites,
+  checkGameUpdates,
   clearCompletedDownloads,
   compressGameFolder,
+  compressGameWof,
   convertFileSrc,
   createDesktopShortcutWithIcon,
   createGameSnapshot,
+  decompressGameWof,
   deleteGameSnapshot,
   discoverGameSavePaths,
   enrichCatalogQuery,
@@ -25,18 +29,25 @@ import {
   getActiveGameSessions,
   getCatalogGameDetails,
   getCatalogMmapStats,
+  getGameAchievements,
+  getGameCompatStatus,
+  getGameExtendedTelemetry,
+  getGameStorageStats,
   getImportedSources,
   getLauncherSettings,
   getSearchSites,
   getSidebarIcons,
   getSwarmStatus,
+  getUnifiedFriends,
   healGameRuntimeDlls,
+  hideOverlayWindow,
   importExistingLibraries,
   importSourceFile,
   importSourceUrl,
   initWindowControls,
   invokeCommand,
   isValidHttpUrl,
+  joinFriendSession,
   linkLocalGameWithSteamId,
   listGameSnapshots,
   listSaveBackups,
@@ -52,6 +63,7 @@ import {
   pollGamepadState,
   preflightCheckExe,
   probeSwarmPeers,
+  purgeSuiteRamIpc,
   queryCatalogMmap,
   readClipboardText,
   refreshAllImportedSources,
@@ -63,13 +75,20 @@ import {
   restoreGameSnapshot,
   searchImportedSources,
   searchSteamGridDbArtwork,
+  setGameAchievementsPath,
   setGameLaunchArgs,
   setGameLaunchProfile,
+  setGameUpdateConfig,
   suspendOrResumeGame,
   syncGameSavesMesh,
   syncLudusaviManifest,
+  syncStorefrontPlaytime,
   takePendingProtocolUrls,
+  toggleGameDxvkWrapper,
+  toggleGameLaaPatch,
   toggleImportedSource,
+  toggleOverlayWindow,
+  triggerReplayClipIpc,
   updateLauncherSettings,
   writeClipboardText
 } from "./api.js";
@@ -143,6 +162,18 @@ const state = {
   seenClipboardUrls: new Set(),
   clipboardFocusTimer: null,
   steamgriddbApiKey: "",
+  steamApiKeyConfigured: false,
+  xboxApiKeyConfigured: false,
+  psnNpssoConfigured: false,
+  steamIdOverride: "",
+  detectedSteamId: "",
+  friendsDrawerOpen: false,
+  friendsPollTimer: null,
+  friendsSnapshot: null,
+  friendsLoading: false,
+  detailPcgwWikiUrl: "",
+  detailCompatStatus: null,
+  audioCtx: null,
   suspendHotkey: "Ctrl+Alt+P",
   couchMode: false,
   sgdbResults: null,
@@ -280,8 +311,17 @@ function updateNavCatalogBadge() {
   }
 }
 
+function getTotalPlaytimeSecs(game) {
+  if (!game) return 0;
+  const split = Number(game.importedPlaytimeSecs || 0) + Number(game.dukePlaytimeSecs || 0);
+  return Math.max(split, Number(game.playtimeSeconds || 0));
+}
+
 function updateSidebarTelemetry(telemetry) {
-  const totalSavedCents = state.library.reduce((acc, g) => acc + Number(g.steamPriceCents || 0), 0);
+  const totalSavedCents = state.library.reduce(
+    (acc, g) => (g?.acquisitionSource === "turbo_downloader" ? acc + Number(g.steamPriceCents || 0) : acc),
+    0
+  );
   const totalBytes = state.library.reduce((acc, g) => acc + Number(g.sizeBytes || 0), 0);
 
   if (el("nav-library-count")) el("nav-library-count").textContent = String(state.library.length);
@@ -517,10 +557,13 @@ function renderLibraryGrid() {
   grid.innerHTML = games
     .map((game) => {
       const cover = game.coverUrl || generateFallbackCoverDataUri(game.title, game.genre || "Installed");
-      const playtimeStr = formatPlaytime(game.playtimeSeconds || 0);
+      const playtimeStr = formatPlaytime(getTotalPlaytimeSecs(game));
       const lastStr = formatLastPlayed(game.lastPlayedTs || game.lastPlayed);
       const favClass = game.isFavorite ? "is-fav" : "";
       const sourceLabel = resolveGameSourceLabel(game);
+      const updateBadge = game.updateAvailable
+        ? `<span class="card-badge card-badge-update" title="Newer version detected on update feed">Update Available</span>`
+        : "";
 
       return `
         <article class="game-card" data-game-id="${escapeHtml(game.id)}">
@@ -528,6 +571,7 @@ function renderLibraryGrid() {
             <img src="${escapeHtml(cover)}" alt="${escapeHtml(game.title)}" class="game-card-img" loading="lazy" />
             <span class="game-source-badge">${escapeHtml(sourceLabel)}</span>
             <div class="game-card-badges">
+              ${updateBadge}
               <span class="card-badge mono-num">${escapeHtml(game.sizeFormatted || formatBytesJs(game.sizeBytes))}</span>
               <button type="button" class="card-fav-btn ${favClass}" data-action="fav" data-game-id="${escapeHtml(game.id)}" title="Toggle Favorite">
                 ${svgIcon("icon-pin")}
@@ -752,7 +796,13 @@ async function openGameDetail(gameId) {
   }
 
   if (el("detail-last-played")) el("detail-last-played").textContent = formatLastPlayed(game.lastPlayedTs || game.lastPlayed);
-  if (el("detail-playtime")) el("detail-playtime").textContent = formatPlaytime(game.playtimeSeconds || 0);
+  if (el("detail-playtime")) {
+    const importedSecs = Number(game.importedPlaytimeSecs || 0);
+    const dukeSecs = Number(game.dukePlaytimeSecs || 0);
+    const totalSecs = getTotalPlaytimeSecs(game);
+    el("detail-playtime").textContent = formatPlaytime(totalSecs);
+    el("detail-playtime").title = `Imported Storefront: ${formatPlaytime(importedSecs)} · Duke Tracker: ${formatPlaytime(dukeSecs)}`;
+  }
   if (el("detail-live-players")) el("detail-live-players").textContent = "Checking...";
   if (el("detail-steam-price")) el("detail-steam-price").textContent = game.steamPriceFormatted || "--";
   if (el("detail-install-size")) el("detail-install-size").textContent = game.sizeFormatted || formatBytesJs(game.sizeBytes);
@@ -773,6 +823,7 @@ async function openGameDetail(gameId) {
   if (el("detail-news-list")) el("detail-news-list").innerHTML = `<div class="panel-sub">Loading recent updates...</div>`;
 
   loadDetailSavePaths(game, requestId, false);
+  loadAllDetailPanels(game, requestId);
   refreshActiveSessions();
 
   const pinBtn = el("btn-detail-pin");
@@ -859,6 +910,689 @@ async function openGameDetail(gameId) {
 }
 
 const openGameDetailView = openGameDetail;
+
+function playAchievementChime() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    if (!state.audioCtx) {
+      state.audioCtx = new AudioCtx();
+    }
+    const ctx = state.audioCtx;
+    if (ctx.state === "suspended") {
+      ctx.resume().catch(() => {});
+    }
+    const now = ctx.currentTime;
+    const notes = [
+      { freq: 783.99, start: 0.0, dur: 0.14 },
+      { freq: 987.77, start: 0.09, dur: 0.18 },
+      { freq: 1174.66, start: 0.18, dur: 0.32 }
+    ];
+    for (const note of notes) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(note.freq, now + note.start);
+      gain.gain.setValueAtTime(0.0001, now + note.start);
+      gain.gain.exponentialRampToValueAtTime(0.08, now + note.start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + note.start + note.dur);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + note.start);
+      osc.stop(now + note.start + note.dur + 0.02);
+    }
+  } catch {
+    // Audio playback may be unavailable in headless environments.
+  }
+}
+
+function showAchievementToast(payload) {
+  if (!payload) return;
+  playAchievementChime();
+  const c = el("toast-container");
+  if (!c) return;
+  const t = document.createElement("div");
+  t.className = "toast success";
+  const title = payload.displayName || payload.apiName || "Achievement Unlocked";
+  const gameTitle = payload.gameTitle ? `${payload.gameTitle} · ` : "";
+  const desc = payload.description ? ` — ${payload.description}` : "";
+  t.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;">
+      ${svgIcon("icon-trophy")}
+      <div>
+        <div style="font-weight:600;">${escapeHtml(title)}</div>
+        <div style="font-size:11.5px;opacity:0.86;">${escapeHtml(gameTitle + (payload.source || "Local") + desc)}</div>
+      </div>
+    </div>
+  `;
+  c.appendChild(t);
+  setTimeout(() => t.remove(), 5200);
+}
+
+function renderDetailExtendedTelemetry(report, game) {
+  const fmtHrs = (v) => (v != null && Number(v) > 0 ? `${Number(v).toFixed(1)} h` : "--");
+  const hltb = report?.hltb || null;
+  const pcgw = report?.pcgw || null;
+  if (el("detail-ext-telemetry-status")) {
+    el("detail-ext-telemetry-status").textContent = report?.hltbStatus || "Ready";
+  }
+  if (el("detail-hltb-main-hours")) el("detail-hltb-main-hours").textContent = fmtHrs(hltb?.mainStoryHours);
+  if (el("detail-hltb-extras-hours")) el("detail-hltb-extras-hours").textContent = fmtHrs(hltb?.mainPlusExtrasHours);
+  if (el("detail-hltb-comp-hours")) el("detail-hltb-comp-hours").textContent = fmtHrs(hltb?.completionistHours);
+
+  const unifiedHours = Number(report?.unifiedPlaytimeHours ?? getTotalPlaytimeSecs(game) / 3600);
+  const mainHrs = Number(hltb?.mainStoryHours || 0);
+  const rawPct = Number(report?.mainProgressPct ?? (mainHrs > 0 ? (unifiedHours / mainHrs) * 100 : 0));
+  const clampedPct = Math.max(0, Math.min(100, rawPct));
+  if (el("detail-hltb-progress-label")) {
+    el("detail-hltb-progress-label").textContent =
+      mainHrs > 0
+        ? `${unifiedHours.toFixed(1)} h / ${mainHrs.toFixed(1)} h (${rawPct.toFixed(0)}%)`
+        : `${unifiedHours.toFixed(1)} h played`;
+  }
+  if (el("detail-hltb-progress-fill")) {
+    el("detail-hltb-progress-fill").style.width = `${clampedPct.toFixed(1)}%`;
+  }
+  if (el("detail-pcgw-engine")) el("detail-pcgw-engine").textContent = pcgw?.engine || "--";
+  if (el("detail-pcgw-controller")) el("detail-pcgw-controller").textContent = pcgw?.controllerSupport || "--";
+  state.detailPcgwWikiUrl = pcgw?.wikiUrl || "";
+  const wikiBtn = el("btn-open-pcgw-wiki");
+  if (wikiBtn) {
+    wikiBtn.title = state.detailPcgwWikiUrl || "Search this title on PCGamingWiki";
+  }
+}
+
+async function loadDetailExtendedTelemetry(game, requestId, forceRefresh = false) {
+  if (!game) return;
+  if (el("detail-ext-telemetry-status")) {
+    el("detail-ext-telemetry-status").textContent = forceRefresh ? "Refreshing..." : "Querying...";
+  }
+  try {
+    const report = await getGameExtendedTelemetry(game.id, forceRefresh);
+    if (requestId !== state.activeDetailRequestId || state.selectedDetailId !== game.id) return;
+    renderDetailExtendedTelemetry(report, game);
+  } catch (err) {
+    if (requestId !== state.activeDetailRequestId || state.selectedDetailId !== game.id) return;
+    if (el("detail-ext-telemetry-status")) el("detail-ext-telemetry-status").textContent = "Offline";
+    if (forceRefresh) showToast(String(err), "error");
+  }
+}
+
+function renderDetailAchievements(report) {
+  const unlocked = Number(report?.unlockedCount || 0);
+  const total = Number(report?.totalCount || 0);
+  const pct = total > 0 ? Math.max(0, Math.min(100, Number(report?.completionPercent ?? (unlocked / total) * 100))) : 0;
+  const sources = Array.isArray(report?.sources) && report.sources.length > 0 ? report.sources.join(" + ") : "Local";
+
+  if (el("detail-ach-status-pill")) {
+    el("detail-ach-status-pill").textContent = total > 0 ? `${unlocked}/${total} · ${sources}` : "No Schema";
+  }
+  if (el("detail-ach-progress-label")) {
+    el("detail-ach-progress-label").textContent = `${unlocked} / ${total} (${pct.toFixed(0)}%)`;
+  }
+  if (el("detail-ach-progress-fill")) {
+    el("detail-ach-progress-fill").style.width = `${pct.toFixed(1)}%`;
+  }
+  if (el("detail-ach-path") && typeof report?.customPath === "string") {
+    el("detail-ach-path").value = report.customPath;
+  }
+
+  const list = el("detail-ach-recent-list");
+  if (!list) return;
+  const recent = Array.isArray(report?.recentUnlocks) ? report.recentUnlocks : [];
+  const allItems = Array.isArray(report?.achievements) ? report.achievements : [];
+  const display = recent.length > 0 ? recent : allItems.slice(0, 6);
+  if (display.length === 0) {
+    list.innerHTML = `<div class="panel-sub">${escapeHtml(report?.statusMessage || "No local or connected storefront achievements found.")}</div>`;
+    return;
+  }
+
+  list.innerHTML = display
+    .slice(0, 8)
+    .map((item) => {
+      const title = item.displayName || item.apiName || "Achievement";
+      const iconHtml = item.iconUrl
+        ? `<img src="${escapeHtml(item.iconUrl)}" alt="" class="ach-icon" loading="lazy" />`
+        : `<div class="ach-icon-fallback">${svgIcon("icon-trophy")}</div>`;
+      const stateLabel = item.unlocked
+        ? item.unlockedAt
+          ? `Unlocked ${formatLastPlayed(item.unlockedAt)}`
+          : "Unlocked"
+        : "Locked";
+      const subText = item.description ? `${stateLabel} · ${item.description}` : `${stateLabel} · ${item.source || "Local"}`;
+      return `
+        <div class="ach-row">
+          ${iconHtml}
+          <div class="ach-copy">
+            <div class="ach-title">${escapeHtml(title)}</div>
+            <div class="ach-desc">${escapeHtml(subText)}</div>
+          </div>
+          <span class="pill mono-num">${escapeHtml(item.source || "Local")}</span>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+async function loadDetailAchievements(game, requestId) {
+  if (!game) return;
+  if (el("detail-ach-status-pill")) el("detail-ach-status-pill").textContent = "Scanning...";
+  try {
+    const report = await getGameAchievements(game.id);
+    if (requestId !== state.activeDetailRequestId || state.selectedDetailId !== game.id) return;
+    renderDetailAchievements(report);
+  } catch (err) {
+    if (requestId !== state.activeDetailRequestId || state.selectedDetailId !== game.id) return;
+    if (el("detail-ach-status-pill")) el("detail-ach-status-pill").textContent = "Unavailable";
+    if (el("detail-ach-recent-list")) {
+      el("detail-ach-recent-list").innerHTML = `<div class="panel-sub">${escapeHtml(String(err))}</div>`;
+    }
+  }
+}
+
+function renderDetailUpdateState(game, checkReport = null) {
+  if (!game) return;
+  if (el("detail-version-tag")) el("detail-version-tag").value = game.versionTag || "";
+  if (el("detail-update-feed-url")) el("detail-update-feed-url").value = game.updateFeedUrl || "";
+
+  const updateAvail = Boolean(checkReport?.updateAvailable ?? game.updateAvailable);
+  const latestTag = checkReport?.latestVersion || game.latestVersionTag || "";
+  const pill = el("detail-update-status-pill");
+  if (pill) {
+    pill.classList.toggle("accent", updateAvail);
+    if (updateAvail) {
+      pill.textContent = latestTag ? `Update ${latestTag}` : "Update Available";
+    } else if (checkReport) {
+      pill.textContent = "Up to Date";
+    } else if ((game.updateFeedUrl || "").trim()) {
+      pill.textContent = "Configured";
+    } else {
+      pill.textContent = "Unconfigured";
+    }
+  }
+
+  const applyBtn = el("btn-apply-game-update");
+  if (applyBtn) {
+    applyBtn.classList.toggle("hidden", !updateAvail);
+  }
+
+  const notesEl = el("detail-update-notes");
+  if (notesEl) {
+    const notesText = String(checkReport?.notes || "").trim();
+    notesEl.textContent = notesText;
+    notesEl.classList.toggle("hidden", !notesText);
+  }
+}
+
+function renderDetailCompat(report) {
+  state.detailCompatStatus = report || null;
+  if (el("detail-compat-arch-pill")) {
+    const base = report?.is32bit ? "PE32 (32-bit)" : "PE32+ (64-bit)";
+    el("detail-compat-arch-pill").textContent = report?.largeAddressAware ? `${base} · LAA` : base;
+  }
+  if (el("detail-compat-status")) {
+    el("detail-compat-status").textContent = report?.statusMessage || "PE inspection complete.";
+  }
+
+  const strip = el("detail-compat-dx-list");
+  if (strip) {
+    const apis = Array.isArray(report?.legacyDxImports) ? report.legacyDxImports : [];
+    const pills = apis.map((api) => `<span class="pill accent mono-num">${escapeHtml(api)}</span>`);
+    if (apis.length === 0) {
+      pills.push(`<span class="pill">No D3D8-11 legacy imports</span>`);
+    }
+    pills.push(
+      `<span class="pill mono-num">${report?.dxvkSourceReady ? "DXVK Repo Ready" : "DXVK Repo Empty"}</span>`
+    );
+    strip.innerHTML = pills.join("");
+  }
+
+  const laaBtn = el("btn-toggle-laa");
+  if (laaBtn) {
+    laaBtn.disabled = !report?.is32bit;
+    const span = laaBtn.querySelector("span");
+    if (span) {
+      span.textContent = report?.largeAddressAware ? "Revert 4GB LAA" : "Patch 4GB LAA";
+    }
+  }
+
+  const dxvkBtn = el("btn-toggle-dxvk");
+  if (dxvkBtn) {
+    const span = dxvkBtn.querySelector("span");
+    if (span) {
+      span.textContent = report?.dxvkDeployed ? "Remove DXVK" : "Deploy DXVK";
+    }
+  }
+}
+
+async function loadDetailCompat(game, requestId) {
+  if (!game) return;
+  if (el("detail-compat-status")) el("detail-compat-status").textContent = "Inspecting executable PE header & DirectX imports...";
+  try {
+    const report = await getGameCompatStatus(game.id);
+    if (requestId !== state.activeDetailRequestId || state.selectedDetailId !== game.id) return;
+    renderDetailCompat(report);
+  } catch (err) {
+    if (requestId !== state.activeDetailRequestId || state.selectedDetailId !== game.id) return;
+    if (el("detail-compat-status")) el("detail-compat-status").textContent = String(err);
+  }
+}
+
+function renderDetailWofStorage(stats) {
+  const logical = Number(stats?.logicalBytes || 0);
+  const compressed = Number(stats?.compressedBytes || 0);
+  const saved = Number(stats?.savedBytes || 0);
+  const pct = Number(stats?.savedPct || 0);
+  if (el("detail-wof-logical")) el("detail-wof-logical").textContent = formatBytesJs(logical);
+  if (el("detail-wof-compressed")) el("detail-wof-compressed").textContent = formatBytesJs(compressed);
+  if (el("detail-wof-saved")) {
+    el("detail-wof-saved").textContent = `${formatBytesJs(saved)} (${pct.toFixed(1)}%)`;
+  }
+  if (el("detail-wof-status-pill")) {
+    const count = Number(stats?.compressedFiles || 0);
+    el("detail-wof-status-pill").textContent =
+      count > 0 ? `${stats?.activeAlgorithm || "WOF"} · ${count} files` : "Uncompressed";
+  }
+}
+
+async function loadDetailWofStorage(game, requestId) {
+  if (!game) return;
+  if (el("detail-wof-status-pill")) el("detail-wof-status-pill").textContent = "Measuring...";
+  if (el("detail-wof-progress")) el("detail-wof-progress").classList.add("hidden");
+  try {
+    const stats = await getGameStorageStats(game.id);
+    if (requestId !== state.activeDetailRequestId || state.selectedDetailId !== game.id) return;
+    renderDetailWofStorage(stats);
+  } catch (err) {
+    if (requestId !== state.activeDetailRequestId || state.selectedDetailId !== game.id) return;
+    if (el("detail-wof-status-pill")) el("detail-wof-status-pill").textContent = "Unavailable";
+    if (el("detail-wof-logical")) el("detail-wof-logical").textContent = game.sizeFormatted || "--";
+    if (el("detail-wof-compressed")) el("detail-wof-compressed").textContent = "--";
+    if (el("detail-wof-saved")) el("detail-wof-saved").textContent = escapeHtml(String(err)).slice(0, 32);
+  }
+}
+
+function loadAllDetailPanels(game, requestId) {
+  if (!game) return;
+  if (el("detail-ach-path")) el("detail-ach-path").value = game.achievementsPath || "";
+  renderDetailUpdateState(game, null);
+  loadDetailExtendedTelemetry(game, requestId, false);
+  loadDetailAchievements(game, requestId);
+  loadDetailCompat(game, requestId);
+  loadDetailWofStorage(game, requestId);
+}
+
+function buildFriendCardHtml(friend, compactOverlay = false) {
+  const plat = String(friend?.platform || "Steam");
+  const platClass = plat.toLowerCase();
+  const statusClass =
+    friend?.status === "in_game" ? "in-game" : friend?.status === "online" ? "online" : "offline";
+  const initial = (friend?.displayName || "?").trim().charAt(0).toUpperCase() || "?";
+  const avatarHtml = friend?.avatarUrl
+    ? `<img src="${escapeHtml(friend.avatarUrl)}" alt="" class="friend-avatar" loading="lazy" />`
+    : `<div class="friend-avatar-fallback">${escapeHtml(initial)}</div>`;
+  const hwBadge = friend?.hardwareBadge
+    ? `<span class="friend-platform-badge mono-num">${escapeHtml(friend.hardwareBadge)}</span>`
+    : "";
+  const presence = friend?.gameTitle
+    ? `Playing ${friend.gameTitle}${friend.presenceText && friend.presenceText !== friend.gameTitle ? ` · ${friend.presenceText}` : ""}`
+    : friend?.presenceText || friend?.statusLabel || "Offline";
+
+  const actions = [];
+  if (friend?.canJoinLobby) {
+    actions.push(`
+      <button
+        type="button"
+        class="btn btn-primary btn-xs"
+        data-friend-action="join-lobby"
+        data-platform="${escapeHtml(plat)}"
+        data-steam-app-id="${escapeHtml(friend.gameId || "")}"
+        data-lobby-steam-id="${escapeHtml(friend.lobbySteamId || "")}"
+        data-friend-steam-id="${escapeHtml(friend.id || "")}"
+        data-server-ip="${escapeHtml(friend.gameServerIp || "")}"
+        data-peer-addr="${escapeHtml(friend.swarmPeerAddr || "")}"
+        data-game-id="${escapeHtml(friend.matchedLibraryGameId || "")}"
+      >Join Lobby</button>
+    `);
+  }
+  if (!compactOverlay && friend?.matchedLibraryGameId) {
+    actions.push(`
+      <button
+        type="button"
+        class="btn btn-secondary btn-xs"
+        data-friend-action="launch-game"
+        data-matched-game-id="${escapeHtml(friend.matchedLibraryGameId)}"
+      >Launch Same Game</button>
+    `);
+  }
+  if (!compactOverlay && plat === "Swarm" && friend?.matchedLibraryGameId) {
+    actions.push(`
+      <button
+        type="button"
+        class="btn btn-secondary btn-xs"
+        data-friend-action="beam-save"
+        data-matched-game-id="${escapeHtml(friend.matchedLibraryGameId)}"
+      >Beam Save</button>
+    `);
+  }
+
+  return `
+    <div class="friend-card">
+      <div class="friend-card-top">
+        <div class="friend-avatar-wrap">
+          ${avatarHtml}
+          <span class="friend-dot ${statusClass}"></span>
+        </div>
+        <div class="friend-meta">
+          <div class="friend-name-row">
+            <span class="friend-name">${escapeHtml(friend?.displayName || "Friend")}</span>
+            <span class="friend-platform-badge ${platClass}">${escapeHtml(plat)}</span>
+            ${hwBadge}
+          </div>
+          <div class="friend-presence ${friend?.status === "in_game" ? "active-game" : ""}">${escapeHtml(presence)}</div>
+        </div>
+      </div>
+      ${actions.length > 0 ? `<div class="friend-actions">${actions.join("")}</div>` : ""}
+    </div>
+  `;
+}
+
+async function handleFriendActionClick(btn, onStatus) {
+  if (!btn) return;
+  const action = btn.dataset.friendAction;
+  const notify = (msg, tone = "info") => {
+    if (typeof onStatus === "function") onStatus(msg);
+    showToast(msg, tone);
+  };
+  btn.disabled = true;
+  try {
+    if (action === "join-lobby") {
+      const msg = await joinFriendSession({
+        platform: btn.dataset.platform || "Steam",
+        steamAppId: btn.dataset.steamAppId || null,
+        lobbySteamId: btn.dataset.lobbySteamId || null,
+        friendSteamId: btn.dataset.friendSteamId || null,
+        serverIp: btn.dataset.serverIp || null,
+        peerAddr: btn.dataset.peerAddr || null,
+        gameId: btn.dataset.gameId || null
+      });
+      notify(msg || "Launching friend lobby session...", "success");
+    } else if (action === "launch-game") {
+      const matchedId = btn.dataset.matchedGameId;
+      const game = state.library.find((g) => g.id === matchedId);
+      if (game) {
+        await launchGameById(game);
+      } else {
+        notify("Matched library entry was not found.", "error");
+      }
+    } else if (action === "beam-save") {
+      const matchedId = btn.dataset.matchedGameId;
+      const res = await syncGameSavesMesh(matchedId);
+      notify(res?.summary || "Mesh save beam completed.", "success");
+    }
+  } catch (err) {
+    notify(String(err), "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderFriendsSnapshot(snapshot) {
+  state.friendsSnapshot = snapshot || null;
+  const inGame = Array.isArray(snapshot?.inGame) ? snapshot.inGame : [];
+  const online = Array.isArray(snapshot?.online) ? snapshot.online : [];
+  const offline = Array.isArray(snapshot?.offline) ? snapshot.offline : [];
+  const activeCount = inGame.length + online.length;
+
+  if (el("friends-online-pill")) {
+    el("friends-online-pill").textContent = String(activeCount);
+  }
+  if (el("friends-drawer-summary")) {
+    const ps = snapshot?.platformStatus || {};
+    const statusParts = [
+      `Steam: ${ps.steam || "Unconfigured"}`,
+      `Xbox: ${ps.xbox || "Unconfigured"}`,
+      `PSN: ${ps.psn || "Unconfigured"}`,
+      `Swarm: ${ps.swarm || "Idle"}`
+    ];
+    el("friends-drawer-summary").textContent = statusParts.join(" · ");
+  }
+
+  const list = el("friends-drawer-list");
+  if (!list) return;
+  const groups = [
+    { label: `In-Game Now (${inGame.length})`, items: inGame },
+    { label: `Online (${online.length})`, items: online },
+    { label: `Offline (${offline.length})`, items: offline.slice(0, 40) }
+  ].filter((g) => g.items.length > 0);
+
+  if (groups.length === 0) {
+    list.innerHTML = `<div class="panel-sub">No active friends detected yet. Configure Steam, Xbox Live, PSN tokens in Settings or enable Duke Swarm on your LAN.</div>`;
+    return;
+  }
+
+  list.innerHTML = groups
+    .map(
+      (grp) => `
+      <div class="friends-group">
+        <div class="friends-group-title">${escapeHtml(grp.label)}</div>
+        <div class="friends-group-items">
+          ${grp.items.map((f) => buildFriendCardHtml(f, false)).join("")}
+        </div>
+      </div>
+    `
+    )
+    .join("");
+}
+
+async function refreshFriendsPanel(silent = false) {
+  if (state.friendsLoading) return;
+  state.friendsLoading = true;
+  try {
+    const snap = await getUnifiedFriends();
+    renderFriendsSnapshot(snap);
+  } catch (err) {
+    if (!silent) showToast(String(err), "error");
+    if (el("friends-drawer-summary") && !state.friendsSnapshot) {
+      el("friends-drawer-summary").textContent = String(err);
+    }
+  } finally {
+    state.friendsLoading = false;
+  }
+}
+
+function toggleFriendsDrawer(forceOpen = null) {
+  const next = typeof forceOpen === "boolean" ? forceOpen : !state.friendsDrawerOpen;
+  state.friendsDrawerOpen = next;
+  const drawer = el("friends-drawer");
+  if (drawer) {
+    drawer.classList.toggle("hidden", !next);
+  }
+  const toggleBtn = el("btn-toggle-friends");
+  if (toggleBtn) {
+    toggleBtn.setAttribute("aria-expanded", next ? "true" : "false");
+  }
+  if (state.friendsPollTimer !== null) {
+    clearInterval(state.friendsPollTimer);
+    state.friendsPollTimer = null;
+  }
+  if (next) {
+    refreshFriendsPanel(false);
+    state.friendsPollTimer = setInterval(() => {
+      if (state.friendsDrawerOpen && !document.hidden) {
+        refreshFriendsPanel(true);
+      }
+    }, 20000);
+  }
+}
+
+function syncSettingsUiFromBackend(settings) {
+  if (!settings) return;
+  state.steamApiKeyConfigured = Boolean(settings.steamApiKeyConfigured);
+  state.xboxApiKeyConfigured = Boolean(settings.xboxApiKeyConfigured);
+  state.psnNpssoConfigured = Boolean(settings.psnNpssoConfigured);
+  state.steamIdOverride = String(settings.steamIdOverride || "");
+  state.detectedSteamId = String(settings.detectedSteamId || "");
+
+  if (el("setting-detected-steam-id")) {
+    el("setting-detected-steam-id").textContent =
+      state.detectedSteamId || "Not detected (loginusers.vdf)";
+  }
+  if (el("setting-steam-id-override")) {
+    el("setting-steam-id-override").value = state.steamIdOverride;
+  }
+  if (el("setting-steam-key-status")) {
+    el("setting-steam-key-status").textContent = state.steamApiKeyConfigured ? "Configured" : "Not Set";
+    el("setting-steam-key-status").classList.toggle("accent", state.steamApiKeyConfigured);
+  }
+  if (el("setting-xbox-key-status")) {
+    el("setting-xbox-key-status").textContent = state.xboxApiKeyConfigured ? "Configured" : "Not Set";
+    el("setting-xbox-key-status").classList.toggle("accent", state.xboxApiKeyConfigured);
+  }
+  if (el("setting-psn-npsso-status")) {
+    el("setting-psn-npsso-status").textContent = state.psnNpssoConfigured ? "Configured" : "Not Set";
+    el("setting-psn-npsso-status").classList.toggle("accent", state.psnNpssoConfigured);
+  }
+  el("btn-clear-steam-api-key")?.classList.toggle("hidden", !state.steamApiKeyConfigured);
+  el("btn-clear-xbox-api-key")?.classList.toggle("hidden", !state.xboxApiKeyConfigured);
+  el("btn-clear-psn-npsso")?.classList.toggle("hidden", !state.psnNpssoConfigured);
+}
+
+async function runPlaytimeSyncFlow() {
+  showToast("Syncing local Steam, GOG, Epic & Xbox playtime...", "info", 2200);
+  try {
+    const res = await syncStorefrontPlaytime();
+    if (Array.isArray(res?.games)) {
+      state.library = res.games;
+      renderSidebarGameList();
+      renderLibraryGrid();
+      updateSidebarTelemetry();
+      if (state.activeTab === "detail" && state.selectedDetailId) {
+        const updatedGame = state.library.find((g) => g.id === state.selectedDetailId);
+        if (updatedGame) openGameDetailView(updatedGame.id);
+      }
+    }
+    const hrs = (Number(res?.totalCombinedSecs || 0) / 3600).toFixed(1);
+    const checked = Array.isArray(res?.sourcesChecked) ? res.sourcesChecked.join(", ") : "storefronts";
+    showToast(
+      `Playtime synced across ${res?.updatedGames || 0} game(s) (${hrs} h total · ${checked}).`,
+      "success",
+      3600
+    );
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+async function initOverlayHudMode() {
+  document.documentElement.classList.add("mode-overlay-root");
+  document.body.classList.add("mode-overlay");
+  applyTheme(state.activeTheme || "frosted-obsidian");
+
+  const shell = el("overlay-hud-shell");
+  if (shell) shell.classList.remove("hidden");
+
+  const setStatus = (msg) => {
+    if (el("overlay-status-line")) el("overlay-status-line").textContent = msg;
+  };
+
+  let activeOverlayGameId = null;
+
+  const refreshOverlayState = async () => {
+    try {
+      const sessions = await getActiveGameSessions();
+      const active = Array.isArray(sessions) && sessions.length > 0 ? sessions[0] : null;
+      activeOverlayGameId = active?.gameId || null;
+      if (el("overlay-active-game")) {
+        el("overlay-active-game").textContent = active
+          ? `${active.title} (PID ${active.pid})${active.isSuspended ? " · PAUSED" : ""}`
+          : "Idle Session";
+      }
+      const suspendSpan = el("btn-overlay-suspend")?.querySelector("span");
+      if (suspendSpan) {
+        suspendSpan.textContent = active?.isSuspended ? "Resume Game" : active ? "Freeze Game" : "Freeze / Resume Game";
+      }
+    } catch {
+      // Keep idle label cleanly on transient error.
+    }
+
+    try {
+      const snap = await getUnifiedFriends();
+      const onlineList = [...(snap?.inGame || []), ...(snap?.online || [])];
+      const host = el("overlay-friends-list");
+      if (host) {
+        host.innerHTML =
+          onlineList.length > 0
+            ? onlineList.slice(0, 8).map((f) => buildFriendCardHtml(f, true)).join("")
+            : `<div class="panel-sub">No friends currently online.</div>`;
+      }
+    } catch (err) {
+      if (el("overlay-friends-list")) {
+        el("overlay-friends-list").innerHTML = `<div class="panel-sub">${escapeHtml(String(err))}</div>`;
+      }
+    }
+  };
+
+  el("btn-overlay-close")?.addEventListener("click", () => {
+    hideOverlayWindow().catch(() => {});
+  });
+
+  el("btn-overlay-suspend")?.addEventListener("click", async () => {
+    try {
+      const res = await suspendOrResumeGame(activeOverlayGameId, "toggle");
+      setStatus(res?.message || (res?.isSuspended ? "Process suspended." : "Process resumed."));
+      await refreshOverlayState();
+    } catch (err) {
+      setStatus(String(err));
+    }
+  });
+
+  el("btn-overlay-purge-ram")?.addEventListener("click", async () => {
+    setStatus("Trimming working sets & purging standby memory...");
+    try {
+      const res = await purgeSuiteRamIpc();
+      setStatus(res?.message || "Standby RAM purge complete.");
+    } catch (err) {
+      setStatus(String(err));
+    }
+  });
+
+  el("btn-overlay-replay-clip")?.addEventListener("click", async () => {
+    try {
+      const res = await triggerReplayClipIpc();
+      setStatus(typeof res === "string" ? res : res?.message || "Replay buffer save requested.");
+    } catch (err) {
+      setStatus(String(err));
+    }
+  });
+
+  el("btn-overlay-refresh-friends")?.addEventListener("click", () => {
+    setStatus("Refreshing multi-platform friends...");
+    refreshOverlayState().then(() => setStatus("Friends refreshed."));
+  });
+
+  el("overlay-friends-list")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-friend-action]");
+    if (btn) handleFriendActionClick(btn, setStatus);
+  });
+
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      hideOverlayWindow().catch(() => {});
+    }
+  });
+
+  await listenEvent("overlay-opened", (payload) => {
+    if (payload?.visible) {
+      refreshOverlayState();
+      setStatus("Overlay active (Guide / Alt+G)");
+    }
+  });
+  await listenEvent("game-running-state", () => refreshOverlayState());
+  await listenEvent("game-suspend-state", () => refreshOverlayState());
+
+  await refreshOverlayState();
+}
 
 function buildDownloadJobCardHtml(job) {
   const pct = Math.max(0, Math.min(100, Number(job.progressPct || 0))).toFixed(1);
@@ -3011,6 +3745,114 @@ function wireEvents() {
     }
   });
 
+  // Multi-Platform Friends, Credentials & Playtime Sync
+  el("btn-toggle-friends")?.addEventListener("click", () => toggleFriendsDrawer());
+  el("btn-close-friends")?.addEventListener("click", () => toggleFriendsDrawer(false));
+  el("btn-refresh-friends")?.addEventListener("click", () => refreshFriendsPanel(false));
+  el("friends-drawer-list")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-friend-action]");
+    if (btn) handleFriendActionClick(btn);
+  });
+
+  el("btn-sync-playtime")?.addEventListener("click", runPlaytimeSyncFlow);
+  el("btn-settings-sync-playtime")?.addEventListener("click", runPlaytimeSyncFlow);
+
+  el("btn-save-steam-api-key")?.addEventListener("click", async () => {
+    const val = (el("setting-steam-api-key")?.value || "").trim();
+    if (!val) {
+      showToast("Paste your Steam Web API key before saving.", "error");
+      return;
+    }
+    try {
+      const updated = await updateLauncherSettings({ steamApiKey: val });
+      syncSettingsUiFromBackend(updated);
+      if (el("setting-steam-api-key")) el("setting-steam-api-key").value = "";
+      showToast("Steam Web API key stored locally.", "success");
+      if (state.friendsDrawerOpen) refreshFriendsPanel(true);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-clear-steam-api-key")?.addEventListener("click", async () => {
+    try {
+      const updated = await updateLauncherSettings({ clearSteamApiKey: true });
+      syncSettingsUiFromBackend(updated);
+      showToast("Steam Web API key removed.", "info");
+      if (state.friendsDrawerOpen) refreshFriendsPanel(true);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-save-steam-id-override")?.addEventListener("click", async () => {
+    const val = (el("setting-steam-id-override")?.value || "").trim();
+    try {
+      const updated = await updateLauncherSettings({ steamIdOverride: val });
+      syncSettingsUiFromBackend(updated);
+      showToast(val ? "SteamID64 override saved." : "SteamID64 override cleared (auto-detect active).", "success");
+      if (state.friendsDrawerOpen) refreshFriendsPanel(true);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-save-xbox-api-key")?.addEventListener("click", async () => {
+    const val = (el("setting-xbox-api-key")?.value || "").trim();
+    if (!val) {
+      showToast("Paste your Xbox Live (xbl.io) API key before saving.", "error");
+      return;
+    }
+    try {
+      const updated = await updateLauncherSettings({ xboxApiKey: val });
+      syncSettingsUiFromBackend(updated);
+      if (el("setting-xbox-api-key")) el("setting-xbox-api-key").value = "";
+      showToast("Xbox Live API key stored locally.", "success");
+      if (state.friendsDrawerOpen) refreshFriendsPanel(true);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-clear-xbox-api-key")?.addEventListener("click", async () => {
+    try {
+      const updated = await updateLauncherSettings({ clearXboxApiKey: true });
+      syncSettingsUiFromBackend(updated);
+      showToast("Xbox Live API key removed.", "info");
+      if (state.friendsDrawerOpen) refreshFriendsPanel(true);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-save-psn-npsso")?.addEventListener("click", async () => {
+    const val = (el("setting-psn-npsso")?.value || "").trim();
+    if (!val) {
+      showToast("Paste your 64-character PSN NPSSO token before saving.", "error");
+      return;
+    }
+    try {
+      const updated = await updateLauncherSettings({ psnNpsso: val });
+      syncSettingsUiFromBackend(updated);
+      if (el("setting-psn-npsso")) el("setting-psn-npsso").value = "";
+      showToast("PSN NPSSO token stored locally.", "success");
+      if (state.friendsDrawerOpen) refreshFriendsPanel(true);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-clear-psn-npsso")?.addEventListener("click", async () => {
+    try {
+      const updated = await updateLauncherSettings({ clearPsnNpsso: true });
+      syncSettingsUiFromBackend(updated);
+      showToast("PSN NPSSO token removed.", "info");
+      if (state.friendsDrawerOpen) refreshFriendsPanel(true);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
   el("settings-sources-list")?.addEventListener("change", async (e) => {
     const toggle = e.target.closest("input[data-settings-source-toggle]");
     if (!toggle) return;
@@ -3275,6 +4117,202 @@ function wireEvents() {
       renderLibraryGrid();
       updateSidebarTelemetry();
       showToast(`Removed ${g.title} from list.`, "info");
+    })
+  );
+
+  el("btn-refresh-ext-telemetry")?.addEventListener("click", () =>
+    withSelectedGame((g) => loadDetailExtendedTelemetry(g, state.activeDetailRequestId, true))
+  );
+
+  el("btn-open-pcgw-wiki")?.addEventListener("click", () =>
+    withSelectedGame((g) => {
+      const targetUrl =
+        state.detailPcgwWikiUrl ||
+        `https://www.pcgamingwiki.com/w/index.php?search=${encodeURIComponent(g.title)}`;
+      openExternalUrl(targetUrl);
+    })
+  );
+
+  el("btn-refresh-achievements")?.addEventListener("click", () =>
+    withSelectedGame((g) => loadDetailAchievements(g, state.activeDetailRequestId))
+  );
+
+  el("btn-save-ach-path")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const customPath = (el("detail-ach-path")?.value || "").trim();
+      try {
+        state.library = await setGameAchievementsPath(g.id, customPath);
+        showToast(customPath ? "Achievement telemetry path saved." : "Achievement path cleared.", "success");
+        const updatedGame = state.library.find((x) => x.id === g.id) || g;
+        loadDetailAchievements(updatedGame, state.activeDetailRequestId);
+      } catch (err) {
+        showToast(String(err), "error");
+      }
+    })
+  );
+
+  el("btn-save-update-config")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const versionTag = (el("detail-version-tag")?.value || "").trim();
+      const feedUrl = (el("detail-update-feed-url")?.value || "").trim();
+      try {
+        state.library = await setGameUpdateConfig(g.id, versionTag, feedUrl);
+        const updatedGame = state.library.find((x) => x.id === g.id) || g;
+        renderDetailUpdateState(updatedGame, null);
+        renderLibraryGrid();
+        showToast("Build version & update feed saved.", "success");
+      } catch (err) {
+        showToast(String(err), "error");
+      }
+    })
+  );
+
+  el("btn-check-game-update")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      showToast(`Checking update feed for ${g.title}...`, "info", 2000);
+      try {
+        const res = await checkGameUpdates(g.id);
+        if (Array.isArray(res?.games)) {
+          state.library = res.games;
+          renderLibraryGrid();
+          renderSidebarGameList();
+        }
+        const updatedGame = state.library.find((x) => x.id === g.id) || g;
+        renderDetailUpdateState(updatedGame, res);
+        showToast(
+          res?.updateAvailable
+            ? `Update available: ${res.latestVersion || "New build"}`
+            : `No newer build found (current: ${res?.currentVersion || g.versionTag || "unknown"}).`,
+          res?.updateAvailable ? "success" : "info",
+          3600
+        );
+      } catch (err) {
+        showToast(String(err), "error");
+      }
+    })
+  );
+
+  el("btn-apply-game-update")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-apply-game-update");
+      if (btn) btn.disabled = true;
+      showToast("Taking pre-update .duke-cas snapshot & applying portable update...", "info", 3200);
+      try {
+        const res = await applyGameUpdate(g.id);
+        if (Array.isArray(res?.games)) {
+          state.library = res.games;
+          renderLibraryGrid();
+          renderSidebarGameList();
+          updateSidebarTelemetry();
+        }
+        const updatedGame = state.library.find((x) => x.id === g.id) || g;
+        renderDetailUpdateState(updatedGame, null);
+        loadDetailWofStorage(updatedGame, state.activeDetailRequestId);
+        showToast(res?.message || `Updated to ${res?.newVersion || "latest"}.`, "success", 4200);
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
+
+  el("btn-toggle-laa")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const enable = !Boolean(state.detailCompatStatus?.largeAddressAware);
+      const btn = el("btn-toggle-laa");
+      if (btn) btn.disabled = true;
+      showToast(
+        enable
+          ? "Creating .duke-cas snapshot & patching 4GB LAA PE header..."
+          : "Creating .duke-cas snapshot & reverting 4GB LAA PE header...",
+        "info",
+        2400
+      );
+      try {
+        const report = await toggleGameLaaPatch(g.id, enable);
+        renderDetailCompat(report);
+        showToast(report?.statusMessage || "4GB LAA updated.", "success", 3600);
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = !state.detailCompatStatus?.is32bit;
+      }
+    })
+  );
+
+  el("btn-toggle-dxvk")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const enable = !Boolean(state.detailCompatStatus?.dxvkDeployed);
+      const btn = el("btn-toggle-dxvk");
+      if (btn) btn.disabled = true;
+      showToast(
+        enable ? "Deploying DXVK DLLs with pre-patch snapshot..." : "Removing DXVK DLLs...",
+        "info",
+        2400
+      );
+      try {
+        const report = await toggleGameDxvkWrapper(g.id, enable);
+        renderDetailCompat(report);
+        showToast(report?.statusMessage || "DXVK wrapper state updated.", "success", 3600);
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
+
+  el("btn-compress-wof")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const algorithm = el("select-wof-algorithm")?.value || "LZX";
+      const btn = el("btn-compress-wof");
+      if (btn) btn.disabled = true;
+      if (el("detail-wof-progress")) {
+        el("detail-wof-progress").textContent = `Compressing with NTFS WOF (${algorithm})...`;
+        el("detail-wof-progress").classList.remove("hidden");
+      }
+      try {
+        const res = await compressGameWof(g.id, algorithm);
+        if (Array.isArray(res?.library)) {
+          state.library = res.library;
+          renderLibraryGrid();
+          renderSidebarGameList();
+          updateSidebarTelemetry();
+        }
+        loadDetailWofStorage(state.library.find((x) => x.id === g.id) || g, state.activeDetailRequestId);
+        showToast(res?.message || "NTFS WOF compression finished.", "success", 4200);
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
+
+  el("btn-decompress-wof")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-decompress-wof");
+      if (btn) btn.disabled = true;
+      if (el("detail-wof-progress")) {
+        el("detail-wof-progress").textContent = "Decompressing NTFS WOF external backing...";
+        el("detail-wof-progress").classList.remove("hidden");
+      }
+      try {
+        const res = await decompressGameWof(g.id);
+        if (Array.isArray(res?.library)) {
+          state.library = res.library;
+          renderLibraryGrid();
+          renderSidebarGameList();
+          updateSidebarTelemetry();
+        }
+        loadDetailWofStorage(state.library.find((x) => x.id === g.id) || g, state.activeDetailRequestId);
+        showToast(res?.message || "WOF decompression complete.", "success", 3800);
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
     })
   );
 
@@ -4215,6 +5253,10 @@ function startGamepadControllerLoop() {
 }
 
 async function init() {
+  if (new URLSearchParams(window.location.search).get("mode") === "overlay") {
+    await initOverlayHudMode();
+    return;
+  }
   applyTheme(state.activeTheme);
   renderThemes();
   renderSources();
@@ -4240,6 +5282,7 @@ async function init() {
       state.swarmPeers = Array.isArray(settings?.swarmPeers) ? settings.swarmPeers : [];
       state.steamgriddbApiKey = String(settings?.steamgriddbApiKey || "");
       state.suspendHotkey = String(settings?.suspendHotkey || "Ctrl+Alt+P");
+      syncSettingsUiFromBackend(settings);
       if (el("setting-auto-clean-completed")) {
         el("setting-auto-clean-completed").checked = state.autoCleanCompleted;
       }
@@ -4433,7 +5476,46 @@ async function init() {
     refreshDownloadJobs();
   });
 
+  await listenEvent("achievement-unlocked", (payload) => {
+    showAchievementToast(payload);
+    if (
+      state.activeTab === "detail" &&
+      state.selectedDetailId &&
+      payload?.gameId === state.selectedDetailId
+    ) {
+      const currentGame = state.library.find((g) => g.id === state.selectedDetailId);
+      if (currentGame) {
+        loadDetailAchievements(currentGame, state.activeDetailRequestId);
+      }
+    }
+  });
+
+  await listenEvent("wof-compress-progress", (payload) => {
+    if (
+      state.activeTab !== "detail" ||
+      !state.selectedDetailId ||
+      payload?.gameId !== state.selectedDetailId
+    ) {
+      return;
+    }
+    const prog = el("detail-wof-progress");
+    if (!prog) return;
+    if (payload.done) {
+      prog.classList.add("hidden");
+      const currentGame = state.library.find((g) => g.id === state.selectedDetailId);
+      if (currentGame) {
+        loadDetailWofStorage(currentGame, state.activeDetailRequestId);
+      }
+    } else {
+      const done = Number(payload.filesProcessed || 0);
+      const total = Number(payload.filesTotal || 0);
+      prog.textContent = `${payload.algorithm || "WOF"}: ${done.toLocaleString()} / ${total.toLocaleString()} files processed`;
+      prog.classList.remove("hidden");
+    }
+  });
+
   await refreshAllData();
+  refreshFriendsPanel(true);
   const pendingProtocolUrls = await takePendingProtocolUrls().catch(() => []);
   if (Array.isArray(pendingProtocolUrls) && pendingProtocolUrls.length > 0) {
     pendingProtocolUrls.forEach((u) => markClipboardUrlHandled(u));

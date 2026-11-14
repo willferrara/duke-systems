@@ -12,7 +12,7 @@ use crate::{atomic_write_string, load_library_standalone, resolve_game_root_dir}
 
 const HASH_CHUNK_BYTES: usize = 64 * 1024;
 const HARDLINK_MIN_BYTES: u64 = 1024 * 1024;
-const CAS_DIR_NAME: &str = ".duke-cas";
+pub(crate) const CAS_DIR_NAME: &str = ".duke-cas";
 const PROFILE_DIR_NAME: &str = ".duke-profile";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

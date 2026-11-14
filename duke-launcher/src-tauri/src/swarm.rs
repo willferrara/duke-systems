@@ -826,6 +826,10 @@ fn snapshot_swarm_status() -> SwarmStatusSnapshot {
     }
 }
 
+pub fn snapshot_swarm_status_public() -> SwarmStatusSnapshot {
+    snapshot_swarm_status()
+}
+
 pub async fn beam_game_over_tcp(
     peer_addr: &str,
     game_key: &str,
@@ -1139,6 +1143,7 @@ pub async fn beam_game_from_peer(
                     size_bytes,
                     size_formatted: format_bytes(size_bytes),
                     source: "Duke Swarm".to_string(),
+                    acquisition_source: "swarm".to_string(),
                     platform: "PC".to_string(),
                     is_installed: true,
                     added_at: now_secs(),

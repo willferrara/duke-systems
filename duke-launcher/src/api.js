@@ -64,7 +64,21 @@ export async function updateLauncherSettings(patch = {}) {
       typeof patch.swarmEnabled === "boolean" ? patch.swarmEnabled : null,
     swarmNodeName:
       typeof patch.swarmNodeName === "string" ? patch.swarmNodeName : null,
-    swarmPeers: Array.isArray(patch.swarmPeers) ? patch.swarmPeers : null
+    swarmPeers: Array.isArray(patch.swarmPeers) ? patch.swarmPeers : null,
+    steamApiKey:
+      typeof patch.steamApiKey === "string" ? patch.steamApiKey : null,
+    clearSteamApiKey:
+      typeof patch.clearSteamApiKey === "boolean" ? patch.clearSteamApiKey : null,
+    steamIdOverride:
+      typeof patch.steamIdOverride === "string" ? patch.steamIdOverride : null,
+    xboxApiKey:
+      typeof patch.xboxApiKey === "string" ? patch.xboxApiKey : null,
+    clearXboxApiKey:
+      typeof patch.clearXboxApiKey === "boolean" ? patch.clearXboxApiKey : null,
+    psnNpsso:
+      typeof patch.psnNpsso === "string" ? patch.psnNpsso : null,
+    clearPsnNpsso:
+      typeof patch.clearPsnNpsso === "boolean" ? patch.clearPsnNpsso : null
   });
 }
 
@@ -615,3 +629,98 @@ export const THEME_PRESETS = [
   { id: "frost", name: "Nordic Frost", desc: "Arctic aurora ribbons over alpine peaks" },
   { id: "frosted-obsidian", name: "Obsidian Frosted Glass", desc: "Translucent Windows 11 acrylic backdrop with frosted glass panels" }
 ];
+
+export async function getUnifiedFriends() {
+  return invokeCommand("get_unified_friends");
+}
+
+export async function joinFriendSession(opts = {}) {
+  return invokeCommand("join_friend_session", {
+    platform: opts.platform || "Steam",
+    steamAppId: opts.steamAppId ?? null,
+    lobbySteamId: opts.lobbySteamId ?? null,
+    friendSteamId: opts.friendSteamId ?? null,
+    serverIp: opts.serverIp ?? null,
+    peerAddr: opts.peerAddr ?? null,
+    gameId: opts.gameId ?? null
+  });
+}
+
+export async function syncStorefrontPlaytime() {
+  return invokeCommand("sync_storefront_playtime");
+}
+
+export async function setGameUpdateConfig(gameId, versionTag, updateFeedUrl) {
+  return invokeCommand("set_game_update_config", {
+    gameId,
+    versionTag: String(versionTag || ""),
+    updateFeedUrl: String(updateFeedUrl || "")
+  });
+}
+
+export async function checkGameUpdates(gameId = null) {
+  return invokeCommand("check_game_updates", { gameId });
+}
+
+export async function applyGameUpdate(gameId) {
+  return invokeCommand("apply_game_update", { gameId });
+}
+
+export async function getGameAchievements(gameId) {
+  return invokeCommand("get_game_achievements", { gameId });
+}
+
+export async function setGameAchievementsPath(gameId, achievementsPath) {
+  return invokeCommand("set_game_achievements_path", {
+    gameId,
+    achievementsPath: String(achievementsPath || "")
+  });
+}
+
+export async function getGameCompatStatus(gameId) {
+  return invokeCommand("get_game_compat_status", { gameId });
+}
+
+export async function toggleGameLaaPatch(gameId, enable) {
+  return invokeCommand("toggle_game_laa_patch", { gameId, enable: Boolean(enable) });
+}
+
+export async function toggleGameDxvkWrapper(gameId, enable) {
+  return invokeCommand("toggle_game_dxvk_wrapper", { gameId, enable: Boolean(enable) });
+}
+
+export async function getGameStorageStats(gameId) {
+  return invokeCommand("get_game_storage_stats", { gameId });
+}
+
+export async function compressGameWof(gameId, algorithm = "LZX") {
+  return invokeCommand("compress_game_wof", { gameId, algorithm: String(algorithm || "LZX") });
+}
+
+export async function decompressGameWof(gameId) {
+  return invokeCommand("decompress_game_wof", { gameId });
+}
+
+export async function getGameExtendedTelemetry(gameId, forceRefresh = false) {
+  return invokeCommand("get_game_extended_telemetry", {
+    gameId,
+    forceRefresh: Boolean(forceRefresh)
+  });
+}
+
+export async function toggleOverlayWindow(visible = null) {
+  return invokeCommand("toggle_overlay_window", { visible });
+}
+
+export async function hideOverlayWindow() {
+  return invokeCommand("hide_overlay_window");
+}
+
+export async function triggerReplayClipIpc() {
+  return invokeCommand("trigger_replay_clip_ipc");
+}
+
+export async function purgeSuiteRamIpc() {
+  return invokeCommand("purge_suite_ram_ipc");
+}
+

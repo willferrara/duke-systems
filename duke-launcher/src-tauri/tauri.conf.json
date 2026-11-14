@@ -21,6 +21,20 @@
         "decorations": false,
         "transparent": true,
         "center": true
+      },
+      {
+        "label": "overlay",
+        "title": "Duke Overlay",
+        "url": "index.html?mode=overlay",
+        "width": 440,
+        "height": 580,
+        "resizable": false,
+        "visible": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "decorations": false,
+        "transparent": true,
+        "center": true
       }
     ],
     "security": {

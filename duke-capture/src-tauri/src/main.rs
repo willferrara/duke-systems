@@ -3300,6 +3300,18 @@ fn main() {
                                 {
                                     duke_core::win32_ffi::trim_current_working_set();
                                 }
+                                ShmEventType::ReplaySaveRequested
+                                    if REPLAY_RUNNING.load(Ordering::Relaxed) =>
+                                {
+                                    let clip_app = shm_app.clone();
+                                    let tag = frame.tag_str().trim().to_string();
+                                    let override_title = if tag.is_empty() { None } else { Some(tag) };
+                                    tauri::async_runtime::spawn(async move {
+                                        if let Ok(clip) = save_replay_internal(&clip_app, override_title).await {
+                                            let _ = clip_app.emit("clip-saved", clip);
+                                        }
+                                    });
+                                }
                                 _ => {}
                             }
                         }
@@ -3325,6 +3337,16 @@ fn main() {
                         if !REPLAY_RUNNING.load(Ordering::Relaxed) =>
                     {
                         duke_core::win32_ffi::trim_current_working_set();
+                    }
+                    DukeEvent::ReplaySaveRequested { game_title, .. }
+                        if REPLAY_RUNNING.load(Ordering::Relaxed) =>
+                    {
+                        let clip_app = bus_app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Ok(clip) = save_replay_internal(&clip_app, game_title).await {
+                                let _ = clip_app.emit("clip-saved", clip);
+                            }
+                        });
                     }
                     _ => {}
                 })

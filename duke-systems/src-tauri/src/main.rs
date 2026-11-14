@@ -1168,6 +1168,18 @@ fn format_bus_event(event: &DukeEvent) -> (&'static str, String, String) {
             "pipe-ipc".to_string(),
             format!("RAM purge requested by {}", source),
         ),
+        DukeEvent::ReplaySaveRequested { game_title, source } => (
+            "ReplaySaveRequested",
+            source.clone(),
+            format!(
+                "Replay clip save requested{}",
+                game_title
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(|t| format!(" for {}", t))
+                    .unwrap_or_default()
+            ),
+        ),
     }
 }
 

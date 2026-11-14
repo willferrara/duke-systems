@@ -1,4 +1,6 @@
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -173,6 +175,7 @@ pub struct SteamAcfManifest {
     pub name: String,
     pub install_dir_name: String,
     pub size_on_disk: u64,
+    pub last_played: Option<u64>,
 }
 
 pub fn extract_steam_library_paths_from_vdf(vdf_text: &str) -> Vec<PathBuf> {
@@ -220,12 +223,17 @@ pub fn parse_steam_appmanifest_acf(acf_text: &str) -> Option<SteamAcfManifest> {
         .get_str("SizeOnDisk")
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(0);
+    let last_played = state
+        .get_str("LastPlayed")
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&v| v > 0);
 
     Some(SteamAcfManifest {
         app_id,
         name,
         install_dir_name,
         size_on_disk,
+        last_played,
     })
 }
 
@@ -242,6 +250,10 @@ struct EpicItemManifestRaw {
     install_size: Option<u64>,
     #[serde(rename = "bIsIncompleteInstall")]
     is_incomplete: Option<bool>,
+    #[serde(rename = "AppName")]
+    app_name: String,
+    #[serde(rename = "CatalogItemId")]
+    catalog_item_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -252,7 +264,10 @@ struct DiscoveredImportCandidate {
     size_bytes: u64,
     steam_app_id: Option<u32>,
     source: &'static str,
+    acquisition_source: &'static str,
     platform: &'static str,
+    imported_playtime_secs: u64,
+    last_played_ts: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -387,7 +402,10 @@ fn scan_steam_libraries() -> Vec<DiscoveredImportCandidate> {
                 size_bytes,
                 steam_app_id: Some(acf.app_id),
                 source: "Steam",
+                acquisition_source: "steam",
                 platform: "Steam",
+                imported_playtime_secs: 0,
+                last_played_ts: acf.last_played,
             });
         }
     }
@@ -476,7 +494,10 @@ fn scan_epic_libraries() -> Vec<DiscoveredImportCandidate> {
             size_bytes,
             steam_app_id: None,
             source: "Epic",
+            acquisition_source: "epic",
             platform: "Epic Games",
+            imported_playtime_secs: 0,
+            last_played_ts: None,
         });
     }
     out
@@ -484,6 +505,7 @@ fn scan_epic_libraries() -> Vec<DiscoveredImportCandidate> {
 
 fn scan_gog_libraries() -> Vec<DiscoveredImportCandidate> {
     let mut out = Vec::new();
+    let (gog_by_key, gog_by_title) = collect_gog_local_playtimes();
     let bases = [
         "SOFTWARE\\WOW6432Node\\GOG.com\\Games",
         "SOFTWARE\\GOG.com\\Games",
@@ -527,14 +549,23 @@ fn scan_gog_libraries() -> Vec<DiscoveredImportCandidate> {
                 continue;
             };
             let size_bytes = crate::calculate_dir_size_sync(&install_dir);
+            let title = game_name.trim().to_string();
+            let gog_secs = gog_by_key
+                .get(&format!("gog_{}", sub.trim().to_ascii_lowercase()))
+                .or_else(|| gog_by_title.get(&normalize_title_playtime_key(&title)))
+                .copied()
+                .unwrap_or(0);
             out.push(DiscoveredImportCandidate {
-                title: game_name.trim().to_string(),
+                title,
                 exe_path,
                 install_dir,
                 size_bytes,
                 steam_app_id: None,
                 source: "GOG",
+                acquisition_source: "gog",
                 platform: "GOG Galaxy",
+                imported_playtime_secs: gog_secs,
+                last_played_ts: None,
             });
         }
     }
@@ -650,7 +681,10 @@ fn scan_xbox_libraries() -> Vec<DiscoveredImportCandidate> {
                 size_bytes,
                 steam_app_id: None,
                 source: "Xbox",
+                acquisition_source: "xbox",
                 platform: "Xbox Game Pass",
+                imported_playtime_secs: 0,
+                last_played_ts: None,
             });
         }
     }
@@ -698,6 +732,22 @@ fn merge_discovered_games_into_library(
                 || (g.source.eq_ignore_ascii_case("Portable") && cand.source != "Portable")
             {
                 g.source = cand.source.to_string();
+                changed = true;
+            }
+            if g.acquisition_source.trim().is_empty() {
+                g.acquisition_source = cand.acquisition_source.to_string();
+                changed = true;
+            }
+            if let Some(lp) = cand.last_played_ts.filter(|&v| v > g.last_played_ts.unwrap_or(0)) {
+                g.last_played_ts = Some(lp);
+                g.last_played = Some(lp);
+                changed = true;
+            }
+            if cand.imported_playtime_secs > 0
+                && cand.imported_playtime_secs != g.imported_playtime_secs
+            {
+                g.imported_playtime_secs = cand.imported_playtime_secs;
+                g.playtime_seconds = g.imported_playtime_secs.saturating_add(g.duke_playtime_secs);
                 changed = true;
             }
             if g.steam_app_id.is_none() {
@@ -761,19 +811,23 @@ fn merge_discovered_games_into_library(
             genre: "Library Import".to_string(),
             platform: cand.platform.to_string(),
             source: cand.source.to_string(),
+            acquisition_source: cand.acquisition_source.to_string(),
             is_favorite: false,
             is_installed: true,
             added_at: now_ts,
-            last_played: None,
+            last_played: cand.last_played_ts,
             steam_app_id: cand.steam_app_id.map(|v| v as u64),
             app_id: cand.steam_app_id,
-            playtime_seconds: 0,
-            last_played_ts: None,
+            playtime_seconds: cand.imported_playtime_secs,
+            imported_playtime_secs: cand.imported_playtime_secs,
+            duke_playtime_secs: 0,
+            last_played_ts: cand.last_played_ts,
             steam_price_cents: None,
             steam_price_formatted: None,
             launch_args: None,
             sandbox_enabled: false,
             nvme_prefetch_enabled: None,
+            ..Default::default()
         });
         added += 1;
     }
@@ -795,24 +849,30 @@ pub(crate) async fn import_existing_libraries_core() -> Result<ImportLibraryResu
             .as_secs();
 
         let mut library = crate::load_library_standalone()?;
-        let prev_snapshots: std::collections::HashMap<String, (String, String, Option<u32>)> =
+        let prev_snapshots: std::collections::HashMap<String, (String, String, Option<u32>, u64)> =
             library
                 .iter()
-                .map(|g| (g.id.clone(), (g.exe_path.clone(), g.cover_url.clone(), g.app_id)))
+                .map(|g| {
+                    (
+                        g.id.clone(),
+                        (g.exe_path.clone(), g.cover_url.clone(), g.app_id, g.playtime_seconds),
+                    )
+                })
                 .collect();
-        let (added, updated, by_source) =
+        let (added, mut updated, by_source) =
             merge_discovered_games_into_library(&mut library, discovered, now);
 
         for entry in &mut library {
             crate::normalize_game_entry(entry);
         }
+        updated += sync_local_storefront_playtimes(&mut library);
 
         if added > 0 || updated > 0 {
             crate::save_library_standalone(&library)?;
             for entry in &library {
                 let changed = match prev_snapshots.get(&entry.id) {
                     None => true,
-                    Some((exe, cover, aid)) => {
+                    Some((exe, cover, aid, _)) => {
                         *exe != entry.exe_path || *cover != entry.cover_url || *aid != entry.app_id
                     }
                 };
@@ -834,6 +894,486 @@ pub(crate) async fn import_existing_libraries_core() -> Result<ImportLibraryResu
     })
     .await
     .map_err(|e| format!("Library import worker failed: {}", e))?
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PlaytimeSyncResult {
+    pub updated_games: usize,
+    pub total_imported_secs: u64,
+    pub total_duke_secs: u64,
+    pub total_combined_secs: u64,
+    pub sources_checked: Vec<String>,
+    pub games: Vec<crate::GameEntry>,
+}
+
+fn normalize_title_playtime_key(raw: &str) -> String {
+    crate::clean_game_title(raw)
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+pub fn parse_steam_localconfig_playtime_vdf(vdf_text: &str) -> HashMap<u32, (u64, Option<u64>)> {
+    let tree = parse_vdf_kv_tree(vdf_text);
+    let root = tree.get_node("UserLocalConfigStore").unwrap_or(&tree);
+    let apps = root
+        .get_node("Software")
+        .and_then(|s| s.get_node("Valve"))
+        .and_then(|v| v.get_node("Steam"))
+        .and_then(|s| s.get_node("apps"))
+        .or_else(|| root.get_node("apps"))
+        .and_then(|n| n.as_map())
+        .unwrap_or(&[]);
+
+    let mut out = HashMap::new();
+    for (k, node) in apps {
+        let Ok(app_id) = k.trim().parse::<u32>() else {
+            continue;
+        };
+        let mins = node
+            .get_str("Playtime")
+            .or_else(|| node.get_str("PlaytimeForever"))
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        let last_played = node
+            .get_str("LastPlayed")
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .filter(|&v| v > 0);
+        if mins > 0 || last_played.is_some() {
+            out.insert(app_id, (mins.saturating_mul(60), last_played));
+        }
+    }
+    out
+}
+
+fn find_steam_root_dirs() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(raw) = duke_core::win32_ffi::reg_read_string(false, "Software\\Valve\\Steam", "SteamPath")
+        .or_else(|| {
+            duke_core::win32_ffi::reg_read_string(true, "SOFTWARE\\WOW6432Node\\Valve\\Steam", "InstallPath")
+        })
+    {
+        let p = PathBuf::from(raw.replace('/', "\\"));
+        if p.is_dir() {
+            roots.push(p);
+        }
+    }
+    for env_key in ["ProgramFiles(x86)", "ProgramFiles"] {
+        if let Ok(base) = std::env::var(env_key) {
+            let cand = PathBuf::from(base).join("Steam");
+            if cand.is_dir() && !roots.iter().any(|x| x.eq(&cand)) {
+                roots.push(cand);
+            }
+        }
+    }
+    roots
+}
+
+fn collect_steam_local_playtimes() -> HashMap<u32, (u64, Option<u64>)> {
+    let mut merged: HashMap<u32, (u64, Option<u64>)> = HashMap::new();
+    for steam_root in find_steam_root_dirs() {
+        let userdata = steam_root.join("userdata");
+        if let Ok(entries) = fs::read_dir(&userdata) {
+            for entry in entries.flatten() {
+                let localconfig = entry.path().join("config").join("localconfig.vdf");
+                if !localconfig.is_file() {
+                    continue;
+                }
+                if let Ok(raw) = fs::read_to_string(&localconfig) {
+                    for (aid, (secs, lp)) in parse_steam_localconfig_playtime_vdf(&raw) {
+                        merged
+                            .entry(aid)
+                            .and_modify(|cur| {
+                                cur.0 = cur.0.max(secs);
+                                cur.1 = match (cur.1, lp) {
+                                    (Some(a), Some(b)) => Some(a.max(b)),
+                                    (a, b) => a.or(b),
+                                };
+                            })
+                            .or_insert((secs, lp));
+                    }
+                }
+            }
+        }
+
+        // Also incorporate LastPlayed timestamps from appmanifest_*.acf
+        let mut lib_roots = vec![steam_root.clone()];
+        let vdf_path = steam_root.join("steamapps").join("libraryfolders.vdf");
+        if let Ok(vdf_text) = fs::read_to_string(&vdf_path) {
+            lib_roots.extend(extract_steam_library_paths_from_vdf(&vdf_text));
+        }
+        for root in lib_roots {
+            let Ok(rd) = fs::read_dir(root.join("steamapps")) else {
+                continue;
+            };
+            for fentry in rd.flatten() {
+                let name = fentry.file_name().to_string_lossy().to_ascii_lowercase();
+                if name.starts_with("appmanifest_") && name.ends_with(".acf") {
+                    if let Ok(raw) = fs::read_to_string(fentry.path()) {
+                        if let Some(acf) = parse_steam_appmanifest_acf(&raw) {
+                            if let Some(lp) = acf.last_played {
+                                merged
+                                    .entry(acf.app_id)
+                                    .and_modify(|cur| {
+                                        cur.1 = Some(cur.1.map(|x| x.max(lp)).unwrap_or(lp));
+                                    })
+                                    .or_insert((0, Some(lp)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    merged
+}
+
+pub type GogPlaytimeMaps = (HashMap<String, u64>, HashMap<String, u64>);
+
+pub fn read_gog_galaxy_playtime_from_db(db_path: &Path) -> Result<GogPlaytimeMaps, String> {
+    if !db_path.is_file() {
+        return Ok((HashMap::new(), HashMap::new()));
+    }
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("Failed opening GOG Galaxy DB read-only: {e}"))?;
+
+    let mut by_key: HashMap<String, u64> = HashMap::new();
+    let mut id_to_title: HashMap<String, String> = HashMap::new();
+
+    if let Ok(mut stmt) = conn.prepare("SELECT productId, title FROM LimitedDetails") {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            let pid: rusqlite::types::Value = row.get(0)?;
+            let title: Option<String> = row.get(1)?;
+            let pid_str = match pid {
+                rusqlite::types::Value::Integer(n) => n.to_string(),
+                rusqlite::types::Value::Text(t) => t,
+                _ => String::new(),
+            };
+            Ok((pid_str, title.unwrap_or_default()))
+        }) {
+            for r in rows.flatten() {
+                if !r.0.is_empty() && !r.1.trim().is_empty() {
+                    id_to_title.insert(format!("gog_{}", r.0), r.1);
+                }
+            }
+        }
+    }
+
+    let mut by_title: HashMap<String, u64> = HashMap::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT releaseKey, minutesInGame FROM GameTimes") {
+        let rows = stmt
+            .query_map([], |row| {
+                let release_key: String = row.get(0)?;
+                let minutes: i64 = row.get(1)?;
+                Ok((release_key, minutes.max(0) as u64))
+            })
+            .map_err(|e| format!("Failed querying GOG GameTimes: {e}"))?;
+
+        for row in rows.flatten() {
+            let (release_key, mins) = row;
+            let secs = mins.saturating_mul(60);
+            if secs == 0 {
+                continue;
+            }
+            let key_lower = release_key.trim().to_ascii_lowercase();
+            by_key
+                .entry(key_lower.clone())
+                .and_modify(|v| *v = (*v).max(secs))
+                .or_insert(secs);
+            if let Some(title) = id_to_title.get(&key_lower) {
+                let tkey = normalize_title_playtime_key(title);
+                if !tkey.is_empty() {
+                    by_title
+                        .entry(tkey)
+                        .and_modify(|v| *v = (*v).max(secs))
+                        .or_insert(secs);
+                }
+            }
+        }
+    }
+
+    Ok((by_key, by_title))
+}
+
+fn collect_gog_local_playtimes() -> GogPlaytimeMaps {
+    let program_data = std::env::var("PROGRAMDATA")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "C:\\ProgramData".to_string());
+    let db_path = PathBuf::from(program_data)
+        .join("GOG.com")
+        .join("Galaxy")
+        .join("storage")
+        .join("galaxy-2.0.db");
+    read_gog_galaxy_playtime_from_db(&db_path).unwrap_or_default()
+}
+
+fn collect_epic_local_playtimes() -> HashMap<String, u64> {
+    let mut artifact_to_title: HashMap<String, String> = HashMap::new();
+    let program_data = std::env::var("PROGRAMDATA")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "C:\\ProgramData".to_string());
+    let manifests_dir = PathBuf::from(&program_data)
+        .join("Epic")
+        .join("EpicGamesLauncher")
+        .join("Data")
+        .join("Manifests");
+    if let Ok(rd) = fs::read_dir(&manifests_dir) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_file()
+                && p.extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.eq_ignore_ascii_case("item"))
+                    .unwrap_or(false)
+            {
+                if let Ok(raw) = fs::read_to_string(&p) {
+                    if let Ok(parsed) =
+                        serde_json::from_str::<EpicItemManifestRaw>(raw.trim_start_matches('\u{feff}'))
+                    {
+                        if !parsed.display_name.trim().is_empty() {
+                            if !parsed.app_name.trim().is_empty() {
+                                artifact_to_title.insert(
+                                    parsed.app_name.trim().to_ascii_lowercase(),
+                                    parsed.display_name.clone(),
+                                );
+                            }
+                            if !parsed.catalog_item_id.trim().is_empty() {
+                                artifact_to_title.insert(
+                                    parsed.catalog_item_id.trim().to_ascii_lowercase(),
+                                    parsed.display_name.clone(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out: HashMap<String, u64> = HashMap::new();
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        let saved_data = PathBuf::from(local_app_data)
+            .join("EpicGamesLauncher")
+            .join("Saved")
+            .join("Data");
+        if saved_data.is_dir() {
+            if let Ok(rd) = fs::read_dir(&saved_data) {
+                for entry in rd.flatten() {
+                    let p = entry.path();
+                    if p.extension()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.eq_ignore_ascii_case("json"))
+                        .unwrap_or(false)
+                    {
+                        if let Ok(raw) = fs::read_to_string(&p) {
+                            if let Ok(val) = serde_json::from_str::<Value>(&raw) {
+                                if let Some(arr) = val.as_array() {
+                                    for item in arr {
+                                        let artifact = item
+                                            .get("artifactId")
+                                            .or_else(|| item.get("appName"))
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_ascii_lowercase())
+                                            .unwrap_or_default();
+                                        let secs = item
+                                            .get("totalTime")
+                                            .or_else(|| item.get("playTimeSeconds"))
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0);
+                                        if secs > 0 {
+                                            if let Some(title) = artifact_to_title.get(&artifact) {
+                                                let key = normalize_title_playtime_key(title);
+                                                out.entry(key).and_modify(|v| *v = (*v).max(secs)).or_insert(secs);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+async fn fetch_xbox_titlehub_playtime(xbox_key: &str) -> HashMap<String, u64> {
+    let mut out: HashMap<String, u64> = HashMap::new();
+    let Ok(val) = crate::friends::fetch_doh_json_redacted(
+        "https://xbl.io/api/v2/player/titleHistory",
+        &[("X-Authorization", xbox_key)],
+        "Xbox TitleHub",
+    )
+    .await
+    else {
+        return out;
+    };
+
+    if let Some(arr) = val.get("titles").and_then(|v| v.as_array()) {
+        for title_obj in arr {
+            let name = title_obj
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let key = normalize_title_playtime_key(name);
+            if key.is_empty() {
+                continue;
+            }
+            let mins = title_obj
+                .get("minutesPlayed")
+                .or_else(|| title_obj.pointer("/detail/minutesPlayed"))
+                .or_else(|| title_obj.pointer("/stats/minutesPlayed"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let secs = mins.saturating_mul(60);
+            if secs > 0 {
+                out.entry(key).and_modify(|v| *v = (*v).max(secs)).or_insert(secs);
+            }
+        }
+    }
+    out
+}
+
+pub fn apply_playtimes_to_library(
+    library: &mut [crate::GameEntry],
+    steam_times: &HashMap<u32, (u64, Option<u64>)>,
+    gog_by_title: &HashMap<String, u64>,
+    epic_by_title: &HashMap<String, u64>,
+    xbox_by_title: &HashMap<String, u64>,
+) -> usize {
+    let mut updated = 0usize;
+    for g in library.iter_mut() {
+        let mut changed = false;
+        let tkey = normalize_title_playtime_key(&g.title);
+
+        let mut storefront_secs = 0u64;
+        let mut storefront_lp: Option<u64> = None;
+
+        if let Some(aid) = g
+            .app_id
+            .or_else(|| g.steam_app_id.and_then(|v| u32::try_from(v).ok()))
+        {
+            if let Some((secs, lp)) = steam_times.get(&aid) {
+                storefront_secs = storefront_secs.max(*secs);
+                storefront_lp = *lp;
+            }
+        }
+        if !tkey.is_empty() {
+            if let Some(secs) = gog_by_title.get(&tkey) {
+                storefront_secs = storefront_secs.max(*secs);
+            }
+            if let Some(secs) = epic_by_title.get(&tkey) {
+                storefront_secs = storefront_secs.max(*secs);
+            }
+            if let Some(secs) = xbox_by_title.get(&tkey) {
+                storefront_secs = storefront_secs.max(*secs);
+            }
+        }
+
+        if storefront_secs > 0 && storefront_secs != g.imported_playtime_secs {
+            g.imported_playtime_secs = storefront_secs;
+            changed = true;
+        }
+        if let Some(lp) = storefront_lp.filter(|&v| v > g.last_played_ts.unwrap_or(0)) {
+            g.last_played_ts = Some(lp);
+            g.last_played = Some(lp);
+            changed = true;
+        }
+        let total = g.imported_playtime_secs.saturating_add(g.duke_playtime_secs);
+        if g.playtime_seconds != total {
+            g.playtime_seconds = total;
+            changed = true;
+        }
+        if changed {
+            updated += 1;
+        }
+    }
+    updated
+}
+
+pub fn sync_local_storefront_playtimes(library: &mut [crate::GameEntry]) -> usize {
+    let steam_times = collect_steam_local_playtimes();
+    let (_gog_keys, gog_by_title) = collect_gog_local_playtimes();
+    let epic_by_title = collect_epic_local_playtimes();
+    apply_playtimes_to_library(
+        library,
+        &steam_times,
+        &gog_by_title,
+        &epic_by_title,
+        &HashMap::new(),
+    )
+}
+
+#[tauri::command]
+pub async fn sync_storefront_playtime(app: tauri::AppHandle) -> Result<PlaytimeSyncResult, String> {
+    use tauri::Emitter;
+    let settings = crate::load_settings_standalone();
+    let xbox_key = settings
+        .xbox_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+
+    let (steam_times, (_gog_keys, gog_by_title), epic_by_title) =
+        tokio::task::spawn_blocking(|| {
+            (
+                collect_steam_local_playtimes(),
+                collect_gog_local_playtimes(),
+                collect_epic_local_playtimes(),
+            )
+        })
+        .await
+        .map_err(|e| format!("Local playtime scan failed: {e}"))?;
+
+    let mut sources_checked = vec![
+        "Steam localconfig.vdf".to_string(),
+        "GOG galaxy-2.0.db".to_string(),
+        "Epic Manifests".to_string(),
+    ];
+    let xbox_by_title = if let Some(ref key) = xbox_key {
+        sources_checked.push("Xbox TitleHub".to_string());
+        fetch_xbox_titlehub_playtime(key).await
+    } else {
+        HashMap::new()
+    };
+
+    let mut library = crate::load_library_from_disk(&app)?;
+    for entry in &mut library {
+        crate::normalize_game_entry(entry);
+    }
+    let updated_games = apply_playtimes_to_library(
+        &mut library,
+        &steam_times,
+        &gog_by_title,
+        &epic_by_title,
+        &xbox_by_title,
+    );
+    if updated_games > 0 {
+        crate::save_library_to_disk(&app, &library)?;
+    }
+
+    let total_imported_secs: u64 = library.iter().map(|g| g.imported_playtime_secs).sum();
+    let total_duke_secs: u64 = library.iter().map(|g| g.duke_playtime_secs).sum();
+    let total_combined_secs = total_imported_secs.saturating_add(total_duke_secs);
+
+    let _ = app.emit("library-updated", &library);
+    Ok(PlaytimeSyncResult {
+        updated_games,
+        total_imported_secs,
+        total_duke_secs,
+        total_combined_secs,
+        sources_checked,
+        games: library,
+    })
 }
 
 #[tauri::command]
@@ -924,12 +1464,95 @@ mod tests {
             size_bytes: 85000000000,
             steam_app_id: None,
             source: "Epic",
+            acquisition_source: "epic",
             platform: "Epic Games",
+            imported_playtime_secs: 0,
+            last_played_ts: None,
         }];
         let (added, updated, _) = merge_discovered_games_into_library(&mut library, cands, 100);
         assert_eq!(added, 0);
         assert_eq!(updated, 1);
         assert_eq!(library.len(), 1);
         assert_eq!(library[0].source, "Epic");
+    }
+
+    #[test]
+    fn syncs_steam_localconfig_and_gog_sqlite_without_overwriting_duke_hours() {
+        let localconfig = r#"
+"UserLocalConfigStore"
+{
+    "Software"
+    {
+        "Valve"
+        {
+            "Steam"
+            {
+                "apps"
+                {
+                    "1245620"
+                    {
+                        "Playtime"      "120"
+                        "LastPlayed"    "1710000000"
+                    }
+                }
+            }
+        }
+    }
+}
+"#;
+        let parsed_steam = parse_steam_localconfig_playtime_vdf(localconfig);
+        assert_eq!(parsed_steam.get(&1245620), Some(&(7200, Some(1710000000))));
+
+        let db_path = std::env::temp_dir().join(format!("duke_gog_test_{}.db", std::process::id()));
+        let _ = fs::remove_file(&db_path);
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE LimitedDetails (productId TEXT, title TEXT);
+                 CREATE TABLE GameTimes (releaseKey TEXT, minutesInGame INTEGER);
+                 INSERT INTO LimitedDetails VALUES ('1454587428', 'Cyberpunk 2077');
+                 INSERT INTO GameTimes VALUES ('gog_1454587428', 300);",
+            )
+            .unwrap();
+        }
+        let (by_key, by_title) = read_gog_galaxy_playtime_from_db(&db_path).unwrap();
+        let _ = fs::remove_file(&db_path);
+        assert_eq!(by_key.get("gog_1454587428"), Some(&18000));
+        assert_eq!(by_title.get("cyberpunk2077"), Some(&18000));
+
+        let mut library = vec![
+            crate::GameEntry {
+                id: "steam_elden".to_string(),
+                title: "Elden Ring".to_string(),
+                app_id: Some(1245620),
+                imported_playtime_secs: 3600,
+                duke_playtime_secs: 1800,
+                playtime_seconds: 5400,
+                ..Default::default()
+            },
+            crate::GameEntry {
+                id: "gog_cp".to_string(),
+                title: "Cyberpunk 2077".to_string(),
+                duke_playtime_secs: 600,
+                playtime_seconds: 600,
+                ..Default::default()
+            },
+        ];
+
+        let changed = apply_playtimes_to_library(
+            &mut library,
+            &parsed_steam,
+            &by_title,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(changed, 2);
+        // Preserves Duke session time and updates storefront hours cleanly without double-counting.
+        assert_eq!(library[0].imported_playtime_secs, 7200);
+        assert_eq!(library[0].duke_playtime_secs, 1800);
+        assert_eq!(library[0].playtime_seconds, 9000);
+        assert_eq!(library[1].imported_playtime_secs, 18000);
+        assert_eq!(library[1].duke_playtime_secs, 600);
+        assert_eq!(library[1].playtime_seconds, 18600);
     }
 }

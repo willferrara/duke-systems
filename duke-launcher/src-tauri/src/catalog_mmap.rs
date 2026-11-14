@@ -1773,6 +1773,67 @@ pub fn get_entry_via_mmap(app_id: u32) -> Option<CatalogGameEntry> {
     guard.as_ref().and_then(|m| m.get_entry_by_appid(app_id))
 }
 
+fn normalize_catalog_lookup_key(raw: &str) -> String {
+    raw.chars()
+        .filter_map(|c| {
+            if c.is_ascii_alphanumeric() {
+                Some(c.to_ascii_lowercase())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Resolves a catalog entry in sub-millisecond time from the memory-mapped `catalog.dkcat` index,
+/// checking explicit `app_id` first and falling back to normalized trigram title matching.
+pub fn lookup_entry_by_title_or_appid_via_mmap(
+    app_id: Option<u32>,
+    title: &str,
+) -> Option<CatalogGameEntry> {
+    let _ = ensure_catalog_mapped_standalone();
+    let guard = global_catalog_slot().read().unwrap();
+    let mapped = guard.as_ref()?;
+    if let Some(id) = app_id.filter(|&id| id > 0) {
+        if let Some(hit) = mapped.get_entry_by_appid(id) {
+            return Some(hit);
+        }
+    }
+    let cleaned = crate::clean_game_title(title);
+    let query = if cleaned.trim().is_empty() {
+        title.trim().to_string()
+    } else {
+        cleaned
+    };
+    if query.is_empty() {
+        return None;
+    }
+    let target_key = normalize_catalog_lookup_key(&query);
+    if target_key.len() < 3 {
+        return None;
+    }
+    let candidates = mapped.search(&query, 15);
+    if let Some(exact) = candidates
+        .iter()
+        .find(|c| normalize_catalog_lookup_key(&c.name) == target_key)
+    {
+        return Some(exact.clone());
+    }
+    let query_tokens: Vec<String> = query
+        .split_whitespace()
+        .map(normalize_catalog_lookup_key)
+        .filter(|t| !t.is_empty())
+        .collect();
+    candidates.into_iter().find(|c| {
+        let cand_clean = crate::clean_game_title(&c.name);
+        let cand_key = normalize_catalog_lookup_key(&cand_clean);
+        cand_key == target_key
+            || (!query_tokens.is_empty()
+                && query_tokens.iter().all(|t| cand_key.contains(t.as_str()))
+                && cand_key.len() <= target_key.len() + 8)
+    })
+}
+
 pub fn upsert_entries_dkcat(
     dkcat_path: &Path,
     updates: &[CatalogGameEntry],

@@ -9,6 +9,16 @@ use walkdir::WalkDir;
 pub const IMAGE_FILE_MACHINE_I386: u16 = 0x014C;
 pub const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
 pub const IMAGE_FILE_MACHINE_ARM64: u16 = 0xAA64;
+pub const IMAGE_FILE_LARGE_ADDRESS_AWARE: u16 = 0x0020;
+
+const DXVK_WRAPPER_DLLS: &[&str] = &[
+    "d3d8.dll",
+    "d3d9.dll",
+    "d3d10core.dll",
+    "d3d11.dll",
+    "dxgi.dll",
+];
+const WRAPPERS_MANIFEST_FILE: &str = ".duke-dxvk-manifest.json";
 
 const RUNTIME_DLL_HINTS: &[(&str, &str)] = &[
     ("vcruntime140_1.dll", "Visual C++ 2015-2022 Redistributable (x64)"),
@@ -118,7 +128,7 @@ fn rva_to_file_offset(rva: u32, sections: &[PeSection]) -> Option<usize> {
     Some(rva as usize)
 }
 
-pub fn parse_pe_machine_and_imports(bytes: &[u8]) -> Result<(u16, bool, Vec<String>), String> {
+pub fn parse_pe_header_and_imports(bytes: &[u8]) -> Result<(u16, u16, bool, Vec<String>), String> {
     if bytes.len() < 64 || &bytes[0..2] != b"MZ" {
         return Err("Not a valid MZ/DOS executable".to_string());
     }
@@ -131,6 +141,7 @@ pub fn parse_pe_machine_and_imports(bytes: &[u8]) -> Result<(u16, bool, Vec<Stri
     let machine = read_u16_le(bytes, coff_off)?;
     let num_sections = read_u16_le(bytes, coff_off + 2)? as usize;
     let size_of_opt = read_u16_le(bytes, coff_off + 16)? as usize;
+    let characteristics = read_u16_le(bytes, coff_off + 18)?;
 
     let opt_off = coff_off + 20;
     let opt_magic = read_u16_le(bytes, opt_off)?;
@@ -192,6 +203,11 @@ pub fn parse_pe_machine_and_imports(bytes: &[u8]) -> Result<(u16, bool, Vec<Stri
         }
     }
 
+    Ok((machine, characteristics, is_32bit, dlls))
+}
+
+pub fn parse_pe_machine_and_imports(bytes: &[u8]) -> Result<(u16, bool, Vec<String>), String> {
+    let (machine, _, is_32bit, dlls) = parse_pe_header_and_imports(bytes)?;
     Ok((machine, is_32bit, dlls))
 }
 
@@ -518,6 +534,422 @@ pub fn prepare_game_sandbox_env(game_dir: &Path) -> Result<Vec<(String, String)>
     ])
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GameCompatStatus {
+    pub game_id: String,
+    pub exe_path: String,
+    pub is_32bit: bool,
+    pub large_address_aware: bool,
+    pub laa_eligible: bool,
+    pub legacy_dx_imports: Vec<String>,
+    pub dxvk_recommended_dlls: Vec<String>,
+    pub dxvk_deployed: bool,
+    pub dxvk_deployed_dlls: Vec<String>,
+    pub dxvk_source_dir: String,
+    pub dxvk_source_ready: bool,
+    pub dxvk_available_dlls: Vec<String>,
+    pub last_snapshot_id: Option<String>,
+    pub status_message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct DxvkDeployManifest {
+    deployed_dlls: Vec<String>,
+    backed_up_originals: Vec<String>,
+}
+
+pub fn detect_legacy_dx_apis(imports: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut apis: Vec<String> = Vec::new();
+    let mut rec_dlls: Vec<String> = Vec::new();
+    let push_unique = |list: &mut Vec<String>, item: &str| {
+        if !list.iter().any(|x| x.eq_ignore_ascii_case(item)) {
+            list.push(item.to_string());
+        }
+    };
+
+    for dll in imports {
+        let lower = dll.to_ascii_lowercase();
+        if lower == "d3d8.dll" || lower.starts_with("d3dx8") {
+            push_unique(&mut apis, "DirectX 8");
+            push_unique(&mut rec_dlls, "d3d8.dll");
+            push_unique(&mut rec_dlls, "d3d9.dll");
+        } else if lower == "d3d9.dll" || lower.starts_with("d3dx9") {
+            push_unique(&mut apis, "DirectX 9");
+            push_unique(&mut rec_dlls, "d3d9.dll");
+        } else if lower == "d3d10.dll" || lower == "d3d10_1.dll" || lower.starts_with("d3dx10") {
+            push_unique(&mut apis, "DirectX 10");
+            push_unique(&mut rec_dlls, "d3d10core.dll");
+            push_unique(&mut rec_dlls, "dxgi.dll");
+        } else if lower == "d3d11.dll" || lower.starts_with("d3dx11") {
+            push_unique(&mut apis, "DirectX 11");
+            push_unique(&mut rec_dlls, "d3d11.dll");
+            push_unique(&mut rec_dlls, "dxgi.dll");
+        } else if lower == "dxgi.dll" {
+            push_unique(&mut apis, "DXGI");
+            push_unique(&mut rec_dlls, "dxgi.dll");
+        }
+    }
+    (apis, rec_dlls)
+}
+
+fn compute_pe_checksum(bytes: &[u8], checksum_offset: usize) -> u32 {
+    let mut sum: u64 = 0;
+    let mut idx = 0usize;
+    while idx + 1 < bytes.len() {
+        if idx == checksum_offset || idx == checksum_offset + 2 {
+            idx += 2;
+            continue;
+        }
+        let word = u16::from_le_bytes([bytes[idx], bytes[idx + 1]]) as u64;
+        sum += word;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        idx += 2;
+    }
+    if idx < bytes.len() {
+        sum += bytes[idx] as u64;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    sum = (sum & 0xFFFF) + (sum >> 16);
+    (sum as u32).wrapping_add(bytes.len() as u32)
+}
+
+/// Patches or clears `IMAGE_FILE_LARGE_ADDRESS_AWARE` (`0x0020`) in a 32-bit PE32 header in place.
+pub fn set_pe_large_address_aware(exe_path: &Path, enable: bool) -> Result<bool, String> {
+    let mut bytes = fs::read(exe_path)
+        .map_err(|e| format!("Failed to read executable {}: {}", exe_path.display(), e))?;
+    let (_, _, is_32bit, _) = parse_pe_header_and_imports(&bytes)?;
+    if !is_32bit {
+        return Err("64-bit PE32+ executables already address >4 GB memory".to_string());
+    }
+
+    let e_lfanew = read_u32_le(&bytes, 0x3C)? as usize;
+    let coff_off = e_lfanew + 4;
+    let char_off = coff_off + 18;
+    let mut characteristics = read_u16_le(&bytes, char_off)?;
+    if enable {
+        characteristics |= IMAGE_FILE_LARGE_ADDRESS_AWARE;
+    } else {
+        characteristics &= !IMAGE_FILE_LARGE_ADDRESS_AWARE;
+    }
+    bytes[char_off..char_off + 2].copy_from_slice(&characteristics.to_le_bytes());
+
+    let opt_off = coff_off + 20;
+    let checksum_off = opt_off + 64;
+    if checksum_off + 4 <= bytes.len() {
+        let old_csum = read_u32_le(&bytes, checksum_off)?;
+        if old_csum != 0 {
+            let new_csum = compute_pe_checksum(&bytes, checksum_off);
+            bytes[checksum_off..checksum_off + 4].copy_from_slice(&new_csum.to_le_bytes());
+        }
+    }
+
+    fs::write(exe_path, &bytes)
+        .map_err(|e| format!("Failed to write patched PE {}: {}", exe_path.display(), e))?;
+    Ok((characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) != 0)
+}
+
+fn find_dxvk_source_dir_and_dlls(
+    wrappers_root: &Path,
+    is_32bit: bool,
+) -> (PathBuf, Vec<PathBuf>) {
+    let arch_sub = if is_32bit { "x32" } else { "x64" };
+    let arch_dir = wrappers_root.join("dxvk").join(arch_sub);
+    let fallback_dir = wrappers_root.join("dxvk");
+    let chosen_dir = if arch_dir.is_dir() {
+        arch_dir
+    } else {
+        fallback_dir
+    };
+
+    let mut available = Vec::new();
+    if chosen_dir.is_dir() {
+        for &dll in DXVK_WRAPPER_DLLS {
+            if let Some(found) = find_case_insensitive_file(&chosen_dir, dll) {
+                if validate_dll_architecture(&found, is_32bit) {
+                    available.push(found);
+                }
+            }
+        }
+    }
+    (chosen_dir, available)
+}
+
+pub fn inspect_compat_with_dirs(
+    game_id: &str,
+    exe_path: &Path,
+    wrappers_root: &Path,
+    last_snapshot_id: Option<String>,
+) -> Result<GameCompatStatus, String> {
+    let file = File::open(exe_path)
+        .map_err(|e| format!("Failed to open executable {}: {}", exe_path.display(), e))?;
+    let mmap = unsafe { Mmap::map(&file) }
+        .map_err(|e| format!("Failed to mmap executable {}: {}", exe_path.display(), e))?;
+    let (_, characteristics, is_32bit, imports) = parse_pe_header_and_imports(&mmap)?;
+    drop(mmap);
+    drop(file);
+
+    let large_address_aware = (characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) != 0;
+    let (legacy_dx_imports, dxvk_recommended_dlls) = detect_legacy_dx_apis(&imports);
+    let exe_dir = exe_path.parent().unwrap_or_else(|| Path::new("."));
+
+    let manifest_path = exe_dir.join(WRAPPERS_MANIFEST_FILE);
+    let manifest_dlls: Vec<String> = fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<DxvkDeployManifest>(&raw).ok())
+        .map(|m| m.deployed_dlls)
+        .unwrap_or_default();
+
+    let mut deployed_dlls: Vec<String> = Vec::new();
+    for &dll in DXVK_WRAPPER_DLLS {
+        if find_case_insensitive_file(exe_dir, dll).is_some()
+            || manifest_dlls.iter().any(|m| m.eq_ignore_ascii_case(dll))
+        {
+            deployed_dlls.push(dll.to_string());
+        }
+    }
+
+    let (source_dir, available_paths) = find_dxvk_source_dir_and_dlls(wrappers_root, is_32bit);
+    let dxvk_available_dlls: Vec<String> = available_paths
+        .iter()
+        .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(ToString::to_string))
+        .collect();
+    let dxvk_source_ready = !dxvk_available_dlls.is_empty();
+    let dxvk_deployed = !deployed_dlls.is_empty();
+
+    let status_message = if !dxvk_source_ready && !dxvk_deployed {
+        format!(
+            "Place matching DXVK DLLs in {} to enable 1-click Vulkan translation.",
+            source_dir.display()
+        )
+    } else {
+        "Compatibility inspection ready.".to_string()
+    };
+
+    Ok(GameCompatStatus {
+        game_id: game_id.to_string(),
+        exe_path: exe_path.to_string_lossy().into_owned(),
+        is_32bit,
+        large_address_aware,
+        laa_eligible: is_32bit,
+        legacy_dx_imports,
+        dxvk_recommended_dlls,
+        dxvk_deployed,
+        dxvk_deployed_dlls: deployed_dlls,
+        dxvk_source_dir: source_dir.to_string_lossy().into_owned(),
+        dxvk_source_ready,
+        dxvk_available_dlls,
+        last_snapshot_id,
+        status_message,
+    })
+}
+
+pub fn deploy_or_remove_dxvk_in_dirs(
+    game_id: &str,
+    exe_path: &Path,
+    wrappers_root: &Path,
+    enable: bool,
+    last_snapshot_id: Option<String>,
+) -> Result<GameCompatStatus, String> {
+    let exe_dir = exe_path
+        .parent()
+        .ok_or_else(|| "Executable has no parent directory".to_string())?;
+    let manifest_path = exe_dir.join(WRAPPERS_MANIFEST_FILE);
+
+    if enable {
+        let pre = inspect_compat_with_dirs(game_id, exe_path, wrappers_root, None)?;
+        let (src_dir, available) = find_dxvk_source_dir_and_dlls(wrappers_root, pre.is_32bit);
+        if available.is_empty() {
+            return Err(format!(
+                "No {} DXVK DLLs found in {}",
+                if pre.is_32bit { "32-bit (x32)" } else { "64-bit (x64)" },
+                src_dir.display()
+            ));
+        }
+        let target_names: Vec<String> = if pre.dxvk_recommended_dlls.is_empty() {
+            available
+                .iter()
+                .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(ToString::to_string))
+                .collect()
+        } else {
+            let matching: Vec<String> = available
+                .iter()
+                .filter_map(|p| {
+                    let name = p.file_name()?.to_str()?;
+                    if pre
+                        .dxvk_recommended_dlls
+                        .iter()
+                        .any(|r| r.eq_ignore_ascii_case(name))
+                    {
+                        Some(name.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if matching.is_empty() {
+                available
+                    .iter()
+                    .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(ToString::to_string))
+                    .collect()
+            } else {
+                matching
+            }
+        };
+
+        let mut manifest = DxvkDeployManifest::default();
+        for src in &available {
+            let Some(fname) = src.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !target_names.iter().any(|t| t.eq_ignore_ascii_case(fname)) {
+                continue;
+            }
+            let dest = exe_dir.join(fname);
+            let orig_bak = exe_dir.join(format!("{fname}.duke-orig"));
+            if dest.is_file() && !orig_bak.is_file() {
+                let _ = fs::copy(&dest, &orig_bak);
+                manifest.backed_up_originals.push(fname.to_string());
+            }
+            fs::copy(src, &dest)
+                .map_err(|e| format!("Failed copying DXVK DLL {}: {}", fname, e))?;
+            manifest.deployed_dlls.push(fname.to_string());
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&manifest) {
+            let _ = crate::atomic_write_string(&manifest_path, &json);
+        }
+    } else {
+        let manifest = fs::read_to_string(&manifest_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<DxvkDeployManifest>(&raw).ok());
+        let to_remove: Vec<String> = manifest
+            .as_ref()
+            .map(|m| m.deployed_dlls.clone())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| DXVK_WRAPPER_DLLS.iter().map(|s| (*s).to_string()).collect());
+        let backed_up: Vec<String> = manifest
+            .map(|m| m.backed_up_originals)
+            .unwrap_or_default();
+
+        for dll in &to_remove {
+            if let Some(existing) = find_case_insensitive_file(exe_dir, dll) {
+                let _ = fs::remove_file(&existing);
+            }
+            let orig_bak = exe_dir.join(format!("{dll}.duke-orig"));
+            if orig_bak.is_file() && backed_up.iter().any(|b| b.eq_ignore_ascii_case(dll)) {
+                let _ = fs::rename(&orig_bak, exe_dir.join(dll));
+            }
+        }
+        let _ = fs::remove_file(&manifest_path);
+    }
+
+    inspect_compat_with_dirs(game_id, exe_path, wrappers_root, last_snapshot_id)
+}
+
+fn resolve_game_exe_and_dir(game_id: &str) -> Result<(crate::GameEntry, PathBuf, PathBuf), String> {
+    let library = crate::load_library_standalone()?;
+    let game = library
+        .into_iter()
+        .find(|g| g.id == game_id)
+        .ok_or_else(|| "Game not found in library".to_string())?;
+    let exe_path = PathBuf::from(game.exe_path.trim());
+    if !exe_path.is_file() {
+        return Err(format!("Executable does not exist: {}", exe_path.display()));
+    }
+    let game_dir = if !game.install_dir.trim().is_empty() {
+        PathBuf::from(game.install_dir.trim())
+    } else {
+        crate::resolve_game_root_dir(&exe_path)
+    };
+    Ok((game, exe_path, game_dir))
+}
+
+#[tauri::command]
+pub async fn get_game_compat_status(game_id: String) -> Result<GameCompatStatus, String> {
+    tokio::task::spawn_blocking(move || {
+        let (game, exe_path, _) = resolve_game_exe_and_dir(&game_id)?;
+        let wrappers_root = crate::resolve_data_root_dir_standalone()?.join("wrappers");
+        inspect_compat_with_dirs(&game.id, &exe_path, &wrappers_root, None)
+    })
+    .await
+    .map_err(|e| format!("Compat status worker failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn toggle_game_laa_patch(
+    game_id: String,
+    enable: bool,
+) -> Result<GameCompatStatus, String> {
+    tokio::task::spawn_blocking(move || {
+        let (game, exe_path, game_dir) = resolve_game_exe_and_dir(&game_id)?;
+        let snap = crate::snapshots::create_snapshot_in_dir(
+            &game.id,
+            &game_dir,
+            &game_dir.join(crate::snapshots::CAS_DIR_NAME),
+            Some(if enable {
+                "Auto-Backup Before 4GB LAA Patch"
+            } else {
+                "Auto-Backup Before LAA Revert"
+            }),
+        )?;
+        set_pe_large_address_aware(&exe_path, enable)?;
+        let wrappers_root = crate::resolve_data_root_dir_standalone()?.join("wrappers");
+        let mut status = inspect_compat_with_dirs(&game.id, &exe_path, &wrappers_root, Some(snap.id))?;
+        status.status_message = if status.large_address_aware {
+            "4 GB Large Address Aware flag enabled (CAS snapshot saved).".to_string()
+        } else {
+            "4 GB Large Address Aware flag cleared (CAS snapshot saved).".to_string()
+        };
+        Ok(status)
+    })
+    .await
+    .map_err(|e| format!("LAA patch worker failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn toggle_game_dxvk_wrapper(
+    game_id: String,
+    enable: bool,
+) -> Result<GameCompatStatus, String> {
+    tokio::task::spawn_blocking(move || {
+        let (game, exe_path, game_dir) = resolve_game_exe_and_dir(&game_id)?;
+        let wrappers_root = crate::resolve_data_root_dir_standalone()?.join("wrappers");
+        if enable {
+            let pre = inspect_compat_with_dirs(&game.id, &exe_path, &wrappers_root, None)?;
+            if !pre.dxvk_source_ready {
+                return Err(format!(
+                    "No {} DXVK DLLs found in {}",
+                    if pre.is_32bit { "32-bit (x32)" } else { "64-bit (x64)" },
+                    pre.dxvk_source_dir
+                ));
+            }
+        }
+        let snap = crate::snapshots::create_snapshot_in_dir(
+            &game.id,
+            &game_dir,
+            &game_dir.join(crate::snapshots::CAS_DIR_NAME),
+            Some(if enable {
+                "Auto-Backup Before DXVK Deploy"
+            } else {
+                "Auto-Backup Before DXVK Removal"
+            }),
+        )?;
+        let mut status =
+            deploy_or_remove_dxvk_in_dirs(&game.id, &exe_path, &wrappers_root, enable, Some(snap.id))?;
+        status.status_message = if status.dxvk_deployed {
+            format!(
+                "Deployed DXVK ({}) next to executable (CAS snapshot saved).",
+                status.dxvk_deployed_dlls.join(", ")
+            )
+        } else {
+            "Removed DXVK wrappers from executable folder (CAS snapshot saved).".to_string()
+        };
+        Ok(status)
+    })
+    .await
+    .map_err(|e| format!("DXVK toggle worker failed: {e}"))?
+}
+
 #[tauri::command]
 pub async fn preflight_check_exe(exe_path: String) -> Result<PePreflightReport, String> {
     let trimmed = exe_path.trim().to_string();
@@ -663,6 +1095,59 @@ mod tests {
         assert!(game_dir.join(".duke-profile/Documents").is_dir());
         assert!(game_dir.join(".duke-profile/SavedGames").is_dir());
         assert!(env_pairs.iter().any(|(k, _)| k == "APPDATA"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pe32_laa_patch_and_dxvk_wrapper_round_trip() {
+        let root = std::env::temp_dir().join(format!("duke_compat_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let game_dir = root.join("LegacyDX9Game");
+        let wrappers_root = root.join("wrappers");
+        let dxvk_x32 = wrappers_root.join("dxvk").join("x32");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::create_dir_all(&dxvk_x32).unwrap();
+
+        let exe32 = game_dir.join("retro32.exe");
+        let mut pe_bytes = build_synthetic_pe(true, &["KERNEL32.dll", "d3d9.dll", "dxgi.dll"]);
+        // Set a non-zero initial checksum to verify checksum update on patch.
+        let opt_off = 0x80usize + 4 + 20;
+        pe_bytes[opt_off + 64..opt_off + 68].copy_from_slice(&0x1234u32.to_le_bytes());
+        fs::write(&exe32, pe_bytes).unwrap();
+        fs::write(dxvk_x32.join("d3d9.dll"), build_synthetic_pe(true, &[])).unwrap();
+        fs::write(dxvk_x32.join("dxgi.dll"), build_synthetic_pe(true, &[])).unwrap();
+
+        let initial = inspect_compat_with_dirs("g1", &exe32, &wrappers_root, None).unwrap();
+        assert!(initial.is_32bit);
+        assert!(!initial.large_address_aware);
+        assert!(initial.laa_eligible);
+        assert!(initial.legacy_dx_imports.iter().any(|x| x == "DirectX 9"));
+        assert!(initial.dxvk_source_ready);
+        assert!(!initial.dxvk_deployed);
+
+        assert!(set_pe_large_address_aware(&exe32, true).unwrap());
+        let after_laa = inspect_compat_with_dirs("g1", &exe32, &wrappers_root, None).unwrap();
+        assert!(after_laa.large_address_aware);
+
+        assert!(!set_pe_large_address_aware(&exe32, false).unwrap());
+        let after_unlaa = inspect_compat_with_dirs("g1", &exe32, &wrappers_root, None).unwrap();
+        assert!(!after_unlaa.large_address_aware);
+
+        let after_deploy =
+            deploy_or_remove_dxvk_in_dirs("g1", &exe32, &wrappers_root, true, None).unwrap();
+        assert!(after_deploy.dxvk_deployed);
+        assert!(game_dir.join("d3d9.dll").is_file());
+
+        let after_remove =
+            deploy_or_remove_dxvk_in_dirs("g1", &exe32, &wrappers_root, false, None).unwrap();
+        assert!(!after_remove.dxvk_deployed);
+        assert!(!game_dir.join("d3d9.dll").is_file());
+
+        // 64-bit binary rejects LAA bit toggle.
+        let exe64 = game_dir.join("modern64.exe");
+        fs::write(&exe64, build_synthetic_pe(false, &[])).unwrap();
+        assert!(set_pe_large_address_aware(&exe64, true).is_err());
 
         let _ = fs::remove_dir_all(&root);
     }
