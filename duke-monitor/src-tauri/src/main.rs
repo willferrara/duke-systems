@@ -1,6 +1,8 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod gpu_profiles;
+
 use duke_core::pipe_ipc::{DukeBus, DukeEvent};
 use duke_core::shm_bus::{pack_gpu_telemetry, DukeShmBus, ShmEventType, ShmSourceApp};
 use duke_core::tray_daemon::{handle_run_event, install_standard_tray, TrayDaemonConfig, TrayDaemonState};
@@ -14,7 +16,7 @@ use std::fs;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
@@ -69,6 +71,9 @@ static LAST_PDH_SAMPLE: TimedCache<Option<f32>> = OnceLock::new();
 static WMI_GPU_CACHE: TimedCache<Vec<WmiVideoInfo>> = OnceLock::new();
 static ECO_JAILED_PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 static BOOSTED_PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+static GPU_CLOCKS_LOCKED_FOR_GAME: AtomicBool = AtomicBool::new(false);
+static GPU_POWER_MODIFIED_FOR_GAME: AtomicBool = AtomicBool::new(false);
+static DEFAULT_GPU_POWER_LIMIT_MW: AtomicU32 = AtomicU32::new(0);
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x00004000;
@@ -180,6 +185,9 @@ type NvmlGetTempFn = unsafe extern "C" fn(*mut c_void, u32, *mut u32) -> u32;
 type NvmlGetClockFn = unsafe extern "C" fn(*mut c_void, u32, *mut u32) -> u32;
 type NvmlGetMemoryFn = unsafe extern "C" fn(*mut c_void, *mut NvmlMemory) -> u32;
 type NvmlGetPowerFn = unsafe extern "C" fn(*mut c_void, *mut u32) -> u32;
+type NvmlSetPowerFn = unsafe extern "C" fn(*mut c_void, u32) -> u32;
+type NvmlSetLockedClocksFn = unsafe extern "C" fn(*mut c_void, u32, u32) -> u32;
+type NvmlResetLockedClocksFn = unsafe extern "C" fn(*mut c_void) -> u32;
 type NvmlGetFanFn = unsafe extern "C" fn(*mut c_void, *mut u32) -> u32;
 type NvmlGetUtilFn = unsafe extern "C" fn(*mut c_void, *mut NvmlUtilization) -> u32;
 
@@ -193,6 +201,9 @@ struct NvmlApi {
     get_memory: Option<NvmlGetMemoryFn>,
     get_power_usage: Option<NvmlGetPowerFn>,
     get_power_limit: Option<NvmlGetPowerFn>,
+    set_power_limit: Option<NvmlSetPowerFn>,
+    set_locked_clocks: Option<NvmlSetLockedClocksFn>,
+    reset_locked_clocks: Option<NvmlResetLockedClocksFn>,
     get_fan_speed: Option<NvmlGetFanFn>,
     get_utilization: Option<NvmlGetUtilFn>,
 }
@@ -648,6 +659,12 @@ fn get_nvml_api() -> Option<&'static NvmlApi> {
                     get_memory: load_sym!("nvmlDeviceGetMemoryInfo", NvmlGetMemoryFn),
                     get_power_usage: load_sym!("nvmlDeviceGetPowerUsage", NvmlGetPowerFn),
                     get_power_limit: load_sym!("nvmlDeviceGetPowerManagementLimit", NvmlGetPowerFn),
+                    set_power_limit: load_sym!("nvmlDeviceSetPowerManagementLimit", NvmlSetPowerFn),
+                    set_locked_clocks: load_sym!("nvmlDeviceSetGpuLockedClocks", NvmlSetLockedClocksFn),
+                    reset_locked_clocks: load_sym!(
+                        "nvmlDeviceResetGpuLockedClocks",
+                        NvmlResetLockedClocksFn
+                    ),
                     get_fan_speed: load_sym!("nvmlDeviceGetFanSpeed", NvmlGetFanFn),
                     get_utilization: load_sym!("nvmlDeviceGetUtilizationRates", NvmlGetUtilFn),
                 })
@@ -2395,12 +2412,196 @@ fn publish_shm_telemetry_tick() {
     }
 }
 
-fn handle_game_launched_boost(app: &AppHandle, pid: u32, title: &str, exe_name: &str) {
+fn apply_nvml_game_profile(profile: &gpu_profiles::GpuPowerProfile) -> (bool, String) {
+    let Some(nvml) = get_nvml_api() else {
+        return (false, "NVML unavailable; applied OS priority & EcoQoS jail".to_string());
+    };
+    let mut status_parts: Vec<String> = Vec::new();
+    let mut hw_applied = false;
+    unsafe {
+        let mut dev: *mut c_void = std::ptr::null_mut();
+        if (nvml.get_handle)(0, &mut dev) != NVML_SUCCESS || dev.is_null() {
+            return (false, "Primary NVML GPU handle unavailable".to_string());
+        }
+        if let Some(power_w) = profile.power_limit_watts.filter(|&w| w > 0) {
+            if let Some(get_pwr) = nvml.get_power_limit {
+                let mut cur_mw = 0u32;
+                if get_pwr(dev, &mut cur_mw) == NVML_SUCCESS && cur_mw > 0 {
+                    let _ = DEFAULT_GPU_POWER_LIMIT_MW.compare_exchange(
+                        0,
+                        cur_mw,
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    );
+                }
+            }
+            if let Some(set_pwr) = nvml.set_power_limit {
+                let target_mw = power_w.saturating_mul(1000);
+                if set_pwr(dev, target_mw) == NVML_SUCCESS {
+                    GPU_POWER_MODIFIED_FOR_GAME.store(true, Ordering::Release);
+                    hw_applied = true;
+                    status_parts.push(format!("{}W power cap", power_w));
+                }
+            }
+        }
+        if let (Some(min_clk), Some(max_clk)) =
+            (profile.locked_clock_min_mhz, profile.locked_clock_max_mhz)
+        {
+            if max_clk >= min_clk && max_clk > 0 {
+                if let Some(set_clk) = nvml.set_locked_clocks {
+                    if set_clk(dev, min_clk, max_clk) == NVML_SUCCESS {
+                        GPU_CLOCKS_LOCKED_FOR_GAME.store(true, Ordering::Release);
+                        hw_applied = true;
+                        status_parts.push(format!("{}-{} MHz lock", min_clk, max_clk));
+                    }
+                }
+            }
+        }
+    }
+    if status_parts.is_empty() {
+        (hw_applied, format!("Profile '{}' active (priority + EcoQoS)", profile.name))
+    } else {
+        (hw_applied, format!("{}: {}", profile.name, status_parts.join(", ")))
+    }
+}
+
+fn reset_nvml_game_profile() {
+    let reset_clocks = GPU_CLOCKS_LOCKED_FOR_GAME.swap(false, Ordering::AcqRel);
+    let reset_power = GPU_POWER_MODIFIED_FOR_GAME.swap(false, Ordering::AcqRel);
+    if !reset_clocks && !reset_power {
+        return;
+    }
+    let Some(nvml) = get_nvml_api() else {
+        return;
+    };
+    unsafe {
+        let mut dev: *mut c_void = std::ptr::null_mut();
+        if (nvml.get_handle)(0, &mut dev) != NVML_SUCCESS || dev.is_null() {
+            return;
+        }
+        if reset_clocks {
+            if let Some(reset_fn) = nvml.reset_locked_clocks {
+                let _ = reset_fn(dev);
+            }
+        }
+        if reset_power {
+            let def_mw = DEFAULT_GPU_POWER_LIMIT_MW.swap(0, Ordering::AcqRel);
+            if def_mw > 0 {
+                if let Some(set_pwr) = nvml.set_power_limit {
+                    let _ = set_pwr(dev, def_mw);
+                }
+            }
+        }
+    }
+}
+
+fn jail_background_processes_for_game(exclude_game_pid: u32) -> usize {
+    let self_pid = std::process::id();
+    let mut jailed_count = 0usize;
+    let protected = [
+        "csrss.exe",
+        "dwm.exe",
+        "winlogon.exe",
+        "services.exe",
+        "lsass.exe",
+        "smss.exe",
+        "svchost.exe",
+        "explorer.exe",
+        "audiodg.exe",
+        "fontdrvhost.exe",
+        "msedgewebview2.exe",
+    ];
+    let mut sys = match get_sysinfo().lock() {
+        Ok(g) => g,
+        Err(_) => return 0,
+    };
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    let candidate_pids: Vec<u32> = sys
+        .processes()
+        .iter()
+        .filter_map(|(pid, proc_info)| {
+            let raw_pid = pid.as_u32();
+            if raw_pid <= 4 || raw_pid == self_pid || raw_pid == exclude_game_pid {
+                return None;
+            }
+            let lower = proc_info.name().to_string_lossy().to_ascii_lowercase();
+            if lower.starts_with("duke-") || protected.contains(&lower.as_str()) {
+                return None;
+            }
+            let is_bloat = BLOAT_SIGNATURES.iter().any(|(sig, _)| lower.contains(sig));
+            let is_heavy_bg = proc_info.memory() > 180 * 1024 * 1024;
+            if is_bloat || is_heavy_bg {
+                Some(raw_pid)
+            } else {
+                None
+            }
+        })
+        .take(48)
+        .collect();
+    drop(sys);
+
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let mut jailed_set = get_eco_jailed_pids()
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        for pid in candidate_pids {
+            if jailed_set.contains(&pid) {
+                continue;
+            }
+            if let Ok(handle) = OpenProcess(
+                PROCESS_SET_INFORMATION | PROCESS_SET_QUOTA | PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                pid,
+            ) {
+                let _ = SetPriorityClass(handle.0, BELOW_NORMAL_PRIORITY_CLASS);
+                let throttling = ProcessPowerThrottlingState {
+                    version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+                    control_mask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+                    state_mask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+                };
+                if SetProcessInformation(
+                    handle.0,
+                    PROCESS_POWER_THROTTLING_INFO_CLASS,
+                    &throttling as *const _ as *const c_void,
+                    std::mem::size_of::<ProcessPowerThrottlingState>() as u32,
+                ) != 0
+                {
+                    jailed_set.insert(pid);
+                    jailed_count += 1;
+                }
+                let _ = K32EmptyWorkingSet(handle.0);
+                let _ = CloseHandle(handle);
+            }
+        }
+        if let Ok(mut guard) = get_eco_jailed_pids().lock() {
+            *guard = jailed_set;
+        }
+    }
+    jailed_count
+}
+
+fn handle_game_launched_boost_ext(
+    app: &AppHandle,
+    pid: u32,
+    title: &str,
+    exe_name: &str,
+    app_id: Option<u32>,
+    platform_id: Option<u16>,
+    exe_hash: Option<u64>,
+) {
+    let matched_profile =
+        gpu_profiles::match_profile_for_game(app_id, platform_id, exe_hash, title, exe_name);
     let already_boosted = get_boosted_pids()
         .lock()
         .map(|s| s.contains(&pid))
         .unwrap_or(false);
-    if pid > 4 && !already_boosted && duke_core::win32_ffi::boost_external_pid(pid).is_ok() {
+    let allow_boost = matched_profile
+        .as_ref()
+        .map(|p| p.boost_game_priority)
+        .unwrap_or(true);
+    if allow_boost && pid > 4 && !already_boosted && duke_core::win32_ffi::boost_external_pid(pid).is_ok() {
         if let Ok(mut boosted) = get_boosted_pids().lock() {
             boosted.insert(pid);
         }
@@ -2410,19 +2611,49 @@ fn handle_game_launched_boost(app: &AppHandle, pid: u32, title: &str, exe_name: 
     }
     duke_core::win32_ffi::enable_eco_qos_mode();
     duke_core::win32_ffi::trim_current_working_set();
+
+    let (profile_name, nvml_summary, jailed_bg) = if let Some(ref prof) = matched_profile {
+        gpu_profiles::set_active_profile_id(Some(app), Some(prof.id.clone()));
+        let (_, msg) = apply_nvml_game_profile(prof);
+        let jailed = if prof.eco_jail_background {
+            jail_background_processes_for_game(pid)
+        } else {
+            0
+        };
+        if let Some(Some(shm)) = DUKE_SHM_BUS.get() {
+            shm.publish_frame(duke_core::shm_bus::ShmEventFrame::profile_switch(
+                ShmSourceApp::DukeMonitor,
+                pid,
+                app_id.unwrap_or(0),
+                platform_id.unwrap_or(0),
+                &prof.name,
+            ));
+        }
+        (prof.name.clone(), msg, jailed)
+    } else {
+        (String::new(), String::new(), 0usize)
+    };
+
     if !already_boosted {
         let _ = app.emit(
             "duke-bus-game-started",
             serde_json::json!({
                 "pid": pid,
+                "appId": app_id,
+                "platformId": platform_id,
                 "title": title,
-                "exeName": exe_name
+                "exeName": exe_name,
+                "gpuProfile": profile_name,
+                "nvmlStatus": nvml_summary,
+                "jailedBackgroundCount": jailed_bg,
             }),
         );
     }
 }
 
 fn handle_game_exited_cleanup(app: &AppHandle, pid: u32) {
+    reset_nvml_game_profile();
+    gpu_profiles::set_active_profile_id(Some(app), Some("default_performance".to_string()));
     if let Ok(mut boosted) = get_boosted_pids().lock() {
         if pid == 0 {
             boosted.clear();
@@ -2440,6 +2671,27 @@ fn handle_game_exited_cleanup(app: &AppHandle, pid: u32) {
         duke_core::win32_ffi::enable_eco_qos_mode();
     }
     duke_core::win32_ffi::trim_current_working_set();
+}
+
+#[tauri::command]
+fn get_gpu_profiles(app: AppHandle) -> gpu_profiles::GpuProfileStore {
+    gpu_profiles::get_store_snapshot(Some(&app))
+}
+
+#[tauri::command]
+fn save_gpu_profile(
+    app: AppHandle,
+    profile: gpu_profiles::GpuPowerProfile,
+) -> Result<gpu_profiles::GpuProfileStore, String> {
+    gpu_profiles::upsert_profile(&app, profile)
+}
+
+#[tauri::command]
+fn delete_gpu_profile(
+    app: AppHandle,
+    profile_id: String,
+) -> Result<gpu_profiles::GpuProfileStore, String> {
+    gpu_profiles::remove_profile(&app, &profile_id)
 }
 
 fn main() {
@@ -2461,7 +2713,8 @@ fn main() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
         .setup(move |app| {
-            // Prime sysinfo & CPU topology & trim working set immediately after startup
+            // Prime sysinfo & CPU topology & GPU profile store & trim working set immediately after startup
+            gpu_profiles::init_store(app.handle());
             let _ = get_cpu_topology();
             let _ = get_sysinfo();
             trim_process_working_set();
@@ -2504,8 +2757,26 @@ fn main() {
                             processed = true;
                             match frame.kind() {
                                 ShmEventType::GameLaunched => {
-                                    let tag = frame.tag_str().to_string();
-                                    handle_game_launched_boost(&shm_app, frame.pid, &tag, &tag);
+                                    if let Some(ev) = frame.decode_game_launched() {
+                                        let exe_name = read_process_name_by_pid(ev.pid);
+                                        handle_game_launched_boost_ext(
+                                            &shm_app,
+                                            ev.pid,
+                                            &ev.tag,
+                                            &exe_name,
+                                            if ev.app_id > 0 { Some(ev.app_id) } else { None },
+                                            if ev.platform_id > 0 {
+                                                Some(ev.platform_id)
+                                            } else {
+                                                None
+                                            },
+                                            if ev.exe_hash != 0 {
+                                                Some(ev.exe_hash)
+                                            } else {
+                                                None
+                                            },
+                                        );
+                                    }
                                 }
                                 ShmEventType::GameExited => {
                                     handle_game_exited_cleanup(&shm_app, frame.pid);
@@ -2533,8 +2804,41 @@ fn main() {
             let bus_app = app.handle().clone();
             let _ = DUKE_BUS.get_or_init(|| {
                 DukeBus::start("duke-monitor", move |event| match event {
-                    DukeEvent::GameStarted { pid, title, exe_name } => {
-                        handle_game_launched_boost(&bus_app, pid, &title, &exe_name);
+                    DukeEvent::GameLaunched {
+                        pid,
+                        title,
+                        exe_name,
+                        app_id,
+                        platform_id,
+                        exe_hash,
+                    } => {
+                        handle_game_launched_boost_ext(
+                            &bus_app,
+                            pid,
+                            &title,
+                            &exe_name,
+                            if app_id > 0 { Some(app_id) } else { None },
+                            if platform_id > 0 { Some(platform_id) } else { None },
+                            if exe_hash != 0 { Some(exe_hash) } else { None },
+                        );
+                    }
+                    DukeEvent::GameExited { pid, .. } => {
+                        handle_game_exited_cleanup(&bus_app, pid);
+                    }
+                    DukeEvent::GameStarted {
+                        pid,
+                        title,
+                        exe_name,
+                    } => {
+                        handle_game_launched_boost_ext(
+                            &bus_app,
+                            pid,
+                            &title,
+                            &exe_name,
+                            None,
+                            None,
+                            None,
+                        );
                     }
                     DukeEvent::GameStopped { pid, .. } => {
                         handle_game_exited_cleanup(&bus_app, pid);
@@ -2584,7 +2888,10 @@ fn main() {
             open_drivers_folder,
             set_auto_trim_enabled,
             trim_working_set,
-            get_system_telemetry
+            get_system_telemetry,
+            get_gpu_profiles,
+            save_gpu_profile,
+            delete_gpu_profile
         ])
         .build(tauri::generate_context!())
         .expect("error while building Duke Monitor Tauri application");

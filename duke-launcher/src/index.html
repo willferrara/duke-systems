@@ -57,6 +57,7 @@
     <symbol id="icon-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></symbol>
     <symbol id="icon-cloud" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></symbol>
     <symbol id="icon-git-branch" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+    <symbol id="icon-rotate-ccw" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></symbol>
     <symbol id="icon-terminal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></symbol>
   </svg>
 
@@ -69,7 +70,7 @@
         </button>
         <img src="assets/dukeflaglogo.png" alt="Duke Launcher" class="titlebar-emblem" />
         <span class="titlebar-title">Duke Launcher</span>
-        <span class="titlebar-version mono-num" id="app-version-pill">v0.5.0</span>
+        <span class="titlebar-version mono-num" id="app-version-pill">v0.6.0</span>
       </div>
 
       <div class="titlebar-center">
@@ -781,6 +782,44 @@
                 </div>
                 <div class="mod-loadouts-strip" id="detail-mods-loadouts-list"></div>
               </div>
+
+              <!-- Git-Style Save-State & Progress Timeline Scrubber (Duke Time-Machine) -->
+              <div class="panel-card detail-card-span2" id="detail-time-machine-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>Save Timeline &amp; Branch Scrubber (Duke Time-Machine)</h3>
+                    <p class="panel-sub" id="detail-tm-summary">Content-addressed BLAKE3 save checkpoints (.duke-cas), 160x90 visual previews &amp; Git-style save branches.</p>
+                  </div>
+                  <div class="detail-save-actions">
+                    <span class="pill mono-num" id="detail-tm-dedup-pill">0 KB CAS</span>
+                    <select id="detail-tm-branch-select" class="input-control select-compact mono-num" aria-label="Active Save Branch">
+                      <option value="main">branch: main</option>
+                    </select>
+                    <button type="button" class="btn btn-primary btn-xs" id="btn-detail-tm-checkpoint">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-clock"/></svg>
+                      <span>Create Checkpoint</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-tm-refresh" title="Refresh Timeline">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="tm-branch-row">
+                  <input type="text" id="input-detail-tm-branch" class="input-control" placeholder="Fork new save branch name (e.g. boss-route-b)..." />
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-tm-create-branch">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-git-branch"/></svg>
+                    <span>Fork Branch</span>
+                  </button>
+                </div>
+                <div class="tm-scrubber-bar">
+                  <input type="range" id="detail-tm-scrubber-range" class="range-control" min="0" max="0" value="0" disabled />
+                  <span class="pill mono-num" id="detail-tm-scrubber-readout">0 / 0 checkpoints</span>
+                </div>
+                <div id="detail-tm-selected-card" class="tm-selected-card">
+                  <div class="panel-sub">No save checkpoints recorded yet. Play this game or click Create Checkpoint to start your timeline.</div>
+                </div>
+                <div id="detail-tm-timeline-list" class="tm-timeline-strip"></div>
+              </div>
             </div>
           </section>
 
@@ -1310,6 +1349,24 @@
                   <span>Advanced Engine</span>
                 </button>
               </div>
+            </div>
+
+            <!-- Suite Autonomy Status Strip (Live IPC Connected Daemons) -->
+            <div class="panel-card suite-autonomy-card" id="settings-suite-autonomy-strip">
+              <div class="suite-autonomy-head">
+                <div class="suite-autonomy-title-group">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-activity"/></svg>
+                  <div>
+                    <div class="suite-autonomy-title">Suite Autonomy Pipeline</div>
+                    <div class="panel-sub mono-num" id="suite-autonomy-bus-pill">SHM Bus · Checking daemons...</div>
+                  </div>
+                </div>
+                <button type="button" class="btn btn-secondary btn-xs" id="btn-refresh-suite-autonomy">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                  <span>Refresh</span>
+                </button>
+              </div>
+              <div class="suite-autonomy-daemons-row" id="suite-autonomy-daemons-row"></div>
             </div>
 
             <!-- TAB 1: ESSENTIALS (6 Clean, Everyday Controls) -->
@@ -2047,6 +2104,9 @@
             <h3>Friends</h3>
           </div>
           <div class="friends-drawer-head-actions">
+            <button type="button" class="win-btn" id="btn-open-coop-modal" title="Join Couch Co-Op Stream (Duke Link)">
+              <svg class="icon" aria-hidden="true"><use href="#icon-gamepad-2"/></svg>
+            </button>
             <button type="button" class="win-btn" id="btn-refresh-friends" title="Refresh Steam, Xbox, PSN & Swarm Presence">
               <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
             </button>
@@ -2056,6 +2116,18 @@
           </div>
         </div>
         <div class="friends-status-summary panel-sub" id="friends-drawer-summary">Connecting multi-platform presence...</div>
+        <div id="friends-coop-status-banner" class="friends-coop-banner hidden">
+          <div class="friends-coop-banner-info">
+            <span class="pill pill-accent mono-num" id="friends-coop-banner-badge">Duke Link Active</span>
+            <span class="panel-sub mono-num" id="friends-coop-banner-text">Waiting...</span>
+          </div>
+          <div class="friends-coop-banner-actions">
+            <button type="button" class="btn btn-secondary btn-xs" id="btn-coop-copy-invite" title="Copy Invite Link">
+              <svg class="icon" aria-hidden="true"><use href="#icon-copy"/></svg>
+            </button>
+            <button type="button" class="btn btn-secondary btn-xs" id="btn-coop-stop-inline">Stop</button>
+          </div>
+        </div>
         <div class="friends-cm-bar" id="friends-cm-bar">
           <div class="friends-cm-head">
             <span class="pill mono-num" id="friends-cm-pill">Steam CM: Idle</span>
@@ -2362,6 +2434,51 @@
           <span>Choose Custom Path</span>
         </button>
         <button type="button" class="btn btn-secondary btn-sm" id="btn-emu-install-cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: DUKE LINK — ZERO-LATENCY COUCH CO-OP STREAM & VIRTUAL P2 -->
+  <div id="coop-stream-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="coop-stream-modal-title">
+    <div class="modal-card modal-card-wide">
+      <div class="modal-head">
+        <div>
+          <h3 id="coop-stream-modal-title">Join Co-Op Stream (Duke Link P2P)</h3>
+          <p class="panel-sub" id="coop-stream-subtitle">Sub-15 ms peer-to-peer DXGI/NVENC game stream with Virtual Player 2 XInput injection via duke-input.</p>
+        </div>
+        <div class="modal-head-actions">
+          <span class="pill mono-num" id="coop-modal-status-pill">Idle</span>
+          <button type="button" class="win-btn modal-close" id="btn-close-coop-modal" aria-label="Close">
+            <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="modal-body coop-modal-body">
+        <div class="coop-connect-bar">
+          <input type="text" id="input-coop-join-uri" class="input-control mono-num" placeholder="dukelink://100.x.x.x:47882?code=DUKE-XXXXXX or Host IP..." />
+          <input type="text" id="input-coop-room-code" class="input-control mono-num input-compact-code" placeholder="Room Code" />
+          <button type="button" class="btn btn-primary btn-sm" id="btn-coop-join-connect">
+            <svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>
+            <span>Join Co-Op Stream</span>
+          </button>
+          <button type="button" class="btn btn-secondary btn-sm" id="btn-coop-start-host">
+            <svg class="icon" aria-hidden="true"><use href="#icon-gamepad-2"/></svg>
+            <span>Host Stream</span>
+          </button>
+          <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-coop-stop-stream">Stop Session</button>
+        </div>
+        <div class="coop-telemetry-strip mono-num">
+          <span class="pill" id="coop-telemetry-codec">Codec: Standby</span>
+          <span class="pill" id="coop-telemetry-rtt">RTT: -- ms</span>
+          <span class="pill" id="coop-telemetry-fps">FPS: --</span>
+          <span class="pill" id="coop-telemetry-kbps">Bitrate: -- kbps</span>
+          <span class="pill" id="coop-telemetry-p2">P2 Inputs: 0</span>
+        </div>
+        <div class="coop-canvas-wrap">
+          <canvas id="coop-stream-canvas" width="960" height="540"></canvas>
+          <div id="coop-canvas-empty" class="coop-canvas-empty">Paste a friend's dukelink:// invite link or Tailscale IP to watch their screen at &lt;15 ms latency and send Player 2 gamepad inputs.</div>
+        </div>
+        <div class="coop-p2-hint panel-sub mono-num" id="coop-p2-input-badge">P2 Controls: Connect USB/XInput gamepad or use WASD (LS) + Z/X/C/V (A/B/X/Y) + Enter (Start)</div>
       </div>
     </div>
   </div>

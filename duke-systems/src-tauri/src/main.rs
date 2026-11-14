@@ -176,8 +176,23 @@ pub struct SuiteActivityItem {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AutonomyDaemonStatus {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+    pub connected: bool,
+    pub shm_registered: bool,
+    pub pipe_online: bool,
+    pub pid: Option<u32>,
+    pub ram_mb: f64,
+    pub status_text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SuiteStatusSnapshot {
     pub apps: Vec<SuiteAppStatus>,
+    pub autonomy_daemons: Vec<AutonomyDaemonStatus>,
     pub total_suite_ram_mb: f64,
     pub apps_ram_mb: f64,
     pub own_ram_mb: f64,
@@ -622,14 +637,47 @@ fn build_suite_status_snapshot(app: &AppHandle, state: &SharedState) -> SuiteSta
     let shm_bus_ref = DUKE_SHM_BUS.get().and_then(|o| o.as_ref());
     let shm_bus_active = shm_bus_ref.is_some();
     let shm_total_frames = shm_bus_ref.map(|b| b.write_cursor()).unwrap_or(0);
-    let shm_active_apps: Vec<String> = shm_bus_ref
-        .map(|b| {
-            b.active_apps()
-                .into_iter()
-                .map(|a| a.display_name().to_string())
-                .collect()
+    let shm_active_enum = shm_bus_ref.map(|b| b.active_apps()).unwrap_or_default();
+    let shm_active_apps: Vec<String> = shm_active_enum
+        .iter()
+        .map(|a| a.display_name().to_string())
+        .collect();
+
+    let daemon_specs = [
+        ("monitor", "Monitor", "GPU & EcoQoS", ShmSourceApp::DukeMonitor),
+        ("capture", "Capture", "30s Replay & Clips", ShmSourceApp::DukeCapture),
+        ("input", "Input", "Bézier & Gyro Curves", ShmSourceApp::DukeInput),
+        ("launcher", "Launcher", "Library & Events", ShmSourceApp::DukeLauncher),
+    ];
+    let autonomy_daemons: Vec<AutonomyDaemonStatus> = daemon_specs
+        .iter()
+        .map(|(id, name, role, shm_tag)| {
+            let app_entry = apps.iter().find(|a| a.id == *id);
+            let running = app_entry.map(|a| a.running).unwrap_or(false);
+            let shm_registered = shm_active_enum.contains(shm_tag);
+            let connected = running || shm_registered;
+            let status_text = if shm_registered && pipe_bus_online {
+                "SHM + Pipe Sync".to_string()
+            } else if shm_registered {
+                "SHM Linked".to_string()
+            } else if running {
+                "Process Active".to_string()
+            } else {
+                "Standby".to_string()
+            };
+            AutonomyDaemonStatus {
+                id: (*id).to_string(),
+                name: (*name).to_string(),
+                role: (*role).to_string(),
+                connected,
+                shm_registered,
+                pipe_online: pipe_bus_online && running,
+                pid: app_entry.and_then(|a| a.pid),
+                ram_mb: app_entry.map(|a| a.ram_mb).unwrap_or(0.0),
+                status_text,
+            }
         })
-        .unwrap_or_default();
+        .collect();
 
     let has_shm_tick = state.shm_last_tick_ms.load(Ordering::Acquire) > 0;
     let shm_gpu_temp_c = if has_shm_tick {
@@ -672,6 +720,7 @@ fn build_suite_status_snapshot(app: &AppHandle, state: &SharedState) -> SuiteSta
 
     SuiteStatusSnapshot {
         apps,
+        autonomy_daemons,
         total_suite_ram_mb,
         apps_ram_mb,
         own_ram_mb,
@@ -1146,6 +1195,76 @@ fn format_bus_event(event: &DukeEvent) -> (&'static str, String, String) {
                 format!("Stopped \"{}\" ({}, PID {})", label, exe_name, pid),
             )
         }
+        DukeEvent::GameLaunched {
+            title,
+            exe_name,
+            pid,
+            app_id,
+            platform_id,
+            exe_hash,
+        } => {
+            let label = if title.trim().is_empty() {
+                exe_name.as_str()
+            } else {
+                title.as_str()
+            };
+            (
+                "GameLaunched",
+                "duke-launcher".to_string(),
+                format!(
+                    "Launched \"{}\" (App {} · Plat {} · #{:08x}, PID {})",
+                    label,
+                    app_id,
+                    platform_id,
+                    (exe_hash >> 32) as u32,
+                    pid
+                ),
+            )
+        }
+        DukeEvent::GameExited {
+            title,
+            exe_name,
+            pid,
+            app_id,
+            ..
+        } => {
+            let label = if title.trim().is_empty() {
+                exe_name.as_str()
+            } else {
+                title.as_str()
+            };
+            (
+                "GameExited",
+                "duke-launcher".to_string(),
+                format!("Exited \"{}\" (App {}, PID {})", label, app_id, pid),
+            )
+        }
+        DukeEvent::AchievementUnlocked {
+            app_id,
+            game_title,
+            title_slug,
+            ..
+        } => (
+            "AchievementUnlocked",
+            "duke-launcher".to_string(),
+            format!(
+                "Achievement unlocked in {} ({}): {} -> auto-clipping",
+                game_title, app_id, title_slug
+            ),
+        ),
+        DukeEvent::ProfileSwitch {
+            app,
+            profile_name,
+            curve_mode,
+            ..
+        } => (
+            "ProfileSwitch",
+            app.clone(),
+            format!(
+                "{} activated profile \"{}\" ({})",
+                app, profile_name, curve_mode
+            ),
+        ),
         DukeEvent::ProfileSwitched { app, profile_name } => (
             "ProfileSwitched",
             "duke-input".to_string(),
@@ -1373,6 +1492,8 @@ fn main() {
                                     }
                                     ShmEventType::GameLaunched
                                     | ShmEventType::GameExited
+                                    | ShmEventType::AchievementUnlocked
+                                    | ShmEventType::ProfileSwitch
                                     | ShmEventType::RamPurge => {
                                         notify_ui = true;
                                     }
@@ -1510,4 +1631,33 @@ fn main() {
             Some(&on_exit_cb),
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_bus_event_handles_wave1_pipeline_events() {
+        let (kind, src, summary) = format_bus_event(&DukeEvent::AchievementUnlocked {
+            app_id: 1145350,
+            game_title: "Hades II".to_string(),
+            title_slug: "ACH_TEST".to_string(),
+            unlocked_at: 100,
+        });
+        assert_eq!(kind, "AchievementUnlocked");
+        assert_eq!(src, "duke-launcher");
+        assert!(summary.contains("ACH_TEST"));
+
+        let (pkind, psrc, psummary) = format_bus_event(&DukeEvent::ProfileSwitch {
+            app: "duke-input".to_string(),
+            profile_name: "Console 5-Point Bézier".to_string(),
+            app_id: 1145350,
+            platform_id: 7,
+            curve_mode: "Bezier5Point".to_string(),
+        });
+        assert_eq!(pkind, "ProfileSwitch");
+        assert_eq!(psrc, "duke-input");
+        assert!(psummary.contains("Bezier5Point"));
+    }
 }

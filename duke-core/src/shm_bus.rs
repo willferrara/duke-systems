@@ -25,6 +25,9 @@ pub enum ShmEventType {
     TelemetryTick = 5,
     GameResumed = 6,
     ReplaySaveRequested = 7,
+    AchievementUnlocked = 8,
+    ProfileSwitch = 9,
+    CoOpInputP2 = 10,
 }
 
 impl ShmEventType {
@@ -37,6 +40,9 @@ impl ShmEventType {
             5 => Self::TelemetryTick,
             6 => Self::GameResumed,
             7 => Self::ReplaySaveRequested,
+            8 => Self::AchievementUnlocked,
+            9 => Self::ProfileSwitch,
+            10 => Self::CoOpInputP2,
             _ => Self::None,
         }
     }
@@ -102,11 +108,35 @@ pub const fn unpack_gpu_telemetry(payload_a: u64) -> (Option<u32>, Option<u32>) 
     (temp, load)
 }
 
+/// Deterministic 64-bit FNV-1a hash used for compact executable/slug fingerprints in SHM frames.
+#[inline]
+pub const fn fnv1a_hash64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        hash ^= bytes[idx] as u64;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+        idx += 1;
+    }
+    hash
+}
+
 /// Packs `sandbox_enabled` (bit 0) and `platform_id` (`u16` at bits 16..31) into `GameLaunched::payload_b`.
 /// Preserves bit 0 backwards-compatibility with legacy readers checking `payload_b & 1`.
 #[inline]
 pub const fn pack_game_launch_payload_b(sandbox_enabled: bool, platform_id: u16) -> u64 {
-    ((platform_id as u64) << 16) | (sandbox_enabled as u64)
+    pack_game_launch_payload_b_ext(sandbox_enabled, platform_id, 0)
+}
+
+/// Packs `sandbox_enabled` (bit 0), `platform_id` (`u16` bits 16..31), and `app_id` (`u32` bits 32..63)
+/// into `GameLaunched::payload_b` / `GameExited::payload_b`.
+#[inline]
+pub const fn pack_game_launch_payload_b_ext(
+    sandbox_enabled: bool,
+    platform_id: u16,
+    app_id: u32,
+) -> u64 {
+    ((app_id as u64) << 32) | ((platform_id as u64) << 16) | (sandbox_enabled as u64)
 }
 
 /// Unpacks whether sandbox mode was requested from `GameLaunched::payload_b`.
@@ -124,6 +154,64 @@ pub const fn unpack_game_launch_platform_id(payload_b: u64) -> Option<u16> {
     } else {
         Some(id)
     }
+}
+
+/// Unpacks `app_id` (`u32` bits 32..63) from `GameLaunched::payload_b` / `GameExited::payload_b`.
+#[inline]
+pub const fn unpack_game_launch_app_id(payload_b: u64) -> u32 {
+    ((payload_b >> 32) & 0xFFFF_FFFF) as u32
+}
+
+/// Structured decoded payload for `ShmEventType::GameLaunched`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShmGameLaunchedPayload {
+    pub pid: u32,
+    pub app_id: u32,
+    pub platform_id: u16,
+    pub sandbox_enabled: bool,
+    pub exe_hash: u64,
+    pub tag: String,
+}
+
+/// Structured decoded payload for `ShmEventType::GameExited`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShmGameExitedPayload {
+    pub pid: u32,
+    pub app_id: u32,
+    pub platform_id: u16,
+    pub exe_hash: u64,
+    pub tag: String,
+}
+
+/// Structured decoded payload for `ShmEventType::AchievementUnlocked`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShmAchievementUnlockedPayload {
+    pub app_id: u32,
+    pub title_slug_hash: u64,
+    pub title_slug: String,
+}
+
+/// Structured decoded payload for `ShmEventType::ProfileSwitch`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShmProfileSwitchPayload {
+    pub source_app: ShmSourceApp,
+    pub app_id: u32,
+    pub platform_id: u16,
+    pub profile_hash: u64,
+    pub profile_tag: String,
+}
+
+/// Compact zero-allocation virtual Player 2 gamepad state for `ShmEventType::CoOpInputP2`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct ShmCoOpInputP2Payload {
+    pub buttons: u16,
+    pub left_trigger: u8,
+    pub right_trigger: u8,
+    pub thumb_lx: i16,
+    pub thumb_ly: i16,
+    pub thumb_rx: i16,
+    pub thumb_ry: i16,
+    pub sequence: u32,
 }
 
 /// Canonical console display label for shared-memory `platform_id` (`1..=24`).
@@ -260,6 +348,176 @@ impl ShmEventFrame {
             .position(|&b| b == 0)
             .unwrap_or(self.reserved.len());
         std::str::from_utf8(&self.reserved[..end]).unwrap_or("")
+    }
+
+    /// Builds a structured `ShmEventType::GameLaunched` frame carrying `(app_id, platform_id, exe_hash)`.
+    pub fn game_launched(
+        source_app: ShmSourceApp,
+        pid: u32,
+        app_id: u32,
+        platform_id: u16,
+        sandbox_enabled: bool,
+        exe_hash: u64,
+        tag: &str,
+    ) -> Self {
+        Self::with_tag(
+            ShmEventType::GameLaunched,
+            source_app,
+            pid,
+            exe_hash,
+            pack_game_launch_payload_b_ext(sandbox_enabled, platform_id, app_id),
+            tag,
+        )
+    }
+
+    /// Builds a structured `ShmEventType::GameExited` frame carrying `(app_id, platform_id, exe_hash)`.
+    pub fn game_exited(
+        source_app: ShmSourceApp,
+        pid: u32,
+        app_id: u32,
+        platform_id: u16,
+        exe_hash: u64,
+        tag: &str,
+    ) -> Self {
+        Self::with_tag(
+            ShmEventType::GameExited,
+            source_app,
+            pid,
+            exe_hash,
+            pack_game_launch_payload_b_ext(false, platform_id, app_id),
+            tag,
+        )
+    }
+
+    /// Builds a structured `ShmEventType::AchievementUnlocked` frame carrying `{ app_id, title_slug }`.
+    pub fn achievement_unlocked(
+        source_app: ShmSourceApp,
+        pid: u32,
+        app_id: u32,
+        title_slug: &str,
+    ) -> Self {
+        Self::with_tag(
+            ShmEventType::AchievementUnlocked,
+            source_app,
+            pid,
+            app_id as u64,
+            fnv1a_hash64(title_slug.as_bytes()),
+            title_slug,
+        )
+    }
+
+    /// Builds a structured `ShmEventType::ProfileSwitch` frame notifying daemons of active profile changes.
+    pub fn profile_switch(
+        source_app: ShmSourceApp,
+        pid: u32,
+        app_id: u32,
+        platform_id: u16,
+        profile_tag: &str,
+    ) -> Self {
+        Self::with_tag(
+            ShmEventType::ProfileSwitch,
+            source_app,
+            pid,
+            fnv1a_hash64(profile_tag.as_bytes()),
+            pack_game_launch_payload_b_ext(false, platform_id, app_id),
+            profile_tag,
+        )
+    }
+
+    /// Builds a zero-allocation Player 2 controller state frame for `ShmEventType::CoOpInputP2`.
+    pub fn coop_input_p2(
+        source_app: ShmSourceApp,
+        pid: u32,
+        state: ShmCoOpInputP2Payload,
+    ) -> Self {
+        let payload_a = ((state.sequence as u64) << 32)
+            | ((state.right_trigger as u64) << 24)
+            | ((state.left_trigger as u64) << 16)
+            | (state.buttons as u64);
+        let payload_b = (((state.thumb_ry as u16) as u64) << 48)
+            | (((state.thumb_rx as u16) as u64) << 32)
+            | (((state.thumb_ly as u16) as u64) << 16)
+            | ((state.thumb_lx as u16) as u64);
+        Self::with_tag(
+            ShmEventType::CoOpInputP2,
+            source_app,
+            pid,
+            payload_a,
+            payload_b,
+            "p2-pad",
+        )
+    }
+
+    /// Decodes a `GameLaunched` frame into its structured payload.
+    pub fn decode_game_launched(&self) -> Option<ShmGameLaunchedPayload> {
+        if self.kind() != ShmEventType::GameLaunched {
+            return None;
+        }
+        Some(ShmGameLaunchedPayload {
+            pid: self.pid,
+            app_id: unpack_game_launch_app_id(self.payload_b),
+            platform_id: unpack_game_launch_platform_id(self.payload_b).unwrap_or(0),
+            sandbox_enabled: unpack_game_launch_sandbox(self.payload_b),
+            exe_hash: self.payload_a,
+            tag: self.tag_str().to_string(),
+        })
+    }
+
+    /// Decodes a `GameExited` frame into its structured payload.
+    pub fn decode_game_exited(&self) -> Option<ShmGameExitedPayload> {
+        if self.kind() != ShmEventType::GameExited {
+            return None;
+        }
+        Some(ShmGameExitedPayload {
+            pid: self.pid,
+            app_id: unpack_game_launch_app_id(self.payload_b),
+            platform_id: unpack_game_launch_platform_id(self.payload_b).unwrap_or(0),
+            exe_hash: self.payload_a,
+            tag: self.tag_str().to_string(),
+        })
+    }
+
+    /// Decodes an `AchievementUnlocked` frame into `{ app_id, title_slug }`.
+    pub fn decode_achievement_unlocked(&self) -> Option<ShmAchievementUnlockedPayload> {
+        if self.kind() != ShmEventType::AchievementUnlocked {
+            return None;
+        }
+        Some(ShmAchievementUnlockedPayload {
+            app_id: (self.payload_a & 0xFFFF_FFFF) as u32,
+            title_slug_hash: self.payload_b,
+            title_slug: self.tag_str().to_string(),
+        })
+    }
+
+    /// Decodes a `ProfileSwitch` frame into its structured payload.
+    pub fn decode_profile_switch(&self) -> Option<ShmProfileSwitchPayload> {
+        if self.kind() != ShmEventType::ProfileSwitch {
+            return None;
+        }
+        Some(ShmProfileSwitchPayload {
+            source_app: self.app(),
+            app_id: unpack_game_launch_app_id(self.payload_b),
+            platform_id: unpack_game_launch_platform_id(self.payload_b).unwrap_or(0),
+            profile_hash: self.payload_a,
+            profile_tag: self.tag_str().to_string(),
+        })
+    }
+
+    /// Decodes a `CoOpInputP2` frame into its packed Player 2 controller state.
+    pub fn decode_coop_input_p2(&self) -> Option<ShmCoOpInputP2Payload> {
+        if self.kind() != ShmEventType::CoOpInputP2 {
+            return None;
+        }
+        Some(ShmCoOpInputP2Payload {
+            buttons: (self.payload_a & 0xFFFF) as u16,
+            left_trigger: ((self.payload_a >> 16) & 0xFF) as u8,
+            right_trigger: ((self.payload_a >> 24) & 0xFF) as u8,
+            sequence: ((self.payload_a >> 32) & 0xFFFF_FFFF) as u32,
+            thumb_lx: (self.payload_b & 0xFFFF) as u16 as i16,
+            thumb_ly: ((self.payload_b >> 16) & 0xFFFF) as u16 as i16,
+            thumb_rx: ((self.payload_b >> 32) & 0xFFFF) as u16 as i16,
+            thumb_ry: ((self.payload_b >> 48) & 0xFFFF) as u16 as i16,
+        })
     }
 }
 
@@ -856,5 +1114,97 @@ mod tests {
         assert_eq!(console_label_for_platform_id(5), Some("Wii"));
         assert!(console_has_motion_gyro(5));
         assert!(!console_has_motion_gyro(1));
+    }
+
+    #[test]
+    fn wave1_structured_shm_payloads_roundtrip() {
+        let name = format!(r"Local\duke-suite-shm-wave1-{}", std::process::id());
+        let producer = DukeShmBus::open_or_create_named(&name).unwrap();
+        let mut consumer = DukeShmBus::open_or_create_named(&name).unwrap();
+
+        let exe_hash = fnv1a_hash64(b"C:\\Games\\HadesII\\Hades2.exe");
+        let launch_frame = ShmEventFrame::game_launched(
+            ShmSourceApp::DukeLauncher,
+            4242,
+            1145350,
+            7,
+            true,
+            exe_hash,
+            "Hades II",
+        );
+        producer.publish_frame(launch_frame);
+
+        let ach_frame = ShmEventFrame::achievement_unlocked(
+            ShmSourceApp::DukeLauncher,
+            4242,
+            1145350,
+            "ACH_NIGHT_CHAMPION",
+        );
+        producer.publish_frame(ach_frame);
+
+        let prof_frame = ShmEventFrame::profile_switch(
+            ShmSourceApp::DukeInput,
+            0,
+            1145350,
+            7,
+            "Switch-Gyro-Bezier5",
+        );
+        producer.publish_frame(prof_frame);
+
+        let pad_state = ShmCoOpInputP2Payload {
+            buttons: 0x1001,
+            left_trigger: 128,
+            right_trigger: 255,
+            thumb_lx: -16384,
+            thumb_ly: 32000,
+            thumb_rx: 4096,
+            thumb_ry: -8192,
+            sequence: 99,
+        };
+        let coop_frame = ShmEventFrame::coop_input_p2(ShmSourceApp::DukeLauncher, 4242, pad_state);
+        producer.publish_frame(coop_frame);
+
+        let exit_frame = ShmEventFrame::game_exited(
+            ShmSourceApp::DukeLauncher,
+            4242,
+            1145350,
+            7,
+            exe_hash,
+            "Hades II",
+        );
+        producer.publish_frame(exit_frame);
+
+        let rx1 = consumer.try_recv().unwrap().decode_game_launched().unwrap();
+        assert_eq!(rx1.pid, 4242);
+        assert_eq!(rx1.app_id, 1145350);
+        assert_eq!(rx1.platform_id, 7);
+        assert!(rx1.sandbox_enabled);
+        assert_eq!(rx1.exe_hash, exe_hash);
+        assert_eq!(rx1.tag, "Hades II");
+
+        let rx2 = consumer
+            .try_recv()
+            .unwrap()
+            .decode_achievement_unlocked()
+            .unwrap();
+        assert_eq!(rx2.app_id, 1145350);
+        assert_eq!(rx2.title_slug, "ACH_NIGHT_CHAMPION");
+        assert_eq!(
+            rx2.title_slug_hash,
+            fnv1a_hash64(b"ACH_NIGHT_CHAMPION")
+        );
+
+        let rx3 = consumer.try_recv().unwrap().decode_profile_switch().unwrap();
+        assert_eq!(rx3.source_app, ShmSourceApp::DukeInput);
+        assert_eq!(rx3.app_id, 1145350);
+        assert_eq!(rx3.platform_id, 7);
+        assert_eq!(rx3.profile_tag, "Switch-Gyro-Bezier5");
+
+        let rx4 = consumer.try_recv().unwrap().decode_coop_input_p2().unwrap();
+        assert_eq!(rx4, pad_state);
+
+        let rx5 = consumer.try_recv().unwrap().decode_game_exited().unwrap();
+        assert_eq!(rx5.app_id, 1145350);
+        assert_eq!(rx5.exe_hash, exe_hash);
     }
 }

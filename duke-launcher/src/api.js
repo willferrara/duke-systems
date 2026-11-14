@@ -1161,3 +1161,95 @@ export async function activateGameModLoadout(gameId, loadoutId = null) {
   });
 }
 
+// --- Wave 1: Suite Autonomy, Duke Link Co-Op & Duke Time-Machine ---
+export async function getSuiteAutonomyStatus() {
+  return invokeCommand("get_suite_autonomy_status");
+}
+
+export async function getDukeLinkStatus() {
+  return invokeCommand("get_duke_link_status");
+}
+
+export async function startCoOpHost({ gameId = null, gameTitle = null, bindPort = null } = {}) {
+  return invokeCommand("start_coop_host", {
+    gameId: gameId || null,
+    gameTitle: gameTitle || null,
+    bindPort: typeof bindPort === "number" ? bindPort : null
+  });
+}
+
+export async function stopCoOpSession() {
+  return invokeCommand("stop_coop_session");
+}
+
+export async function inviteFriendToCoOp({
+  friendName,
+  platform = "Steam",
+  steamId = null,
+  peerHint = null,
+  gameTitle = null
+}) {
+  return invokeCommand("invite_friend_to_coop", {
+    friendName: String(friendName || "Friend"),
+    platform: String(platform || "Steam"),
+    steamId: steamId || null,
+    peerHint: peerHint || null,
+    gameTitle: gameTitle || null
+  });
+}
+
+export async function joinCoOpStream({ hostAddr, roomCode = null, gameTitle = null }) {
+  return invokeCommand("join_coop_stream", {
+    hostAddr: String(hostAddr || ""),
+    roomCode: roomCode || null,
+    gameTitle: gameTitle || null
+  });
+}
+
+export async function sendCoOpInputP2(input) {
+  return invokeCommand("send_coop_input_p2", { input });
+}
+
+export async function getGameTimeMachine(gameId) {
+  return invokeCommand("get_game_time_machine", { gameId: String(gameId || "") });
+}
+
+export async function createTimeMachineCheckpoint(gameId, label = null, trigger = "manual") {
+  return invokeCommand("create_time_machine_checkpoint", {
+    gameId: String(gameId || ""),
+    label: label || null,
+    trigger: trigger || "manual"
+  });
+}
+
+export async function createTimeMachineBranch(gameId, branchName, fromCheckpointId = null) {
+  return invokeCommand("create_time_machine_branch", {
+    gameId: String(gameId || ""),
+    branchName: String(branchName || ""),
+    fromCheckpointId: fromCheckpointId || null
+  });
+}
+
+export async function switchTimeMachineBranch(gameId, branchName, restoreHead = true) {
+  return invokeCommand("switch_time_machine_branch", {
+    gameId: String(gameId || ""),
+    branchName: String(branchName || ""),
+    restoreHead: Boolean(restoreHead)
+  });
+}
+
+export async function restoreTimeMachineCheckpoint(gameId, checkpointId) {
+  return invokeCommand("restore_time_machine_checkpoint", {
+    gameId: String(gameId || ""),
+    checkpointId: String(checkpointId || "")
+  });
+}
+
+export async function deleteTimeMachineCheckpoint(gameId, checkpointId) {
+  return invokeCommand("delete_time_machine_checkpoint", {
+    gameId: String(gameId || ""),
+    checkpointId: String(checkpointId || "")
+  });
+}
+
+

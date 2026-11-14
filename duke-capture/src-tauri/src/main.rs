@@ -156,6 +156,12 @@ static REPLAY_RUNNING: AtomicBool = AtomicBool::new(false);
 static AUDIO_STOP_SIGNAL: AtomicBool = AtomicBool::new(false);
 static CAPTURE_STOP_SIGNAL: AtomicBool = AtomicBool::new(false);
 static AUTO_TRIM_ENABLED: AtomicBool = AtomicBool::new(true);
+static AUTO_CLIP_ON_ACHIEVEMENT: AtomicBool = AtomicBool::new(true);
+static AUTO_ARM_REPLAY_ON_GAME: AtomicBool = AtomicBool::new(true);
+static AUTO_ARMED_BY_GAME: AtomicBool = AtomicBool::new(false);
+static ACTIVE_GAME_APP_ID: AtomicU32 = AtomicU32::new(0);
+static RECENT_ACHIEVEMENT_SAVES: OnceLock<Mutex<std::collections::HashMap<String, Instant>>> =
+    OnceLock::new();
 static SYSTEM_LEVEL_PCT: AtomicU32 = AtomicU32::new(0);
 static MIC_LEVEL_PCT: AtomicU32 = AtomicU32::new(0);
 static LAST_HOTKEY_MS: AtomicU64 = AtomicU64::new(0);
@@ -194,6 +200,10 @@ impl Default for HotkeyBinding {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureConfig {
@@ -211,6 +221,10 @@ pub struct CaptureConfig {
     pub chime_volume_pct: u32,
     pub hotkey: HotkeyBinding,
     pub auto_trim_enabled: bool,
+    #[serde(default = "default_true")]
+    pub auto_clip_on_achievement: bool,
+    #[serde(default = "default_true")]
+    pub auto_arm_replay_on_game: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -382,6 +396,8 @@ fn default_config(app: Option<&AppHandle>) -> CaptureConfig {
         chime_volume_pct: 85,
         hotkey: HotkeyBinding::default(),
         auto_trim_enabled: true,
+        auto_clip_on_achievement: true,
+        auto_arm_replay_on_game: true,
     }
 }
 
@@ -417,6 +433,8 @@ fn sync_atomics_from_config(cfg: &CaptureConfig) {
     NOISE_GATE_ENABLED.store(cfg.noise_gate_enabled, Ordering::Relaxed);
     CHIME_VOLUME_PCT.store(cfg.chime_volume_pct.min(100), Ordering::Relaxed);
     AUTO_TRIM_ENABLED.store(cfg.auto_trim_enabled, Ordering::Relaxed);
+    AUTO_CLIP_ON_ACHIEVEMENT.store(cfg.auto_clip_on_achievement, Ordering::Relaxed);
+    AUTO_ARM_REPLAY_ON_GAME.store(cfg.auto_arm_replay_on_game, Ordering::Relaxed);
     if let Ok(mut hk) = get_hotkey_lock().lock() {
         *hk = cfg.hotkey.clone();
     }
@@ -2365,6 +2383,28 @@ async fn save_replay_internal(
     app: &AppHandle,
     game_override: Option<String>,
 ) -> Result<ClipEntry, String> {
+    save_replay_tagged(app, game_override, None).await
+}
+
+fn format_achievement_clip_filename(
+    game_name: &str,
+    achievement_slug: Option<&str>,
+    stamp: &str,
+) -> String {
+    match achievement_slug
+        .map(sanitize_filename_part)
+        .filter(|s| !s.is_empty() && s != "Desktop")
+    {
+        Some(slug) => format!("{}_{}_{}.mp4", game_name, slug, stamp),
+        None => format!("{}_{}.mp4", game_name, stamp),
+    }
+}
+
+async fn save_replay_tagged(
+    app: &AppHandle,
+    game_override: Option<String>,
+    achievement_slug: Option<String>,
+) -> Result<ClipEntry, String> {
     if ACTIVE_SAVE_IN_FLIGHT.swap(true, Ordering::SeqCst) {
         return Err("Clip save already in progress...".to_string());
     }
@@ -2397,7 +2437,8 @@ async fn save_replay_internal(
                 .unwrap_or_default()
                 .as_secs();
             let stamp = format_timestamp_filename(now_secs);
-            let file_name = format!("{}_{}.mp4", game_name, stamp);
+            let file_name =
+                format_achievement_clip_filename(&game_name, achievement_slug.as_deref(), &stamp);
             let out_path = game_dir.join(&file_name);
 
             #[cfg(target_os = "windows")]
@@ -2649,6 +2690,7 @@ async fn update_capture_config(app: AppHandle, patch: Value) -> Result<CaptureSt
 
 #[tauri::command]
 async fn toggle_replay_buffer(app: AppHandle, enabled: bool) -> Result<CaptureStateDto, String> {
+    AUTO_ARMED_BY_GAME.store(false, Ordering::Release);
     if enabled && !REPLAY_RUNNING.load(Ordering::Relaxed) {
         spawn_capture_pipeline(app.clone());
     } else if !enabled {
@@ -3158,7 +3200,16 @@ fn query_exe_stem_by_pid(pid: u32) -> Option<String> {
     None
 }
 
-fn handle_game_launched_tag(app: &AppHandle, pid: u32, title: &str, exe_name: &str) {
+fn handle_game_launched_tag_ext(
+    app: &AppHandle,
+    pid: u32,
+    app_id: Option<u32>,
+    title: &str,
+    exe_name: &str,
+) {
+    if let Some(aid) = app_id.filter(|&id| id > 0) {
+        ACTIVE_GAME_APP_ID.store(aid, Ordering::Release);
+    }
     let trimmed_title = title.trim();
     let friendly = if !trimmed_title.is_empty() && !trimmed_title.to_ascii_lowercase().ends_with(".exe") {
         trimmed_title.to_string()
@@ -3188,15 +3239,79 @@ fn handle_game_launched_tag(app: &AppHandle, pid: u32, title: &str, exe_name: &s
             changed = true;
         }
     }
+
+    if AUTO_ARM_REPLAY_ON_GAME.load(Ordering::Acquire) && !REPLAY_RUNNING.load(Ordering::Acquire) {
+        AUTO_ARMED_BY_GAME.store(true, Ordering::Release);
+        spawn_capture_pipeline(app.clone());
+    }
+
     if changed {
         let _ = app.emit(
             "active-game-updated",
             serde_json::json!({
                 "activeGame": friendly,
-                "pid": pid
+                "pid": pid,
+                "appId": app_id.unwrap_or(0),
             }),
         );
     }
+}
+
+fn should_capture_achievement_clip(app_id: u32, title_slug: &str) -> bool {
+    let key = format!("{}:{}", app_id, title_slug.trim().to_ascii_lowercase());
+    let map = RECENT_ACHIEVEMENT_SAVES.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let Ok(mut guard) = map.lock() else {
+        return false;
+    };
+    let now = Instant::now();
+    guard.retain(|_, ts| now.duration_since(*ts) < Duration::from_secs(15));
+    if guard.contains_key(&key) {
+        return false;
+    }
+    guard.insert(key, now);
+    true
+}
+
+fn handle_achievement_unlocked(
+    app: &AppHandle,
+    app_id: u32,
+    title_slug: &str,
+    game_title_override: Option<String>,
+) {
+    if !AUTO_CLIP_ON_ACHIEVEMENT.load(Ordering::Acquire) {
+        return;
+    }
+    if !should_capture_achievement_clip(app_id, title_slug) {
+        return;
+    }
+    let replay_active = REPLAY_RUNNING.load(Ordering::Acquire);
+    let _ = app.emit(
+        "achievement-clip-triggered",
+        serde_json::json!({
+            "appId": app_id,
+            "titleSlug": title_slug,
+            "replayActive": replay_active,
+        }),
+    );
+    if !replay_active {
+        return;
+    }
+    let clip_app = app.clone();
+    let slug = title_slug.to_string();
+    let game_override = game_title_override.filter(|s| !s.trim().is_empty());
+    tauri::async_runtime::spawn(async move {
+        if let Ok(clip) = save_replay_tagged(&clip_app, game_override, Some(slug.clone())).await {
+            let _ = clip_app.emit(
+                "achievement-clip-saved",
+                serde_json::json!({
+                    "appId": app_id,
+                    "achievement": slug,
+                    "clip": clip,
+                }),
+            );
+            let _ = clip_app.emit("clip-saved", clip);
+        }
+    });
 }
 
 fn handle_game_exited_tag(app: &AppHandle, pid: u32) {
@@ -3209,6 +3324,16 @@ fn handle_game_exited_tag(app: &AppHandle, pid: u32) {
         if should_clear {
             *guard = None;
             cleared = true;
+        }
+    }
+    if cleared {
+        ACTIVE_GAME_APP_ID.store(0, Ordering::Release);
+        if AUTO_ARMED_BY_GAME.swap(false, Ordering::AcqRel) {
+            CAPTURE_STOP_SIGNAL.store(true, Ordering::Release);
+            REPLAY_RUNNING.store(false, Ordering::Release);
+            if let Ok(mut rb) = get_ring_buffer().lock() {
+                rb.clear();
+            }
         }
     }
     if !REPLAY_RUNNING.load(Ordering::Relaxed) {
@@ -3289,21 +3414,44 @@ fn main() {
                             processed = true;
                             match frame.kind() {
                                 ShmEventType::GameLaunched => {
-                                    let tag = frame.tag_str();
-                                    let console_label = duke_core::shm_bus::unpack_game_launch_platform_id(frame.payload_b)
-                                        .and_then(duke_core::shm_bus::console_label_for_platform_id);
-                                    let trimmed = tag.trim();
-                                    let enriched_title = match console_label {
-                                        Some(sys) if !trimmed.is_empty() && !trimmed.to_ascii_lowercase().starts_with(&sys.to_ascii_lowercase()) => {
-                                            format!("{} - {}", sys, trimmed)
-                                        }
-                                        Some(sys) if trimmed.is_empty() => sys.to_string(),
-                                        _ => trimmed.to_string(),
-                                    };
-                                    handle_game_launched_tag(&shm_app, frame.pid, &enriched_title, tag);
+                                    if let Some(ev) = frame.decode_game_launched() {
+                                        let console_label = (ev.platform_id > 0)
+                                            .then(|| duke_core::shm_bus::console_label_for_platform_id(ev.platform_id))
+                                            .flatten();
+                                        let trimmed = ev.tag.trim();
+                                        let enriched_title = match console_label {
+                                            Some(sys)
+                                                if !trimmed.is_empty()
+                                                    && !trimmed
+                                                        .to_ascii_lowercase()
+                                                        .starts_with(&sys.to_ascii_lowercase()) =>
+                                            {
+                                                format!("{} - {}", sys, trimmed)
+                                            }
+                                            Some(sys) if trimmed.is_empty() => sys.to_string(),
+                                            _ => trimmed.to_string(),
+                                        };
+                                        handle_game_launched_tag_ext(
+                                            &shm_app,
+                                            ev.pid,
+                                            if ev.app_id > 0 { Some(ev.app_id) } else { None },
+                                            &enriched_title,
+                                            &ev.tag,
+                                        );
+                                    }
                                 }
                                 ShmEventType::GameExited => {
                                     handle_game_exited_tag(&shm_app, frame.pid);
+                                }
+                                ShmEventType::AchievementUnlocked => {
+                                    if let Some(ach) = frame.decode_achievement_unlocked() {
+                                        handle_achievement_unlocked(
+                                            &shm_app,
+                                            ach.app_id,
+                                            &ach.title_slug,
+                                            None,
+                                        );
+                                    }
                                 }
                                 ShmEventType::RamPurge
                                     if !REPLAY_RUNNING.load(Ordering::Relaxed) =>
@@ -3333,12 +3481,43 @@ fn main() {
             let bus_app = handle.clone();
             let _ = DUKE_BUS.get_or_init(|| {
                 DukeBus::start("duke-capture", move |event| match event {
+                    DukeEvent::GameLaunched {
+                        title,
+                        exe_name,
+                        pid,
+                        app_id,
+                        ..
+                    } => {
+                        handle_game_launched_tag_ext(
+                            &bus_app,
+                            pid,
+                            if app_id > 0 { Some(app_id) } else { None },
+                            &title,
+                            &exe_name,
+                        );
+                    }
+                    DukeEvent::GameExited { pid, .. } => {
+                        handle_game_exited_tag(&bus_app, pid);
+                    }
+                    DukeEvent::AchievementUnlocked {
+                        app_id,
+                        game_title,
+                        title_slug,
+                        ..
+                    } => {
+                        handle_achievement_unlocked(
+                            &bus_app,
+                            app_id,
+                            &title_slug,
+                            Some(game_title),
+                        );
+                    }
                     DukeEvent::GameStarted {
                         title,
                         exe_name,
                         pid,
                     } => {
-                        handle_game_launched_tag(&bus_app, pid, &title, &exe_name);
+                        handle_game_launched_tag_ext(&bus_app, pid, None, &title, &exe_name);
                     }
                     DukeEvent::GameStopped { pid, .. } => {
                         handle_game_exited_tag(&bus_app, pid);
@@ -3443,4 +3622,25 @@ fn main() {
             }),
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn achievement_clip_filename_and_dedup_work() {
+        let tagged = format_achievement_clip_filename(
+            "Hades II",
+            Some("ACH_NIGHT/CHAMPION"),
+            "20261114_150000",
+        );
+        assert_eq!(tagged, "Hades II_ACH_NIGHT_CHAMPION_20261114_150000.mp4");
+
+        let plain = format_achievement_clip_filename("Hades II", None, "20261114_150000");
+        assert_eq!(plain, "Hades II_20261114_150000.mp4");
+
+        assert!(should_capture_achievement_clip(1145350, "ACH_UNIQUE_TEST"));
+        assert!(!should_capture_achievement_clip(1145350, "ACH_UNIQUE_TEST"));
+    }
 }

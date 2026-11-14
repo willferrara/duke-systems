@@ -6,6 +6,7 @@ mod artwork;
 mod bench;
 mod catalog_mmap;
 mod delta_patch;
+mod duke_link;
 mod emulators;
 mod friends;
 mod importers;
@@ -30,6 +31,7 @@ mod steam_cm;
 mod store_direct;
 mod stream_extract;
 mod swarm;
+mod time_machine;
 
 use duke_core::pipe_ipc::{DukeBus, DukeEvent};
 use duke_core::shm_bus::{DukeShmBus, ShmEventType, ShmSourceApp};
@@ -106,6 +108,97 @@ fn publish_shm_event_tagged(
 
 fn publish_shm_event(event_type: ShmEventType, pid: u32, payload_a: u64, payload_b: u64) {
     publish_shm_event_tagged(event_type, pid, payload_a, payload_b, "");
+}
+
+pub(crate) fn publish_shm_frame_direct(frame: duke_core::shm_bus::ShmEventFrame) {
+    if let Some(cell) = DUKE_SHM_BUS.get() {
+        if let Ok(guard) = cell.lock() {
+            if let Some(ref bus) = *guard {
+                bus.publish_frame(frame);
+            }
+        }
+    }
+}
+
+pub(crate) fn publish_pipe_event(event: DukeEvent) {
+    if let Some(bus) = DUKE_BUS.get() {
+        bus.publish(event);
+    }
+}
+
+pub(crate) fn active_shm_apps() -> Vec<ShmSourceApp> {
+    if let Some(cell) = DUKE_SHM_BUS.get() {
+        if let Ok(guard) = cell.lock() {
+            if let Some(ref bus) = *guard {
+                return bus.active_apps();
+            }
+        }
+    }
+    Vec::new()
+}
+
+#[tauri::command]
+fn get_suite_autonomy_status() -> Value {
+    let active = active_shm_apps();
+    let shm_ready = DUKE_SHM_BUS
+        .get()
+        .and_then(|cell| cell.lock().ok().map(|g| g.is_some()))
+        .unwrap_or(false);
+    let pipe_online = DUKE_BUS.get().map(|b| b.is_online()).unwrap_or(false);
+
+    let specs = [
+        (
+            "monitor",
+            "Monitor",
+            "GPU Power & EcoQoS",
+            ShmSourceApp::DukeMonitor,
+        ),
+        (
+            "capture",
+            "Capture",
+            "NVENC Replay & Clip Tagging",
+            ShmSourceApp::DukeCapture,
+        ),
+        (
+            "input",
+            "Input",
+            "5-Point Bezier & Virtual P2",
+            ShmSourceApp::DukeInput,
+        ),
+    ];
+
+    let mut daemons = Vec::with_capacity(specs.len());
+    let mut connected_count = 0usize;
+    for (id, name, role, app_tag) in specs {
+        let shm_linked = active.contains(&app_tag);
+        if shm_linked {
+            connected_count += 1;
+        }
+        let status_text = if shm_linked && pipe_online {
+            "SHM + Pipe Sync"
+        } else if shm_linked {
+            "SHM Linked"
+        } else {
+            "Standby"
+        };
+        daemons.push(serde_json::json!({
+            "id": id,
+            "name": name,
+            "role": role,
+            "connected": shm_linked,
+            "shmRegistered": shm_linked,
+            "pipeOnline": pipe_online && shm_linked,
+            "statusText": status_text,
+        }));
+    }
+
+    serde_json::json!({
+        "shmReady": shm_ready,
+        "pipeOnline": pipe_online,
+        "connectedCount": connected_count,
+        "totalCount": specs.len(),
+        "daemons": daemons,
+    })
 }
 static ACTIVE_SESSIONS: OnceLock<Mutex<HashMap<String, ActiveGameSession>>> = OnceLock::new();
 static ACTIVE_JOBS: OnceLock<Mutex<HashMap<String, Arc<duke_core::win32_ffi::ProcessTreeJob>>>> =
@@ -7862,6 +7955,7 @@ async fn launch_game_internal(
         pf_enabled: bool,
         g_root: PathBuf,
         plat_id: u16,
+        app_id: u32,
         emu_id: Option<String>,
         rom_from_lib: Option<String>,
         global_settings: LauncherSettings,
@@ -7877,6 +7971,7 @@ async fn launch_game_internal(
             && global_settings.nvme_cache_budget_pct > 0;
         let mut g_root = default_root_dir;
         let mut plat_id = 0u16;
+        let mut app_id = 0u32;
         let mut emu_id: Option<String> = None;
         let mut rom_from_lib: Option<String> = None;
         if let Ok(mut library) = load_library_from_disk(&app_for_start) {
@@ -7891,6 +7986,10 @@ async fn launch_game_internal(
                     resolved_title = item.title.trim().to_string();
                 }
                 plat_id = item.platform_id;
+                app_id = item
+                    .app_id
+                    .or_else(|| item.steam_app_id.and_then(|v| u32::try_from(v).ok()))
+                    .unwrap_or(0);
                 if !item.emulator_id.trim().is_empty() {
                     emu_id = Some(item.emulator_id.trim().to_string());
                 }
@@ -7930,6 +8029,7 @@ async fn launch_game_internal(
             pf_enabled,
             g_root,
             plat_id,
+            app_id,
             emu_id,
             rom_from_lib,
             global_settings,
@@ -7947,6 +8047,7 @@ async fn launch_game_internal(
                 && fallback.nvme_cache_budget_pct > 0,
             g_root: default_root_fallback,
             plat_id: 0,
+            app_id: 0,
             emu_id: None,
             rom_from_lib: None,
             global_settings: fallback,
@@ -7959,6 +8060,7 @@ async fn launch_game_internal(
     let prefetch_enabled = launch_ctx.pf_enabled;
     let game_root_dir = launch_ctx.g_root;
     let item_platform_id = launch_ctx.plat_id;
+    let item_app_id = launch_ctx.app_id;
     let item_emulator_id = launch_ctx.emu_id;
     let resolved_rom_path_from_lib = launch_ctx.rom_from_lib;
     let launch_settings = launch_ctx.global_settings;
@@ -8177,28 +8279,33 @@ async fn launch_game_internal(
                 || g.exe_path.eq_ignore_ascii_case(&trimmed)
         }) {
             achievements::start_achievement_watcher(app.clone(), matched);
+            time_machine::start_save_watcher(app.clone(), matched);
         }
     }
 
-    if let Some(bus) = DUKE_BUS.get() {
-        bus.publish(DukeEvent::GameStarted {
-            title: game_title.clone(),
-            exe_name: exe_name_for_bus.clone(),
-            pid: game_pid,
-        });
-    }
+    let launch_exe_hash = duke_core::shm_bus::fnv1a_hash64(trimmed.to_ascii_lowercase().as_bytes());
     let shm_tag = if !game_title.trim().is_empty() {
         game_title.trim()
     } else {
         exe_name_for_bus.trim()
     };
-    publish_shm_event_tagged(
-        ShmEventType::GameLaunched,
+    publish_pipe_event(DukeEvent::GameLaunched {
+        title: game_title.clone(),
+        exe_name: exe_name_for_bus.clone(),
+        pid: game_pid,
+        app_id: item_app_id,
+        platform_id: item_platform_id,
+        exe_hash: launch_exe_hash,
+    });
+    publish_shm_frame_direct(duke_core::shm_bus::ShmEventFrame::game_launched(
+        ShmSourceApp::DukeLauncher,
         game_pid,
-        game_title.len() as u64,
-        duke_core::shm_bus::pack_game_launch_payload_b(sandbox_enabled, item_platform_id),
+        item_app_id,
+        item_platform_id,
+        sandbox_enabled,
+        launch_exe_hash,
         shm_tag,
-    );
+    ));
 
     if prefetch_enabled && item_platform_id == 0 && game_root_dir.is_dir() {
         let app_warm = app.clone();
@@ -8275,6 +8382,7 @@ async fn launch_game_internal(
     let game_title_after = game_title;
     let exe_name_after = exe_name_for_bus;
     let cpu_mode_loop = launch_settings.cpu_priority_mode.clone();
+    let swarm_enabled_exit = launch_settings.swarm_enabled;
     let swarm_auto_sync = launch_settings.swarm_enabled && launch_settings.swarm_auto_sync_saves;
     let shader_swarm_enabled_exit = launch_settings.shader_swarm_enabled;
     let frame_pacing_enabled_exit = launch_settings.frame_pacing_enabled;
@@ -8360,8 +8468,9 @@ async fn launch_game_internal(
             let s_title = game_title_after.clone();
             let s_exe = PathBuf::from(&path_after);
             let s_dir = PathBuf::from(&install_dir_for_exit);
+            let push_peers = swarm_enabled_exit;
             tokio::spawn(async move {
-                let _ = tokio::task::spawn_blocking(move || {
+                if let Ok(Ok(meta)) = tokio::task::spawn_blocking(move || {
                     shader_swarm::capture_game_exit_shaders(
                         &s_gid,
                         &s_title,
@@ -8370,7 +8479,12 @@ async fn launch_game_internal(
                         session_launch_epoch,
                     )
                 })
-                .await;
+                .await
+                {
+                    if push_peers && meta.file_count > 0 {
+                        let _ = swarm::push_shader_meta_to_peers(&meta).await;
+                    }
+                }
             });
         }
 
@@ -8388,22 +8502,25 @@ async fn launch_game_internal(
         } else {
             exe_name_after.trim().to_string()
         };
-        if let Some(bus) = DUKE_BUS.get() {
-            bus.publish(DukeEvent::GameStopped {
-                title: game_title_after.clone(),
-                exe_name: exe_name_after,
-                pid: game_pid,
-            });
-        }
-        publish_shm_event_tagged(
-            ShmEventType::GameExited,
+        publish_pipe_event(DukeEvent::GameExited {
+            title: game_title_after.clone(),
+            exe_name: exe_name_after,
+            pid: game_pid,
+            app_id: item_app_id,
+            platform_id: item_platform_id,
+            exe_hash: launch_exe_hash,
+        });
+        publish_shm_frame_direct(duke_core::shm_bus::ShmEventFrame::game_exited(
+            ShmSourceApp::DukeLauncher,
             game_pid,
-            elapsed_secs,
-            0,
+            item_app_id,
+            item_platform_id,
+            launch_exe_hash,
             &shm_exit_tag,
-        );
+        ));
         if let Some(ref gid) = gid_after {
             achievements::stop_achievement_watcher(gid);
+            time_machine::stop_save_watcher(gid);
         }
         if item_platform_id > 0 {
             let gid_snap = gid_after.clone().unwrap_or_else(|| session_key_after.clone());
@@ -8692,8 +8809,10 @@ pub(crate) async fn launch_game_detached_headless(
         prefetch_enabled,
         game_root_dir,
         item_platform_id,
+        item_app_id,
         item_emulator_id,
         resolved_exe_from_lib,
+        resolved_game_title,
         launch_settings,
     ) = tokio::task::spawn_blocking(move || {
         let global_settings = load_settings_standalone();
@@ -8703,14 +8822,23 @@ pub(crate) async fn launch_game_detached_headless(
             && global_settings.nvme_cache_budget_pct > 0;
         let mut g_root = resolve_game_root_dir(Path::new(&exe_lookup));
         let mut plat_id = 0u16;
+        let mut app_id = 0u32;
         let mut emu_id: Option<String> = None;
         let mut lib_exe: Option<String> = None;
+        let mut lib_title = String::new();
         if let Ok(library) = load_library_standalone() {
             if let Some(item) = library.iter().find(|g| {
                 gid_lookup.as_ref().map(|id| g.id == *id).unwrap_or(false)
                     || (!exe_lookup.is_empty() && g.exe_path.eq_ignore_ascii_case(&exe_lookup))
             }) {
                 plat_id = item.platform_id;
+                app_id = item
+                    .app_id
+                    .or_else(|| item.steam_app_id.and_then(|v| u32::try_from(v).ok()))
+                    .unwrap_or(0);
+                if !item.title.trim().is_empty() {
+                    lib_title = item.title.trim().to_string();
+                }
                 if !item.emulator_id.trim().is_empty() {
                     emu_id = Some(item.emulator_id.trim().to_string());
                 }
@@ -8732,7 +8860,17 @@ pub(crate) async fn launch_game_detached_headless(
                 }
             }
         }
-        (sb, pf, g_root, plat_id, emu_id, lib_exe, global_settings)
+        (
+            sb,
+            pf,
+            g_root,
+            plat_id,
+            app_id,
+            emu_id,
+            lib_exe,
+            lib_title,
+            global_settings,
+        )
     })
     .await
     .unwrap_or_else(|_| {
@@ -8744,8 +8882,10 @@ pub(crate) async fn launch_game_detached_headless(
                 && fallback.nvme_cache_budget_pct > 0,
             PathBuf::new(),
             0,
+            0,
             None,
             None,
+            String::new(),
             fallback,
         )
     });
@@ -8833,13 +8973,30 @@ pub(crate) async fn launch_game_detached_headless(
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("");
-    publish_shm_event_tagged(
-        ShmEventType::GameLaunched,
+    let standalone_exe_hash =
+        duke_core::shm_bus::fnv1a_hash64(effective_target.to_ascii_lowercase().as_bytes());
+    let standalone_label = if !resolved_game_title.is_empty() {
+        resolved_game_title.as_str()
+    } else {
+        exe_tag
+    };
+    publish_pipe_event(DukeEvent::GameLaunched {
+        title: standalone_label.to_string(),
+        exe_name: exe_tag.to_string(),
         pid,
-        u64::from(sandbox_enabled),
-        duke_core::shm_bus::pack_game_launch_payload_b(sandbox_enabled, item_platform_id),
-        exe_tag,
-    );
+        app_id: item_app_id,
+        platform_id: item_platform_id,
+        exe_hash: standalone_exe_hash,
+    });
+    publish_shm_frame_direct(duke_core::shm_bus::ShmEventFrame::game_launched(
+        ShmSourceApp::DukeLauncher,
+        pid,
+        item_app_id,
+        item_platform_id,
+        sandbox_enabled,
+        standalone_exe_hash,
+        standalone_label,
+    ));
 
     if prefetch_enabled && item_platform_id == 0 && game_root_dir.is_dir() {
         let warm_dir = game_root_dir.clone();
@@ -13953,7 +14110,20 @@ fn main() {
             mod_graph::scan_game_mod_graph,
             mod_graph::register_game_mod_pack,
             mod_graph::save_game_mod_loadout,
-            mod_graph::activate_game_mod_loadout
+            mod_graph::activate_game_mod_loadout,
+            get_suite_autonomy_status,
+            duke_link::get_duke_link_status,
+            duke_link::start_coop_host,
+            duke_link::stop_coop_session,
+            duke_link::invite_friend_to_coop,
+            duke_link::join_coop_stream,
+            duke_link::send_coop_input_p2,
+            time_machine::get_game_time_machine,
+            time_machine::create_time_machine_checkpoint,
+            time_machine::create_time_machine_branch,
+            time_machine::switch_time_machine_branch,
+            time_machine::restore_time_machine_checkpoint,
+            time_machine::delete_time_machine_checkpoint
         ])
         .build(tauri::generate_context!())
     {

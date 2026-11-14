@@ -148,7 +148,20 @@ import {
   scanGameModGraph,
   registerGameModPack,
   saveGameModLoadout,
-  activateGameModLoadout
+  activateGameModLoadout,
+  getSuiteAutonomyStatus,
+  getDukeLinkStatus,
+  startCoOpHost,
+  stopCoOpSession,
+  inviteFriendToCoOp,
+  joinCoOpStream,
+  sendCoOpInputP2,
+  getGameTimeMachine,
+  createTimeMachineCheckpoint,
+  createTimeMachineBranch,
+  switchTimeMachineBranch,
+  restoreTimeMachineCheckpoint,
+  deleteTimeMachineCheckpoint
 } from "./api.js";
 
 const BOOKMARKLET_HREF =
@@ -253,6 +266,16 @@ const state = {
   detailPcgwWikiUrl: "",
   detailCompatStatus: null,
   detailModGraph: null,
+  detailTimeMachine: null,
+  detailTimeMachineSelectedIdx: 0,
+  suiteAutonomyStatus: null,
+  dukeLinkStatus: null,
+  dukeLinkInviteUri: "",
+  coopModalOpen: false,
+  coopInputTimer: null,
+  coopKeysDown: new Set(),
+  coopInputSeq: 0,
+  coopLastSig: "",
   projfsStreamingEnabled: true,
   shaderSwarmEnabled: true,
   framePacingEnabled: true,
@@ -1910,7 +1933,42 @@ function renderStoreOwnedTitles() {
     .join("");
 }
 
+async function refreshSuiteAutonomyStrip() {
+  try {
+    const status = await getSuiteAutonomyStatus();
+    state.suiteAutonomyStatus = status;
+    const busPill = el("suite-autonomy-bus-pill");
+    if (busPill) {
+      const conn = Number(status?.connectedCount || 0);
+      const total = Number(status?.totalCount || 3);
+      const busTxt = status?.shmReady ? "SHM Bus Active" : "SHM Initializing";
+      const pipeTxt = status?.pipeOnline ? "Pipe Online" : "Pipe Standby";
+      busPill.textContent = `${busTxt} · ${pipeTxt} · ${conn}/${total} Suite Daemons Linked`;
+    }
+    const row = el("suite-autonomy-daemons-row");
+    if (row && Array.isArray(status?.daemons)) {
+      row.innerHTML = status.daemons
+        .map((d) => {
+          const connected = Boolean(d?.connected);
+          return `
+            <div class="suite-daemon-chip ${connected ? "connected" : ""}">
+              <span class="suite-daemon-dot"></span>
+              <div class="suite-daemon-copy">
+                <span class="suite-daemon-name">${escapeHtml(d?.name || "Daemon")} · ${escapeHtml(d?.statusText || "Standby")}</span>
+                <span class="suite-daemon-meta">${escapeHtml(d?.role || "")}</span>
+              </div>
+            </div>
+          `;
+        })
+        .join("");
+    }
+  } catch {
+    // Non-critical daemon strip polling.
+  }
+}
+
 async function refreshFrontierDiagnostics() {
+  refreshSuiteAutonomyStrip().catch(() => {});
   try {
     const [diag, storeStatus] = await Promise.all([
       getFramePacingAndIoringStatus().catch(() => null),
@@ -1972,6 +2030,128 @@ function loadAllDetailPanels(game, requestId) {
   loadDetailCompat(game, requestId);
   loadDetailWofStorage(game, requestId);
   loadDetailModGraph(game, requestId);
+  loadDetailTimeMachine(game, requestId);
+}
+
+function renderSelectedTimeMachineCheckpoint() {
+  const host = el("detail-tm-selected-card");
+  const readout = el("detail-tm-scrubber-readout");
+  const tm = state.detailTimeMachine;
+  const list = Array.isArray(tm?.checkpoints) ? tm.checkpoints : [];
+  if (list.length === 0) {
+    if (readout) readout.textContent = "0 / 0 checkpoints";
+    if (host) {
+      host.innerHTML = `<div class="panel-sub">No save checkpoints recorded yet. Play this game or click Create Checkpoint to start your timeline.</div>`;
+    }
+    return;
+  }
+  const idx = Math.max(0, Math.min(state.detailTimeMachineSelectedIdx || 0, list.length - 1));
+  state.detailTimeMachineSelectedIdx = idx;
+  const cp = list[idx];
+  if (readout) {
+    readout.textContent = `Snapshot ${idx + 1} / ${list.length} · branch ${cp.branch || "main"}`;
+  }
+  if (!host) return;
+  const thumbHtml = cp.thumbnailDataUrl
+    ? `<img src="${cp.thumbnailDataUrl}" alt="Checkpoint preview" class="tm-selected-thumb" />`
+    : `<div class="tm-selected-thumb">No Preview</div>`;
+  const when = cp.timestampSecs ? new Date(cp.timestampSecs * 1000).toLocaleString() : "Just now";
+  const dedupSaved = Number(cp.dedupSavedBytes || 0);
+  const newBytes = Number(cp.newCasBytes || 0);
+  host.innerHTML = `
+    ${thumbHtml}
+    <div class="tm-selected-meta">
+      <div class="tm-selected-title-row">
+        <strong>${escapeHtml(cp.label || "Save Checkpoint")}</strong>
+        <span class="pill pill-accent mono-num">${escapeHtml(cp.branch || "main")}</span>
+        <span class="pill mono-num">${escapeHtml(cp.trigger || "manual")}</span>
+      </div>
+      <div class="panel-sub mono-num">${escapeHtml(when)} · Playtime ${escapeHtml(formatPlaytime(cp.playtimeSecs || 0))}</div>
+      <div class="panel-sub mono-num">${Number(cp.fileCount || 0)} files · ${formatBytesJs(cp.totalBytes || 0)} logical (+${formatBytesJs(newBytes)} new CAS, ${formatBytesJs(dedupSaved)} deduplicated)</div>
+    </div>
+    <div class="tm-selected-actions">
+      <button type="button" class="btn btn-primary btn-xs" data-tm-action="restore" data-tm-id="${escapeHtml(cp.id)}">
+        <svg class="icon" aria-hidden="true"><use href="#icon-rotate-ccw"/></svg>
+        <span>1-Click Rollback</span>
+      </button>
+      <button type="button" class="btn btn-secondary btn-xs" data-tm-action="delete" data-tm-id="${escapeHtml(cp.id)}">
+        <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
+        <span>Delete</span>
+      </button>
+    </div>
+  `;
+}
+
+function renderDetailTimeMachine(report) {
+  state.detailTimeMachine = report || null;
+  const checkpoints = Array.isArray(report?.checkpoints) ? report.checkpoints : [];
+  state.detailTimeMachineSelectedIdx = 0;
+
+  if (el("detail-tm-summary")) {
+    const rootsCount = Array.isArray(report?.discoveredSaveRoots) ? report.discoveredSaveRoots.length : 0;
+    const ratio = Number(report?.dedupRatioPct || 0).toFixed(1);
+    el("detail-tm-summary").textContent =
+      rootsCount > 0
+        ? `Watching ${rootsCount} save folder${rootsCount === 1 ? "" : "s"} · ${ratio}% CAS deduplication across ${checkpoints.length} checkpoints.`
+        : "Content-addressed BLAKE3 save checkpoints (.duke-cas), 160x90 visual previews & Git-style save branches.";
+  }
+  if (el("detail-tm-dedup-pill")) {
+    el("detail-tm-dedup-pill").textContent = `${formatBytesJs(report?.totalCasBytes || 0)} CAS`;
+  }
+  const branchSelect = el("detail-tm-branch-select");
+  if (branchSelect) {
+    const branches = Array.isArray(report?.branches) ? report.branches : [{ name: "main" }];
+    const active = report?.currentBranch || "main";
+    branchSelect.innerHTML = branches
+      .map(
+        (b) =>
+          `<option value="${escapeHtml(b.name)}"${b.name === active ? " selected" : ""}>branch: ${escapeHtml(b.name)}</option>`
+      )
+      .join("");
+  }
+  const scrubber = el("detail-tm-scrubber-range");
+  if (scrubber) {
+    scrubber.disabled = checkpoints.length <= 1;
+    scrubber.min = "0";
+    scrubber.max = String(Math.max(0, checkpoints.length - 1));
+    scrubber.value = "0";
+  }
+
+  renderSelectedTimeMachineCheckpoint();
+
+  const strip = el("detail-tm-timeline-list");
+  if (!strip) return;
+  if (checkpoints.length === 0) {
+    strip.innerHTML = "";
+    return;
+  }
+  strip.innerHTML = checkpoints
+    .map((cp, idx) => {
+      const thumb = cp.thumbnailDataUrl
+        ? `<img src="${cp.thumbnailDataUrl}" alt="" class="tm-node-thumb" loading="lazy" />`
+        : "";
+      return `
+        <button type="button" class="tm-node-chip${idx === 0 ? " active" : ""}" data-tm-idx="${idx}">
+          ${thumb}
+          <span class="tm-node-label">${escapeHtml(cp.label || "Checkpoint")}</span>
+          <span class="panel-sub mono-num">${escapeHtml(cp.branch || "main")} · ${formatBytesJs(cp.totalBytes || 0)}</span>
+        </button>
+      `;
+    })
+    .join("");
+}
+
+async function loadDetailTimeMachine(game, requestId) {
+  if (!game?.id) return;
+  try {
+    const report = await getGameTimeMachine(game.id);
+    if (state.activeDetailRequestId !== requestId || state.selectedDetailId !== game.id) return;
+    renderDetailTimeMachine(report);
+  } catch (err) {
+    if (el("detail-tm-summary")) {
+      el("detail-tm-summary").textContent = String(err);
+    }
+  }
 }
 
 function buildFriendCardHtml(friend, compactOverlay = false) {
@@ -2025,6 +2205,20 @@ function buildFriendCardHtml(friend, compactOverlay = false) {
         data-friend-action="beam-save"
         data-matched-game-id="${escapeHtml(friend.matchedLibraryGameId)}"
       >Beam Save</button>
+    `);
+  }
+  if (!compactOverlay && friend?.status !== "offline") {
+    actions.push(`
+      <button
+        type="button"
+        class="btn btn-primary btn-xs"
+        data-friend-action="invite-coop"
+        data-friend-name="${escapeHtml(friend?.displayName || "Friend")}"
+        data-platform="${escapeHtml(plat)}"
+        data-friend-steam-id="${escapeHtml(friend?.id || "")}"
+        data-peer-addr="${escapeHtml(friend?.swarmPeerAddr || friend?.gameServerIp || "")}"
+        data-friend-game="${escapeHtml(friend?.gameTitle || "")}"
+      >Invite to Couch Co-Op</button>
     `);
   }
 
@@ -2081,6 +2275,23 @@ async function handleFriendActionClick(btn, onStatus) {
       const matchedId = btn.dataset.matchedGameId;
       const res = await syncGameSavesMesh(matchedId);
       notify(res?.summary || "Mesh save beam completed.", "success");
+    } else if (action === "invite-coop") {
+      const selectedGame = state.library.find((g) => g.id === state.selectedDetailId);
+      const gameTitle = selectedGame?.title || btn.dataset.friendGame || "Couch Co-Op Session";
+      const res = await inviteFriendToCoOp({
+        friendName: btn.dataset.friendName || "Friend",
+        platform: btn.dataset.platform || "Steam",
+        steamId: btn.dataset.friendSteamId || null,
+        peerHint: btn.dataset.peerAddr || null,
+        gameTitle
+      });
+      state.dukeLinkStatus = res?.session || null;
+      state.dukeLinkInviteUri = res?.inviteUri || "";
+      renderDukeLinkUi(state.dukeLinkStatus);
+      if (res?.inviteUri) {
+        await writeClipboardText(res.inviteUri).catch(() => {});
+      }
+      notify(res?.deliveryNote || "Couch Co-Op room ready.", "success");
     }
   } catch (err) {
     notify(String(err), "error");
@@ -2179,6 +2390,175 @@ function toggleFriendsDrawer(forceOpen = null) {
       }
     }, 20000);
   }
+}
+
+const coopCanvasImg = new Image();
+coopCanvasImg.onload = () => {
+  const canvas = el("coop-stream-canvas");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  if (canvas.width !== coopCanvasImg.naturalWidth && coopCanvasImg.naturalWidth > 0) {
+    canvas.width = coopCanvasImg.naturalWidth;
+  }
+  if (canvas.height !== coopCanvasImg.naturalHeight && coopCanvasImg.naturalHeight > 0) {
+    canvas.height = coopCanvasImg.naturalHeight;
+  }
+  ctx.drawImage(coopCanvasImg, 0, 0, canvas.width, canvas.height);
+  el("coop-canvas-empty")?.classList.add("hidden");
+};
+
+function renderCoopFrameOnCanvas(frameEv) {
+  if (!frameEv?.frameB64) return;
+  coopCanvasImg.src = `data:image/jpeg;base64,${frameEv.frameB64}`;
+  if (el("coop-telemetry-codec") && frameEv.codec) {
+    el("coop-telemetry-codec").textContent = `Codec: ${frameEv.codec}`;
+  }
+  if (el("coop-telemetry-rtt")) {
+    el("coop-telemetry-rtt").textContent = `RTT: ${Number(frameEv.rttMs || 0).toFixed(1)} ms`;
+  }
+  if (el("coop-telemetry-fps")) {
+    el("coop-telemetry-fps").textContent = `FPS: ${Number(frameEv.fps || 0).toFixed(0)}`;
+  }
+  if (el("coop-telemetry-kbps")) {
+    el("coop-telemetry-kbps").textContent = `Bitrate: ${Number(frameEv.bitrateKbps || 0)} kbps`;
+  }
+}
+
+function renderDukeLinkUi(snap) {
+  state.dukeLinkStatus = snap || null;
+  const active = Boolean(snap?.active);
+  const banner = el("friends-coop-status-banner");
+  if (banner) {
+    banner.classList.toggle("hidden", !active);
+    if (el("friends-coop-banner-badge")) {
+      el("friends-coop-banner-badge").textContent = active
+        ? `Duke Link ${snap.role === "host" ? "Host" : "Guest"} · ${snap.roomCode || "LIVE"}`
+        : "Duke Link Idle";
+    }
+    if (el("friends-coop-banner-text")) {
+      el("friends-coop-banner-text").textContent = snap?.statusText || "";
+    }
+  }
+  if (el("coop-modal-status-pill")) {
+    el("coop-modal-status-pill").textContent = active
+      ? `${snap.role === "host" ? "HOST" : "GUEST"} · ${snap.roomCode || "CONNECTED"}`
+      : "Idle";
+  }
+  if (el("btn-coop-stop-stream")) {
+    el("btn-coop-stop-stream").classList.toggle("hidden", !active);
+  }
+  if (el("coop-telemetry-codec")) {
+    el("coop-telemetry-codec").textContent = `Codec: ${snap?.codec && snap.codec !== "none" ? snap.codec : "Standby"}`;
+  }
+  if (el("coop-telemetry-rtt")) {
+    el("coop-telemetry-rtt").textContent = active ? `RTT: ${Number(snap?.rttMs || 0).toFixed(1)} ms` : "RTT: -- ms";
+  }
+  if (el("coop-telemetry-fps")) {
+    el("coop-telemetry-fps").textContent = active ? `FPS: ${Number(snap?.fps || 0).toFixed(0)}` : "FPS: --";
+  }
+  if (el("coop-telemetry-kbps")) {
+    el("coop-telemetry-kbps").textContent = active ? `Bitrate: ${Number(snap?.bitrateKbps || 0)} kbps` : "Bitrate: -- kbps";
+  }
+  if (el("coop-telemetry-p2")) {
+    el("coop-telemetry-p2").textContent = `P2 Inputs: ${Number(snap?.p2InputPackets || 0)}`;
+  }
+  if (!active) {
+    el("coop-canvas-empty")?.classList.remove("hidden");
+  }
+}
+
+function readLocalCoOpP2State() {
+  let buttons = 0;
+  let leftTrigger = 0;
+  let rightTrigger = 0;
+  let thumbLx = 0;
+  let thumbLy = 0;
+  let thumbRx = 0;
+  let thumbRy = 0;
+
+  const keys = state.coopKeysDown;
+  if (keys.has("KeyW") || keys.has("ArrowUp")) thumbLy = 30000;
+  if (keys.has("KeyS") || keys.has("ArrowDown")) thumbLy = -30000;
+  if (keys.has("KeyA") || keys.has("ArrowLeft")) thumbLx = -30000;
+  if (keys.has("KeyD") || keys.has("ArrowRight")) thumbLx = 30000;
+  if (keys.has("KeyZ")) buttons |= 0x1000; // A
+  if (keys.has("KeyX")) buttons |= 0x2000; // B
+  if (keys.has("KeyC")) buttons |= 0x4000; // X
+  if (keys.has("KeyV")) buttons |= 0x8000; // Y
+  if (keys.has("Enter")) buttons |= 0x0010; // Start
+
+  const pads = typeof navigator.getGamepads === "function" ? navigator.getGamepads() : [];
+  const pad = Array.from(pads || []).find((p) => p && p.connected);
+  if (pad) {
+    const bitMap = [
+      [0, 0x1000],
+      [1, 0x2000],
+      [2, 0x4000],
+      [3, 0x8000],
+      [4, 0x0100],
+      [5, 0x0200],
+      [8, 0x0020],
+      [9, 0x0010],
+      [12, 0x0001],
+      [13, 0x0002],
+      [14, 0x0004],
+      [15, 0x0008]
+    ];
+    for (const [idx, mask] of bitMap) {
+      if (pad.buttons?.[idx]?.pressed) buttons |= mask;
+    }
+    leftTrigger = Math.round((pad.buttons?.[6]?.value || 0) * 255);
+    rightTrigger = Math.round((pad.buttons?.[7]?.value || 0) * 255);
+    const dead = (v) => (Math.abs(v || 0) < 0.08 ? 0 : Math.round(Math.max(-1, Math.min(1, v)) * 32767));
+    if (Math.abs(pad.axes?.[0] || 0) >= 0.08) thumbLx = dead(pad.axes[0]);
+    if (Math.abs(pad.axes?.[1] || 0) >= 0.08) thumbLy = dead(-pad.axes[1]);
+    if (Math.abs(pad.axes?.[2] || 0) >= 0.08) thumbRx = dead(pad.axes[2]);
+    if (Math.abs(pad.axes?.[3] || 0) >= 0.08) thumbRy = dead(-pad.axes[3]);
+  }
+  return { buttons, leftTrigger, rightTrigger, thumbLx, thumbLy, thumbRx, thumbRy };
+}
+
+function stopCoopP2InputPump() {
+  if (state.coopInputTimer !== null) {
+    clearInterval(state.coopInputTimer);
+    state.coopInputTimer = null;
+  }
+  state.coopKeysDown.clear();
+  state.coopLastSig = "";
+}
+
+function startCoopP2InputPump() {
+  stopCoopP2InputPump();
+  state.coopInputTimer = setInterval(() => {
+    if (!state.coopModalOpen || state.dukeLinkStatus?.role !== "guest") return;
+    const pad = readLocalCoOpP2State();
+    const sig = `${pad.buttons}|${pad.leftTrigger}|${pad.rightTrigger}|${pad.thumbLx}|${pad.thumbLy}|${pad.thumbRx}|${pad.thumbRy}`;
+    const isNeutral = sig === "0|0|0|0|0|0|0";
+    if (isNeutral && state.coopLastSig === sig) return;
+    state.coopLastSig = sig;
+    state.coopInputSeq += 1;
+    sendCoOpInputP2({ ...pad, sequence: state.coopInputSeq })
+      .then((count) => {
+        if (el("coop-telemetry-p2")) {
+          el("coop-telemetry-p2").textContent = `P2 Inputs: ${count}`;
+        }
+      })
+      .catch(() => {});
+  }, 16);
+}
+
+function openCoopStreamModal() {
+  state.coopModalOpen = true;
+  el("coop-stream-modal")?.classList.remove("hidden");
+  getDukeLinkStatus().then(renderDukeLinkUi).catch(() => {});
+  startCoopP2InputPump();
+}
+
+function closeCoopStreamModal() {
+  state.coopModalOpen = false;
+  el("coop-stream-modal")?.classList.add("hidden");
+  stopCoopP2InputPump();
 }
 
 function syncSettingsUiFromBackend(settings) {
@@ -7254,6 +7634,183 @@ function wireEvents() {
     showToast("Kernel IoRing, GPU HAGS & ProjFS diagnostics updated.", "info", 2200);
   });
 
+  // Suite Autonomy Status Strip
+  el("btn-refresh-suite-autonomy")?.addEventListener("click", async () => {
+    await refreshSuiteAutonomyStrip();
+    showToast("Suite Autonomy daemon bus refreshed.", "info", 1800);
+  });
+
+  // Duke Time-Machine: Save Timeline & Branch Scrubber
+  el("detail-tm-scrubber-range")?.addEventListener("input", (e) => {
+    const idx = Number(e.target.value || 0);
+    state.detailTimeMachineSelectedIdx = idx;
+    document.querySelectorAll("#detail-tm-timeline-list .tm-node-chip").forEach((node) => {
+      node.classList.toggle("active", Number(node.dataset.tmIdx) === idx);
+    });
+    renderSelectedTimeMachineCheckpoint();
+  });
+
+  el("detail-tm-timeline-list")?.addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-tm-idx]");
+    if (!chip) return;
+    const idx = Number(chip.dataset.tmIdx || 0);
+    state.detailTimeMachineSelectedIdx = idx;
+    if (el("detail-tm-scrubber-range")) el("detail-tm-scrubber-range").value = String(idx);
+    document.querySelectorAll("#detail-tm-timeline-list .tm-node-chip").forEach((node) => {
+      node.classList.toggle("active", Number(node.dataset.tmIdx) === idx);
+    });
+    renderSelectedTimeMachineCheckpoint();
+  });
+
+  el("btn-detail-tm-checkpoint")?.addEventListener("click", async () => {
+    const game = state.library.find((g) => g.id === state.selectedDetailId);
+    if (!game) return;
+    const btn = el("btn-detail-tm-checkpoint");
+    if (btn) btn.disabled = true;
+    try {
+      const cp = await createTimeMachineCheckpoint(game.id, "Manual Save Point", "manual");
+      await loadDetailTimeMachine(game, state.activeDetailRequestId);
+      showToast(`Saved Time-Machine checkpoint "${cp?.label || "Snapshot"}" (${cp?.fileCount || 0} files).`, "success", 2600);
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  el("btn-detail-tm-refresh")?.addEventListener("click", async () => {
+    const game = state.library.find((g) => g.id === state.selectedDetailId);
+    if (game) await loadDetailTimeMachine(game, state.activeDetailRequestId);
+  });
+
+  el("btn-detail-tm-create-branch")?.addEventListener("click", async () => {
+    const game = state.library.find((g) => g.id === state.selectedDetailId);
+    if (!game) return;
+    const branchName = (el("input-detail-tm-branch")?.value || "").trim();
+    if (!branchName) {
+      showToast("Enter a save branch name first.", "info", 2000);
+      return;
+    }
+    const list = state.detailTimeMachine?.checkpoints || [];
+    const selectedCp = list[state.detailTimeMachineSelectedIdx || 0];
+    try {
+      const rep = await createTimeMachineBranch(game.id, branchName, selectedCp?.id || null);
+      if (el("input-detail-tm-branch")) el("input-detail-tm-branch").value = "";
+      renderDetailTimeMachine(rep);
+      showToast(`Created & checked out save branch "${rep?.currentBranch || branchName}".`, "success", 2800);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("detail-tm-branch-select")?.addEventListener("change", async (e) => {
+    const game = state.library.find((g) => g.id === state.selectedDetailId);
+    if (!game) return;
+    const targetBranch = e.target.value;
+    try {
+      const rep = await switchTimeMachineBranch(game.id, targetBranch, true);
+      renderDetailTimeMachine(rep);
+      showToast(`Switched Time-Machine to branch "${targetBranch}".`, "success", 2400);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("detail-tm-selected-card")?.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-tm-action][data-tm-id]");
+    if (!btn) return;
+    const game = state.library.find((g) => g.id === state.selectedDetailId);
+    if (!game) return;
+    const action = btn.dataset.tmAction;
+    const cpId = btn.dataset.tmId;
+    btn.disabled = true;
+    try {
+      if (action === "restore") {
+        const rep = await restoreTimeMachineCheckpoint(game.id, cpId);
+        await loadDetailTimeMachine(game, state.activeDetailRequestId);
+        showToast(rep?.summary || "Restored save checkpoint.", "success", 3200);
+      } else if (action === "delete") {
+        const rep = await deleteTimeMachineCheckpoint(game.id, cpId);
+        renderDetailTimeMachine(rep);
+        showToast("Removed Time-Machine checkpoint.", "info", 2200);
+      }
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Duke Link: Zero-Latency Couch Co-Op Stream Modal & Controls
+  el("btn-open-coop-modal")?.addEventListener("click", openCoopStreamModal);
+  el("btn-close-coop-modal")?.addEventListener("click", closeCoopStreamModal);
+  el("coop-stream-modal")?.addEventListener("click", (e) => {
+    if (e.target === el("coop-stream-modal")) closeCoopStreamModal();
+  });
+
+  el("btn-coop-start-host")?.addEventListener("click", async () => {
+    const selected = state.library.find((g) => g.id === state.selectedDetailId);
+    try {
+      const snap = await startCoOpHost({
+        gameId: selected?.id || null,
+        gameTitle: selected?.title || "Active Game Session"
+      });
+      renderDukeLinkUi(snap);
+      const uri = `dukelink://${snap.advertiseAddr}?code=${encodeURIComponent(snap.roomCode)}`;
+      state.dukeLinkInviteUri = uri;
+      await writeClipboardText(uri).catch(() => {});
+      showToast(`Co-Op Host started (${snap.roomCode}) — link copied to clipboard.`, "success", 3200);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-coop-join-connect")?.addEventListener("click", async () => {
+    const hostAddr = (el("input-coop-join-uri")?.value || "").trim();
+    const roomCode = (el("input-coop-room-code")?.value || "").trim() || null;
+    if (!hostAddr) {
+      showToast("Enter a dukelink:// invite URI or friend Tailscale IP:port.", "info", 2400);
+      return;
+    }
+    try {
+      const snap = await joinCoOpStream({ hostAddr, roomCode });
+      renderDukeLinkUi(snap);
+      startCoopP2InputPump();
+      showToast(`Connecting to ${snap?.peerAddr || hostAddr}...`, "info", 2400);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  const stopCoopHandler = async () => {
+    try {
+      const snap = await stopCoOpSession();
+      renderDukeLinkUi(snap);
+      showToast("Duke Link Couch Co-Op session ended.", "info", 2200);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  };
+  el("btn-coop-stop-stream")?.addEventListener("click", stopCoopHandler);
+  el("btn-coop-stop-inline")?.addEventListener("click", stopCoopHandler);
+  el("btn-coop-copy-invite")?.addEventListener("click", async () => {
+    if (state.dukeLinkInviteUri) {
+      await writeClipboardText(state.dukeLinkInviteUri).catch(() => {});
+      showToast("Copied Duke Link invite URI to clipboard.", "success", 2000);
+    }
+  });
+
+  window.addEventListener("keydown", (e) => {
+    if (state.coopModalOpen && state.dukeLinkStatus?.role === "guest") {
+      if (document.activeElement?.tagName !== "INPUT") {
+        state.coopKeysDown.add(e.code);
+      }
+    }
+  });
+  window.addEventListener("keyup", (e) => {
+    state.coopKeysDown.delete(e.code);
+  });
+
   el("btn-frontier-dedup-cas")?.addEventListener("click", async () => {
     const btn = el("btn-frontier-dedup-cas");
     if (btn) btn.disabled = true;
@@ -8100,6 +8657,23 @@ async function init() {
       renderSteamCmFriendsState();
     }
   });
+
+  await listenEvent("time-machine-updated", (gid) => {
+    const activeGame = state.library.find((g) => g.id === state.selectedDetailId);
+    if (activeGame && activeGame.id === gid) {
+      loadDetailTimeMachine(activeGame, state.activeDetailRequestId);
+    }
+  });
+
+  await listenEvent("duke-link-state", (snap) => {
+    if (snap) renderDukeLinkUi(snap);
+  });
+
+  await listenEvent("duke-link-frame", (frameEv) => {
+    if (state.coopModalOpen) renderCoopFrameOnCanvas(frameEv);
+  });
+
+  getDukeLinkStatus().then(renderDukeLinkUi).catch(() => {});
 
   try {
     await refreshAllData();

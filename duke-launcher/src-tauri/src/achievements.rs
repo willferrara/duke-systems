@@ -506,17 +506,33 @@ pub fn diff_new_unlocks(
     newly_unlocked
 }
 
+fn make_achievement_slug(title: &str) -> String {
+    let mut slug: String = title
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    while slug.contains("--") {
+        slug = slug.replace("--", "-");
+    }
+    slug.trim_matches('-').chars().take(40).collect()
+}
+
 fn emit_new_unlocks(
     app: &AppHandle,
-    game_id: &str,
-    game_title: &str,
+    game: &crate::GameEntry,
     items: Vec<UnifiedAchievementItem>,
 ) {
     let fallback_ts = now_unix_secs();
+    let app_id = game
+        .app_id
+        .or_else(|| game.steam_app_id.and_then(|v| u32::try_from(v).ok()))
+        .unwrap_or(0);
     for item in items {
         let payload = AchievementUnlockEvent {
-            game_id: game_id.to_string(),
-            game_title: game_title.to_string(),
+            game_id: game.id.clone(),
+            game_title: game.title.clone(),
             api_name: item.api_name,
             display_name: item.display_name,
             description: item.description,
@@ -525,6 +541,35 @@ fn emit_new_unlocks(
             source: item.source,
         };
         let _ = app.emit("achievement-unlocked", &payload);
+
+        let slug_source = if payload.display_name.trim().is_empty() {
+            &payload.api_name
+        } else {
+            &payload.display_name
+        };
+        let title_slug = make_achievement_slug(slug_source);
+        crate::publish_shm_frame_direct(duke_core::shm_bus::ShmEventFrame::achievement_unlocked(
+            duke_core::shm_bus::ShmSourceApp::DukeLauncher,
+            std::process::id(),
+            app_id,
+            &title_slug,
+        ));
+        crate::publish_pipe_event(duke_core::pipe_ipc::DukeEvent::AchievementUnlocked {
+            app_id,
+            game_title: game.title.clone(),
+            title_slug: if title_slug.is_empty() {
+                payload.api_name.clone()
+            } else {
+                title_slug
+            },
+            unlocked_at: payload.unlocked_at,
+        });
+        let ach_label = if payload.display_name.trim().is_empty() {
+            &payload.api_name
+        } else {
+            &payload.display_name
+        };
+        crate::time_machine::on_achievement_checkpoint(app, &game.id, ach_label);
     }
 }
 
@@ -700,7 +745,7 @@ fn run_win32_dir_watcher(
             let current = scan_local_achievements(game);
             let unlocked = diff_new_unlocks(baseline, &current);
             if !unlocked.is_empty() {
-                emit_new_unlocks(app, &game.id, &game.title, unlocked);
+                emit_new_unlocks(app, game, unlocked);
             }
         }
         return;
@@ -785,7 +830,7 @@ fn run_win32_dir_watcher(
                 let current = scan_local_achievements(game);
                 let unlocked = diff_new_unlocks(baseline, &current);
                 if !unlocked.is_empty() {
-                    emit_new_unlocks(app, &game.id, &game.title, unlocked);
+                    emit_new_unlocks(app, game, unlocked);
                 }
             }
         }

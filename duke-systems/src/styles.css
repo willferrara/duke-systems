@@ -1404,6 +1404,92 @@ body[data-theme="light"] .subbar {
   }
 }
 
+/* ==========================================================================
+   SUITE AUTONOMY STATUS STRIP (WAVE 1)
+   ========================================================================== */
+.autonomy-strip {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-surface);
+}
+
+.autonomy-strip-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.autonomy-strip-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.autonomy-daemons-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.autonomy-daemon-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-control);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-hairline);
+  min-width: 0;
+}
+
+.autonomy-daemon-pill.is-online {
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.autonomy-daemon-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.autonomy-daemon-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.autonomy-daemon-role {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.autonomy-daemon-meta {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+@media (max-width: 1060px) {
+  .autonomy-daemons-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     transition: none !important;

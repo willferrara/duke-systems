@@ -189,6 +189,17 @@ pub(crate) enum SwarmWireRequest {
         gpu_key: String,
         driver_version: String,
     },
+    ShaderOffer {
+        game_blake3: String,
+        gpu_key: String,
+        driver_version: String,
+        file_count: usize,
+        bundle_zst_bytes: Vec<u8>,
+    },
+    ManifestOffer {
+        manifest_key: String,
+        manifest: DkManifest,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,6 +222,16 @@ pub(crate) enum SwarmWireResponse {
         bundle_zst_bytes: Vec<u8>,
         key: String,
         file_count: usize,
+    },
+    ShaderStored {
+        stored: bool,
+        key: String,
+        bytes: usize,
+    },
+    ManifestStored {
+        stored: bool,
+        manifest_key: String,
+        chunk_count: usize,
     },
     Error {
         message: String,
@@ -703,6 +724,32 @@ async fn handle_tcp_connection(mut stream: TcpStream) -> Result<(), String> {
             gpu_key,
             driver_version,
         } => crate::shader_swarm::serve_shader_pull(&game_blake3, &gpu_key, &driver_version),
+        SwarmWireRequest::ShaderOffer {
+            game_blake3,
+            gpu_key,
+            driver_version,
+            file_count: _,
+            bundle_zst_bytes,
+        } => {
+            let short_hash: String = game_blake3.chars().take(16).collect();
+            let key = format!("{}_{}_{}", short_hash, gpu_key, driver_version);
+            SwarmWireResponse::ShaderStored {
+                stored: !bundle_zst_bytes.is_empty(),
+                key,
+                bytes: bundle_zst_bytes.len(),
+            }
+        }
+        SwarmWireRequest::ManifestOffer {
+            manifest_key,
+            manifest,
+        } => {
+            let chunk_count: usize = manifest.files.iter().map(|f| f.chunks.len()).sum();
+            SwarmWireResponse::ManifestStored {
+                stored: true,
+                manifest_key,
+                chunk_count,
+            }
+        }
     };
 
     write_frame(&mut stream, &response).await
@@ -761,6 +808,58 @@ pub(crate) fn known_peer_addrs_public() -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// Pushes a newly captured compiled shader `.dkshd` bundle to known Swarm peers (including headless Linux nodes).
+pub(crate) async fn push_shader_meta_to_peers(meta: &crate::shader_swarm::ShaderBundleMeta) -> usize {
+    if meta.file_count == 0 {
+        return 0;
+    }
+    let Ok(bundle_zst_bytes) = fs::read(&meta.bundle_path) else {
+        return 0;
+    };
+    let peers = known_peer_addrs_public();
+    if peers.is_empty() {
+        return 0;
+    }
+    let req = SwarmWireRequest::ShaderOffer {
+        game_blake3: meta.game_blake3.clone(),
+        gpu_key: meta.gpu_key.clone(),
+        driver_version: meta.driver_version.clone(),
+        file_count: meta.file_count,
+        bundle_zst_bytes,
+    };
+    let mut acked = 0usize;
+    for (_name, addr) in peers {
+        if let Ok(SwarmWireResponse::ShaderStored { stored: true, .. }) =
+            send_tcp_request(&addr, &req).await
+        {
+            acked += 1;
+        }
+    }
+    acked
+}
+
+/// Pushes a FastCDC `DkManifest` asynchronously to configured/discovered Swarm nodes (e.g. `duke-swarm-node`).
+#[allow(dead_code)]
+pub(crate) async fn push_dkmanifest_to_peers(manifest_key: &str, manifest: DkManifest) -> usize {
+    let peers = known_peer_addrs_public();
+    if peers.is_empty() {
+        return 0;
+    }
+    let req = SwarmWireRequest::ManifestOffer {
+        manifest_key: manifest_key.to_string(),
+        manifest,
+    };
+    let mut acked = 0usize;
+    for (_name, addr) in peers {
+        if let Ok(SwarmWireResponse::ManifestStored { stored: true, .. }) =
+            send_tcp_request(&addr, &req).await
+        {
+            acked += 1;
+        }
+    }
+    acked
 }
 
 async fn send_tcp_request(addr: &str, req: &SwarmWireRequest) -> Result<SwarmWireResponse, String> {

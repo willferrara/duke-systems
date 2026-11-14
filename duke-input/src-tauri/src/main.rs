@@ -77,25 +77,31 @@ fn query_exe_name_by_pid(pid: u32) -> Option<String> {
     None
 }
 
+struct GameLaunchContext<'a> {
+    pid: u32,
+    title: &'a str,
+    exe_name: &'a str,
+    platform_id: Option<u16>,
+    app_id: Option<u32>,
+    exe_hash: Option<u64>,
+}
+
 fn handle_game_launched_auto_switch(
     app: &AppHandle,
     state: &AppState,
-    pid: u32,
-    title: &str,
-    exe_name: &str,
-    platform_id: Option<u16>,
+    ctx: GameLaunchContext<'_>,
 ) {
-    let resolved_exe = if exe_name.trim().to_ascii_lowercase().ends_with(".exe") {
-        exe_name.trim().to_string()
+    let resolved_exe = if ctx.exe_name.trim().to_ascii_lowercase().ends_with(".exe") {
+        ctx.exe_name.trim().to_string()
     } else {
-        query_exe_name_by_pid(pid).unwrap_or_else(|| exe_name.trim().to_string())
+        query_exe_name_by_pid(ctx.pid).unwrap_or_else(|| ctx.exe_name.trim().to_string())
     };
     {
         let mut active_game = state
             .bus_active_game
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        *active_game = Some((pid, title.to_string(), resolved_exe.clone()));
+        *active_game = Some((ctx.pid, ctx.title.to_string(), resolved_exe.clone()));
     }
 
     if state.auto_switch_enabled.load(Ordering::Relaxed) {
@@ -106,24 +112,36 @@ fn handle_game_launched_auto_switch(
             .clone();
         let switched = {
             let mut guard = state.store.write().unwrap_or_else(|e| e.into_inner());
-            select_profile_for_game(&guard, title, &resolved_exe, platform_id, &tel_snap).and_then(
-                |(target_id, target_name)| {
-                    if guard.settings.active_profile_id != target_id {
-                        guard.settings.active_profile_id = target_id.clone();
-                        Some((guard.clone(), target_id, target_name))
-                    } else {
-                        None
-                    }
-                },
+            select_profile_for_game(
+                &guard,
+                ctx.title,
+                &resolved_exe,
+                ctx.platform_id,
+                ctx.app_id,
+                ctx.exe_hash,
+                &tel_snap,
             )
+            .and_then(|(target_id, target_name, curve_mode)| {
+                if guard.settings.active_profile_id != target_id {
+                    guard.settings.active_profile_id = target_id.clone();
+                    Some((guard.clone(), target_id, target_name, curve_mode))
+                } else {
+                    None
+                }
+            })
         };
 
-        if let Some((updated, target_id, target_name)) = switched {
+        if let Some((updated, target_id, target_name, curve_mode)) = switched {
             state.bump_revision();
             let _ = save_store(app, &updated);
             refresh_tray_menu(app, state);
             let _ = app.emit("profile-switched", &target_id);
-            publish_profile_switched(&target_name);
+            publish_profile_switched_ext(
+                &target_name,
+                ctx.app_id.unwrap_or(0),
+                ctx.platform_id.unwrap_or(0),
+                &curve_mode,
+            );
         }
     }
 }
@@ -183,13 +201,36 @@ fn poll_shm_events(app: &AppHandle, state: &AppState, shm_rx: Option<&mut DukeSh
     while let Some(frame) = bus.try_recv() {
         match frame.kind() {
             ShmEventType::GameLaunched => {
-                let tag = frame.tag_str().to_string();
-                let platform_id =
-                    duke_core::shm_bus::unpack_game_launch_platform_id(frame.payload_b);
-                handle_game_launched_auto_switch(app, state, frame.pid, &tag, &tag, platform_id);
+                if let Some(ev) = frame.decode_game_launched() {
+                    handle_game_launched_auto_switch(
+                        app,
+                        state,
+                        GameLaunchContext {
+                            pid: ev.pid,
+                            title: &ev.tag,
+                            exe_name: &ev.tag,
+                            platform_id: if ev.platform_id > 0 {
+                                Some(ev.platform_id)
+                            } else {
+                                None
+                            },
+                            app_id: if ev.app_id > 0 { Some(ev.app_id) } else { None },
+                            exe_hash: if ev.exe_hash != 0 {
+                                Some(ev.exe_hash)
+                            } else {
+                                None
+                            },
+                        },
+                    );
+                }
             }
             ShmEventType::GameExited => {
                 handle_game_exited_auto_revert(app, state, frame.pid);
+            }
+            ShmEventType::CoOpInputP2 => {
+                if let Some(pad) = frame.decode_coop_input_p2() {
+                    let _ = injector::inject_virtual_p2_xinput(pad);
+                }
             }
             ShmEventType::RamPurge => {
                 trim_process_working_set();
@@ -199,13 +240,34 @@ fn poll_shm_events(app: &AppHandle, state: &AppState, shm_rx: Option<&mut DukeSh
     }
 }
 
-fn publish_profile_switched(profile_name: &str) {
+fn publish_profile_switched_ext(
+    profile_name: &str,
+    app_id: u32,
+    platform_id: u16,
+    curve_mode: &str,
+) {
     if let Some(bus) = DUKE_BUS.get() {
-        bus.publish(DukeEvent::ProfileSwitched {
+        bus.publish(DukeEvent::ProfileSwitch {
             app: "duke-input".to_string(),
             profile_name: profile_name.to_string(),
+            app_id,
+            platform_id,
+            curve_mode: curve_mode.to_string(),
         });
     }
+    if let Some(Some(shm)) = DUKE_SHM_BUS.get() {
+        shm.publish_frame(duke_core::shm_bus::ShmEventFrame::profile_switch(
+            ShmSourceApp::DukeInput,
+            std::process::id(),
+            app_id,
+            platform_id,
+            profile_name,
+        ));
+    }
+}
+
+fn publish_profile_switched(profile_name: &str) {
+    publish_profile_switched_ext(profile_name, 0, 0, "Linear");
 }
 
 // ============================================================================
@@ -232,24 +294,73 @@ fn update_power_policy(state: &AppState) {
     }
 }
 
+fn curve_mode_label(profile: &InputProfile) -> String {
+    format!("{:?}", profile.right_stick.curve_mode)
+}
+
 fn select_profile_for_game(
     store: &ProfileStore,
     title: &str,
     exe_name: &str,
     platform_id: Option<u16>,
+    app_id: Option<u32>,
+    exe_hash: Option<u64>,
     tel: &LiveTelemetrySnapshot,
-) -> Option<(String, String)> {
+) -> Option<(String, String, String)> {
+    if let Some(aid) = app_id.filter(|&id| id > 0) {
+        if let Some(matched) = store
+            .profiles
+            .iter()
+            .find(|p| p.linked_app_ids.contains(&aid))
+        {
+            return Some((
+                matched.id.clone(),
+                matched.name.clone(),
+                curve_mode_label(matched),
+            ));
+        }
+    }
+
+    if let Some(hash) = exe_hash.filter(|&h| h != 0) {
+        if let Some(matched) = store
+            .profiles
+            .iter()
+            .find(|p| p.linked_exe_hashes.contains(&hash))
+        {
+            return Some((
+                matched.id.clone(),
+                matched.name.clone(),
+                curve_mode_label(matched),
+            ));
+        }
+    }
+
     if !exe_name.trim().is_empty() {
         if let Some(matched) = store
             .profiles
             .iter()
             .find(|p| p.linked_exes.iter().any(|rule| exe_matches_rule(exe_name, rule)))
         {
-            return Some((matched.id.clone(), matched.name.clone()));
+            return Some((
+                matched.id.clone(),
+                matched.name.clone(),
+                curve_mode_label(matched),
+            ));
         }
     }
 
-    if let Some(pid) = platform_id {
+    if let Some(pid) = platform_id.filter(|&p| p > 0) {
+        if let Some(matched) = store
+            .profiles
+            .iter()
+            .find(|p| p.linked_platform_ids.contains(&pid))
+        {
+            return Some((
+                matched.id.clone(),
+                matched.name.clone(),
+                curve_mode_label(matched),
+            ));
+        }
         if let Some(sys_label) = duke_core::shm_bus::console_label_for_platform_id(pid) {
             let sys_lower = sys_label.to_ascii_lowercase();
             // 1. User-created or explicitly named profile targeting this console (by name or linked rule)
@@ -260,23 +371,35 @@ fn select_profile_for_game(
                         .iter()
                         .any(|r| r.to_ascii_lowercase().contains(&sys_lower))
             }) {
-                return Some((console_prof.id.clone(), console_prof.name.clone()));
+                return Some((
+                    console_prof.id.clone(),
+                    console_prof.name.clone(),
+                    curve_mode_label(console_prof),
+                ));
             }
-            // 2. Motion/Gyro consoles (Wii, Wii U, Switch, 3DS, PS3) prefer Gyro profile when present
+            // 2. Motion/Gyro consoles (Wii, Wii U, Switch, 3DS, PS3) prefer 5-point Bézier/Gyro profile
             if duke_core::shm_bus::console_has_motion_gyro(pid) {
                 if let Some(gyro_prof) = store
                     .profiles
                     .iter()
-                    .find(|p| p.id == "fps_gyro" || p.name.to_ascii_lowercase().contains("gyro"))
+                    .find(|p| {
+                        p.id == "console_gyro_bezier5"
+                            || p.id == "fps_gyro"
+                            || p.name.to_ascii_lowercase().contains("gyro")
+                    })
                 {
-                    return Some((gyro_prof.id.clone(), gyro_prof.name.clone()));
+                    return Some((
+                        gyro_prof.id.clone(),
+                        gyro_prof.name.clone(),
+                        curve_mode_label(gyro_prof),
+                    ));
                 }
             }
-            // 3. Classic/Standard consoles prefer generic controller / emulator / retro profile
+            // 3. Classic/Standard consoles prefer 5-point Bézier or generic controller profile
             if let Some(pad_prof) = store
                 .profiles
                 .iter()
-                .find(|p| p.id == "comp_pad")
+                .find(|p| p.id == "console_gyro_bezier5" || p.id == "comp_pad")
                 .or_else(|| {
                     store.profiles.iter().find(|p| {
                         let lower = p.name.to_ascii_lowercase();
@@ -287,7 +410,11 @@ fn select_profile_for_game(
                     })
                 })
             {
-                return Some((pad_prof.id.clone(), pad_prof.name.clone()));
+                return Some((
+                    pad_prof.id.clone(),
+                    pad_prof.name.clone(),
+                    curve_mode_label(pad_prof),
+                ));
             }
         }
     }
@@ -318,7 +445,7 @@ fn select_profile_for_game(
                     .find(|p| !p.is_default && p.name.to_ascii_lowercase().contains("fpv"))
             })
         {
-            return Some((fpv.id.clone(), fpv.name.clone()));
+            return Some((fpv.id.clone(), fpv.name.clone(), curve_mode_label(fpv)));
         }
     }
 
@@ -338,7 +465,11 @@ fn select_profile_for_game(
                         || p.id.to_ascii_lowercase().contains("pad"))
             })
         }) {
-            return Some((pad_prof.id.clone(), pad_prof.name.clone()));
+            return Some((
+                pad_prof.id.clone(),
+                pad_prof.name.clone(),
+                curve_mode_label(pad_prof),
+            ));
         }
     }
 
@@ -347,7 +478,7 @@ fn select_profile_for_game(
         .iter()
         .find(|p| p.id == "fps_gyro")
         .or_else(|| store.profiles.iter().find(|p| !p.is_default))
-        .map(|p| (p.id.clone(), p.name.clone()))
+        .map(|p| (p.id.clone(), p.name.clone(), curve_mode_label(p)))
 }
 
 // ============================================================================
@@ -1487,13 +1618,50 @@ fn main() {
             let bus_state = state.clone();
             let _ = DUKE_BUS.get_or_init(|| {
                 DukeBus::start("duke-input", move |event| match event {
+                    DukeEvent::GameLaunched {
+                        title,
+                        exe_name,
+                        pid,
+                        app_id,
+                        platform_id,
+                        exe_hash,
+                    } => {
+                        handle_game_launched_auto_switch(
+                            &bus_app,
+                            &bus_state,
+                            GameLaunchContext {
+                                pid,
+                                title: &title,
+                                exe_name: &exe_name,
+                                platform_id: if platform_id > 0 {
+                                    Some(platform_id)
+                                } else {
+                                    None
+                                },
+                                app_id: if app_id > 0 { Some(app_id) } else { None },
+                                exe_hash: if exe_hash != 0 { Some(exe_hash) } else { None },
+                            },
+                        );
+                    }
+                    DukeEvent::GameExited { pid, .. } => {
+                        handle_game_exited_auto_revert(&bus_app, &bus_state, pid);
+                    }
                     DukeEvent::GameStarted {
                         title,
                         exe_name,
                         pid,
                     } => {
                         handle_game_launched_auto_switch(
-                            &bus_app, &bus_state, pid, &title, &exe_name, None,
+                            &bus_app,
+                            &bus_state,
+                            GameLaunchContext {
+                                pid,
+                                title: &title,
+                                exe_name: &exe_name,
+                                platform_id: None,
+                                app_id: None,
+                                exe_hash: None,
+                            },
                         );
                     }
                     DukeEvent::GameStopped { pid, .. } => {
@@ -1589,4 +1757,20 @@ fn main() {
             _ => {}
         }
     });
+}
+
+#[cfg(test)]
+mod wave1_tests {
+    use super::*;
+
+    #[test]
+    fn selects_bezier5_console_and_linked_app_profiles() {
+        let store = ProfileStore::default();
+        let tel = LiveTelemetrySnapshot::default();
+        let selected =
+            select_profile_for_game(&store, "Zelda BotW", "", Some(7), Some(999), None, &tel)
+                .expect("Switch game should match 5-point Bezier console profile");
+        assert_eq!(selected.0, "console_gyro_bezier5");
+        assert_eq!(selected.2, "Bezier5Point");
+    }
 }

@@ -1,0 +1,25 @@
+[Unit]
+Description=Duke Swarm Always-On Headless Sync & BLAKE3 CAS Node
+Documentation=https://github.com/duke-systems/duke-systems
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=duke-swarm-node
+WorkingDirectory=/var/lib/duke-swarm-node
+ExecStart=/usr/local/bin/duke-swarm-node --bind 0.0.0.0:47881 --storage-dir /var/lib/duke-swarm-node
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65536
+MemoryHigh=128M
+MemoryMax=256M
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/duke-swarm-node
+
+[Install]
+WantedBy=multi-user.target

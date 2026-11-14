@@ -25,6 +25,35 @@ pub enum DukeEvent {
         exe_name: String,
         pid: u32,
     },
+    GameLaunched {
+        title: String,
+        exe_name: String,
+        pid: u32,
+        app_id: u32,
+        platform_id: u16,
+        exe_hash: u64,
+    },
+    GameExited {
+        title: String,
+        exe_name: String,
+        pid: u32,
+        app_id: u32,
+        platform_id: u16,
+        exe_hash: u64,
+    },
+    AchievementUnlocked {
+        app_id: u32,
+        game_title: String,
+        title_slug: String,
+        unlocked_at: u64,
+    },
+    ProfileSwitch {
+        app: String,
+        profile_name: String,
+        app_id: u32,
+        platform_id: u16,
+        curve_mode: String,
+    },
     ProfileSwitched {
         app: String,
         profile_name: String,
@@ -571,5 +600,70 @@ mod tests {
 
         bus_b.stop();
         bus_c.stop();
+    }
+
+    #[tokio::test]
+    async fn pipe_ipc_wave1_structured_events_roundtrip() {
+        let pipe = format!(
+            r"\\.\pipe\duke-suite-wave1-test-{}",
+            std::process::id()
+        );
+        let rx = Arc::new(Mutex::new(Vec::<DukeEvent>::new()));
+        let rx_cb = rx.clone();
+
+        let hub = DukeBus::start_on_pipe("duke-launcher", &pipe, |_| {});
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let client = DukeBus::start_on_pipe("duke-capture", &pipe, move |ev| {
+            rx_cb.lock().unwrap().push(ev);
+        });
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        hub.publish(DukeEvent::GameLaunched {
+            title: "Hades II".to_string(),
+            exe_name: "Hades2.exe".to_string(),
+            pid: 9001,
+            app_id: 1145350,
+            platform_id: 7,
+            exe_hash: 0xDEAD_BEEF_CAFE_0001,
+        });
+        hub.publish(DukeEvent::AchievementUnlocked {
+            app_id: 1145350,
+            game_title: "Hades II".to_string(),
+            title_slug: "ACH_NIGHT_CHAMPION".to_string(),
+            unlocked_at: 1_760_000_000,
+        });
+        hub.publish(DukeEvent::ProfileSwitch {
+            app: "duke-input".to_string(),
+            profile_name: "Switch-Gyro-Bezier5".to_string(),
+            app_id: 1145350,
+            platform_id: 7,
+            curve_mode: "Bezier5Point".to_string(),
+        });
+        hub.publish(DukeEvent::GameExited {
+            title: "Hades II".to_string(),
+            exe_name: "Hades2.exe".to_string(),
+            pid: 9001,
+            app_id: 1145350,
+            platform_id: 7,
+            exe_hash: 0xDEAD_BEEF_CAFE_0001,
+        });
+
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let events = rx.lock().unwrap().clone();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, DukeEvent::GameLaunched { app_id: 1145350, .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, DukeEvent::AchievementUnlocked { app_id: 1145350, .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, DukeEvent::ProfileSwitch { platform_id: 7, .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, DukeEvent::GameExited { app_id: 1145350, .. })));
+
+        client.stop();
+        hub.stop();
     }
 }

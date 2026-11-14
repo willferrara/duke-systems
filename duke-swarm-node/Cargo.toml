@@ -1,0 +1,33 @@
+[package]
+name = "duke-swarm-node"
+version = "0.6.0"
+description = "Duke Swarm Node - Headless Linux / Raspberry Pi 5 Sync & BLAKE3 CAS Relay Daemon"
+authors = ["Duke Systems Contributors"]
+license = "MIT"
+repository = "https://github.com/duke-systems/duke-systems"
+edition = "2021"
+rust-version = "1.77.2"
+
+[[bin]]
+name = "duke-swarm-node"
+path = "src/main.rs"
+
+[dependencies]
+blake3 = "1"
+fastcdc = "3.2"
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "io-util", "net", "signal", "sync", "time"] }
+walkdir = "2.5"
+zstd = "0.13"
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

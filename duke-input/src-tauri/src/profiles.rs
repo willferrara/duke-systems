@@ -68,6 +68,12 @@ pub struct InputProfile {
     pub description: String,
     pub is_default: bool,
     pub linked_exes: Vec<String>,
+    #[serde(default)]
+    pub linked_app_ids: Vec<u32>,
+    #[serde(default)]
+    pub linked_platform_ids: Vec<u16>,
+    #[serde(default)]
+    pub linked_exe_hashes: Vec<u64>,
     pub left_stick: StickCurveConfig,
     pub right_stick: StickCurveConfig,
     pub left_trigger: TriggerConfig,
@@ -204,6 +210,9 @@ pub fn build_default_profiles() -> Vec<InputProfile> {
             .to_string(),
         is_default: true,
         linked_exes: Vec::new(),
+        linked_app_ids: Vec::new(),
+        linked_platform_ids: Vec::new(),
+        linked_exe_hashes: Vec::new(),
         left_stick: StickCurveConfig::default(),
         right_stick: StickCurveConfig::default(),
         left_trigger: TriggerConfig::default(),
@@ -252,6 +261,9 @@ pub fn build_default_profiles() -> Vec<InputProfile> {
             "r5apex.exe".to_string(),
             "cod.exe".to_string(),
         ],
+        linked_app_ids: Vec::new(),
+        linked_platform_ids: Vec::new(),
+        linked_exe_hashes: Vec::new(),
         left_stick: StickCurveConfig {
             inner_deadzone: 0.04,
             outer_deadzone: 0.96,
@@ -330,6 +342,9 @@ pub fn build_default_profiles() -> Vec<InputProfile> {
             "velocidrone.exe".to_string(),
             "trypp.exe".to_string(),
         ],
+        linked_app_ids: Vec::new(),
+        linked_platform_ids: Vec::new(),
+        linked_exe_hashes: Vec::new(),
         left_stick: StickCurveConfig::default(),
         right_stick: StickCurveConfig::default(),
         left_trigger: TriggerConfig::default(),
@@ -394,6 +409,9 @@ pub fn build_default_profiles() -> Vec<InputProfile> {
             "halo.exe".to_string(),
             "fortniteclient-win64-shipping.exe".to_string(),
         ],
+        linked_app_ids: Vec::new(),
+        linked_platform_ids: Vec::new(),
+        linked_exe_hashes: Vec::new(),
         left_stick: StickCurveConfig {
             inner_deadzone: 0.04,
             outer_deadzone: 0.95,
@@ -430,6 +448,72 @@ pub fn build_default_profiles() -> Vec<InputProfile> {
             ..GyroConfig::default()
         },
         remappings: Vec::new(),
+        macros: default_macros.clone(),
+    };
+
+    let console_gyro_bezier_profile = InputProfile {
+        id: "console_gyro_bezier5".to_string(),
+        name: "Console 5-Point Bézier + Motion Gyro".to_string(),
+        description:
+            "Precision 5-point Bézier thumbstick curve with adaptive LT motion gyro for console emulation & gamepad titles."
+                .to_string(),
+        is_default: false,
+        linked_exes: vec![
+            "dolphin.exe".to_string(),
+            "cemu.exe".to_string(),
+            "ryujinx.exe".to_string(),
+            "rpcs3.exe".to_string(),
+            "pcsx2-qt.exe".to_string(),
+        ],
+        linked_app_ids: Vec::new(),
+        linked_platform_ids: vec![4, 5, 6, 7, 12, 14, 15, 16, 17, 20, 21],
+        linked_exe_hashes: Vec::new(),
+        left_stick: StickCurveConfig {
+            inner_deadzone: 0.05,
+            outer_deadzone: 0.96,
+            anti_deadzone: 0.04,
+            shape: DeadzoneShape::Radial,
+            curve_mode: CurveMode::Bezier5Point,
+            custom_points: [
+                [0.0, 0.0],
+                [0.25, 0.14],
+                [0.50, 0.42],
+                [0.75, 0.76],
+                [1.0, 1.0],
+            ],
+            ..StickCurveConfig::default()
+        },
+        right_stick: StickCurveConfig {
+            inner_deadzone: 0.04,
+            outer_deadzone: 0.98,
+            anti_deadzone: 0.05,
+            shape: DeadzoneShape::Radial,
+            curve_mode: CurveMode::Bezier5Point,
+            custom_points: [
+                [0.0, 0.0],
+                [0.25, 0.12],
+                [0.50, 0.38],
+                [0.75, 0.74],
+                [1.0, 1.0],
+            ],
+            ..StickCurveConfig::default()
+        },
+        left_trigger: TriggerConfig::default(),
+        right_trigger: TriggerConfig::default(),
+        rumble_left_scale: 1.0,
+        rumble_right_scale: 1.0,
+        mouse: MouseConfig::default(),
+        fpv: FpvConfig::default(),
+        gyro: GyroConfig {
+            activation_mode: GyroActivationMode::HoldLt,
+            sensitivity: 4.8,
+            vertical_ratio: 0.78,
+            noise_floor_dps: 1.4,
+            smoothing: 0.22,
+            invert_x: false,
+            invert_y: false,
+        },
+        remappings: Vec::new(),
         macros: default_macros,
     };
 
@@ -438,6 +522,7 @@ pub fn build_default_profiles() -> Vec<InputProfile> {
         fps_gyro_profile,
         fpv_profile,
         comp_pad_profile,
+        console_gyro_bezier_profile,
     ]
 }
 

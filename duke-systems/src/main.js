@@ -60,6 +60,45 @@ function svgIcon(name) {
   return `<svg class="icon" aria-hidden="true"><use href="#${name}"/></svg>`;
 }
 
+function renderAutonomyStrip(daemons) {
+  const row = $("autonomyDaemonsRow");
+  const summary = $("autonomyLinkState");
+  const list = Array.isArray(daemons) ? daemons : [];
+  const coreDaemons = list.filter((d) => ["monitor", "capture", "input"].includes(d.id));
+  const connectedCore = coreDaemons.filter((d) => d.connected).length;
+  if (summary) {
+    summary.textContent = `${connectedCore} / ${coreDaemons.length || 3} Daemons Connected`;
+    summary.className = `pill mono-num ${connectedCore === (coreDaemons.length || 3) ? "online" : ""}`;
+  }
+  if (!row) return;
+  const iconMap = {
+    monitor: "icon-cpu",
+    capture: "icon-video",
+    input: "icon-sliders",
+    launcher: "icon-layers"
+  };
+  row.innerHTML = list
+    .map((d) => {
+      const iconName = iconMap[d.id] || "icon-activity";
+      const cls = d.connected ? "is-online" : "";
+      const meta = d.connected
+        ? `${d.statusText || "Linked"} · ${Number(d.ramMb || 0).toFixed(1)} MB`
+        : d.statusText || "Standby";
+      return `
+        <div class="autonomy-daemon-pill ${cls}" data-daemon-id="${escapeHtml(d.id)}">
+          <span class="status-dot ${d.connected ? "online" : "offline"}"></span>
+          ${svgIcon(iconName)}
+          <div class="autonomy-daemon-info">
+            <span class="autonomy-daemon-name">${escapeHtml(d.name)}</span>
+            <span class="autonomy-daemon-role">${escapeHtml(d.role)}</span>
+          </div>
+          <span class="autonomy-daemon-meta mono-num">${escapeHtml(meta)}</span>
+        </div>
+      `;
+    })
+    .join("");
+}
+
 function renderAppCards(apps) {
   const grid = $("suiteAppsGrid");
   if (!grid) return;
@@ -275,6 +314,7 @@ function renderSnapshot(snap) {
     $("busShmApps").textContent = shmApps.length > 0 ? shmApps.join(", ") : "None";
   }
 
+  renderAutonomyStrip(snap.autonomyDaemons);
   renderAppCards(snap.apps);
   renderActivityFeed(snap.activityFeed);
   renderSettingsControls(snap);
