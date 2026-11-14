@@ -8,8 +8,15 @@ mod catalog_mmap;
 mod deep_shrink;
 mod delta_patch;
 mod direct_storage;
+mod duke_acoustics;
+mod duke_ai_rt;
+mod duke_comms;
+mod duke_configurator;
+mod duke_director;
+mod duke_doctor;
 mod duke_link;
 mod duke_upscale;
+mod duke_vision;
 mod emulators;
 mod etw_xray;
 mod friends;
@@ -13357,13 +13364,15 @@ fn spawn_overlay_trigger_watcher(app: AppHandle) {
         .name("duke-overlay-trigger".to_string())
         .spawn(move || {
             use windows::Win32::UI::Input::KeyboardAndMouse::{
-                RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_NOREPEAT,
+                RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL,
+                MOD_NOREPEAT, MOD_SHIFT,
             };
             use windows::Win32::UI::WindowsAndMessaging::{
                 PeekMessageW, MSG, PM_REMOVE, WM_HOTKEY,
             };
 
             const HOTKEY_ID: i32 = 0x444B;
+            const HOTKEY_VISION_ID: i32 = 0x444C;
             let registered = unsafe {
                 RegisterHotKey(
                     None,
@@ -13373,29 +13382,62 @@ fn spawn_overlay_trigger_watcher(app: AppHandle) {
                 )
                 .is_ok()
             };
+            let vision_registered = unsafe {
+                RegisterHotKey(
+                    None,
+                    HOTKEY_VISION_ID,
+                    HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_SHIFT.0 | MOD_NOREPEAT.0),
+                    0x54, // 'T' -> Ctrl+Shift+T triggers Duke Vision + Overlay
+                )
+                .is_ok()
+            };
 
             let mut guide_was_down = false;
+            let mut vision_chord_was_down = false;
             loop {
                 let mut should_toggle = false;
+                let mut should_vision = false;
 
-                if registered {
+                if registered || vision_registered {
                     let mut msg = MSG::default();
                     unsafe {
                         while PeekMessageW(&mut msg, None, WM_HOTKEY, WM_HOTKEY, PM_REMOVE).as_bool() {
-                            if msg.message == WM_HOTKEY && msg.wParam.0 as i32 == HOTKEY_ID {
-                                should_toggle = true;
+                            if msg.message == WM_HOTKEY {
+                                let id = msg.wParam.0 as i32;
+                                if id == HOTKEY_ID {
+                                    should_toggle = true;
+                                } else if id == HOTKEY_VISION_ID {
+                                    should_vision = true;
+                                }
                             }
                         }
                     }
                 }
 
                 let pad = duke_core::win32_ffi::poll_xinput_state();
-                if pad.connected && pad.guide && !guide_was_down {
+                let vision_chord_down = pad.connected && pad.guide && pad.y;
+                if vision_chord_down && !vision_chord_was_down {
+                    should_vision = true;
+                } else if pad.connected && pad.guide && !pad.y && !guide_was_down {
                     should_toggle = true;
                 }
                 guide_was_down = pad.connected && pad.guide;
+                vision_chord_was_down = vision_chord_down;
 
-                if should_toggle {
+                if should_vision {
+                    let app_vis = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = toggle_overlay_window(app_vis.clone(), None).await;
+                        let _ = duke_vision::trigger_duke_vision_capture(
+                            app_vis,
+                            None,
+                            Some("auto".to_string()),
+                            Some("en".to_string()),
+                            Some("both".to_string()),
+                        )
+                        .await;
+                    });
+                } else if should_toggle {
                     let app_toggle = app.clone();
                     tauri::async_runtime::spawn(async move {
                         let _ = toggle_overlay_window(app_toggle, None).await;
@@ -13408,6 +13450,12 @@ fn spawn_overlay_trigger_watcher(app: AppHandle) {
             if registered {
                 unsafe {
                     let _ = UnregisterHotKey(None, HOTKEY_ID);
+                }
+            }
+            #[allow(unreachable_code)]
+            if vision_registered {
+                unsafe {
+                    let _ = UnregisterHotKey(None, HOTKEY_VISION_ID);
                 }
             }
         })
@@ -13934,9 +13982,10 @@ fn main() {
             spawn_overlay_trigger_watcher(app.handle().clone());
 
             // Start leader-elected Duke Suite IPC bus
+            let bus_app = app.handle().clone();
             let _ = DUKE_BUS.get_or_init(|| {
-                DukeBus::start("duke-launcher", move |event| {
-                    if let DukeEvent::RamPurgeRequested { .. } = event {
+                DukeBus::start("duke-launcher", move |event| match event {
+                    DukeEvent::RamPurgeRequested { .. } => {
                         duke_core::win32_ffi::trim_current_working_set();
                         publish_shm_event(
                             ShmEventType::RamPurge,
@@ -13945,6 +13994,38 @@ fn main() {
                             0,
                         );
                     }
+                    DukeEvent::CaptureSignalTelemetry {
+                        system_peak_pct,
+                        motion_score,
+                        transient_spike,
+                        ..
+                    } => {
+                        duke_director::on_capture_telemetry_pulse(
+                            &bus_app,
+                            system_peak_pct,
+                            motion_score,
+                            transient_spike,
+                        );
+                    }
+                    DukeEvent::AchievementUnlocked {
+                        game_title,
+                        title_slug,
+                        ..
+                    } => {
+                        duke_director::on_achievement_unlocked_pulse(
+                            &bus_app,
+                            &game_title,
+                            &title_slug,
+                        );
+                    }
+                    DukeEvent::ClipSaved {
+                        game_title,
+                        file_path,
+                        duration_secs,
+                    } => {
+                        duke_director::on_clip_saved_pulse(&game_title, &file_path, duration_secs);
+                    }
+                    _ => {}
                 })
             });
 
@@ -13959,6 +14040,7 @@ fn main() {
                 loop {
                     interval.tick().await;
                     tick_count = tick_count.saturating_add(1);
+                    let _ = duke_ai_rt::unload_idle_workers_internal(false);
                     let ram_mode = RAM_TRIM_MODE.load(Ordering::Relaxed);
                     let any_downloading = {
                         let guard = get_queue_store().lock().unwrap_or_else(|p| p.into_inner());
@@ -14206,7 +14288,29 @@ fn main() {
             etw_xray::clear_game_xray_scorecards,
             deep_shrink::scan_game_deep_shrink,
             deep_shrink::apply_game_deep_shrink,
-            deep_shrink::deduplicate_library_blake3
+            deep_shrink::deduplicate_library_blake3,
+            duke_ai_rt::get_ai_runtime_status,
+            duke_ai_rt::update_ai_runtime_config,
+            duke_ai_rt::unload_ai_workers,
+            duke_vision::trigger_duke_vision_capture,
+            duke_vision::analyze_vision_text_query,
+            duke_vision::get_latest_vision_state,
+            duke_comms::get_duke_comms_state,
+            duke_comms::toggle_duke_comms_listening,
+            duke_comms::process_voice_phrase_command,
+            duke_comms::upsert_voice_macro_rule,
+            duke_doctor::diagnose_game_crash,
+            duke_doctor::doctor_revert_game_snapshot,
+            duke_director::get_duke_director_state,
+            duke_director::toggle_duke_director,
+            duke_director::trigger_director_highlight_now,
+            duke_configurator::analyze_game_config_preset,
+            duke_configurator::apply_game_config_preset,
+            duke_configurator::rollback_game_config_preset,
+            duke_acoustics::get_acoustics_state,
+            duke_acoustics::set_wasapi_session_volume,
+            duke_acoustics::save_game_eq_and_denoise,
+            duke_acoustics::test_mic_rnnoise_latency
         ])
         .build(tauri::generate_context!())
     {

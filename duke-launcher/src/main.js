@@ -184,7 +184,34 @@ import {
   clearGameXrayScorecards,
   scanGameDeepShrink,
   applyGameDeepShrink,
-  deduplicateLibraryBlake3
+  deduplicateLibraryBlake3,
+  getAiRuntimeStatus,
+  updateAiRuntimeConfig,
+  unloadAiWorkers,
+  triggerDukeVisionCapture,
+  analyzeVisionTextQuery,
+  getLatestVisionState,
+  listenDukeVisionResult,
+  getDukeCommsState,
+  toggleDukeCommsListening,
+  processVoicePhraseCommand,
+  upsertVoiceMacroRule,
+  listenDukeCommsVad,
+  listenDukeCommsAction,
+  listenDukeCommsSubtitle,
+  diagnoseGameCrash,
+  doctorRevertGameSnapshot,
+  getDukeDirectorState,
+  toggleDukeDirector,
+  triggerDirectorHighlightNow,
+  listenDukeDirectorHighlight,
+  analyzeGameConfigPreset,
+  applyGameConfigPreset,
+  rollbackGameConfigPreset,
+  getAcousticsState,
+  setWasapiSessionVolume,
+  saveGameEqAndDenoise,
+  testMicRnnoiseLatency
 } from "./api.js";
 
 const BOOKMARKLET_HREF =
@@ -716,6 +743,7 @@ function switchTab(tab, keepDetail = false) {
     if (tab === "settings") {
       loadEmulatorSettingsSection();
       refreshFrontierDiagnostics().catch(() => {});
+      refreshWave3AiDiagnostics().catch(() => {});
     }
   }
 }
@@ -2412,6 +2440,179 @@ async function refreshWave2Diagnostics() {
   }
 }
 
+function renderDoctorDiagnosisReport(rep) {
+  const statusPill = el("detail-doctor-status");
+  const reportEl = el("detail-doctor-report");
+  const revertBtn = el("btn-detail-doctor-revert");
+  if (!rep) {
+    if (statusPill) {
+      statusPill.className = "pill mono-num";
+      statusPill.textContent = "Ready";
+    }
+    if (revertBtn) revertBtn.classList.add("hidden");
+    return;
+  }
+  state.detailDoctorReport = rep;
+  if (statusPill) {
+    const tone = rep.severity === "critical" ? "danger" : rep.severity === "warning" ? "gold" : "emerald";
+    statusPill.className = `pill ${tone} mono-num`;
+    statusPill.textContent = String(rep.severity || "healthy").toUpperCase();
+  }
+  if (revertBtn) {
+    if (rep.canRevertSnapshot && rep.latestSnapshot?.snapshotId) {
+      revertBtn.classList.remove("hidden");
+      revertBtn.dataset.snapshotId = rep.latestSnapshot.snapshotId;
+    } else {
+      revertBtn.classList.add("hidden");
+      delete revertBtn.dataset.snapshotId;
+    }
+  }
+  if (!reportEl) return;
+  const conflicts = Array.isArray(rep.modConflicts) ? rep.modConflicts : [];
+  const actions = Array.isArray(rep.recommendedActions) ? rep.recommendedActions : [];
+  const latestArt = Array.isArray(rep.artifacts) && rep.artifacts.length > 0 ? rep.artifacts[0] : null;
+  reportEl.innerHTML = `
+    <div class="wave3-kv"><strong>Summary:</strong> ${escapeHtml(rep.summary || "No critical faults.")}</div>
+    <div class="wave3-kv"><strong>Root Cause:</strong> ${escapeHtml(rep.rootCause || "Healthy")}</div>
+    <div class="wave3-kv mono-num"><strong>Adapter:</strong> ${escapeHtml(rep.gpuAdapter || "DXGI")} · ${escapeHtml(rep.gpuDriver || "Auto")} · ${escapeHtml(rep.aiBackend || "NPU Heuristic")}</div>
+    ${rep.faultingModule || rep.offendingMod || rep.exceptionCode ? `<div class="wave3-kv mono-num"><strong>Fault:</strong> ${escapeHtml(rep.exceptionCode || "N/A")} · Mod: ${escapeHtml(rep.offendingMod || "N/A")} · DLL: ${escapeHtml(rep.faultingModule || "N/A")}</div>` : ""}
+    ${conflicts.length > 0 ? `<div class="wave3-kv"><strong>Mod Conflicts:</strong> ${escapeHtml(conflicts.slice(0, 2).join(" | "))}</div>` : ""}
+    ${latestArt?.excerpt ? `<div class="wave3-excerpt mono-num">${escapeHtml(latestArt.excerpt.slice(0, 220))}</div>` : ""}
+    ${actions.length > 0 ? `<div class="wave3-kv"><strong>Fix:</strong> ${escapeHtml(actions[0])}</div>` : ""}
+  `;
+}
+
+function renderConfiguratorPlanReport(plan) {
+  const hwBadge = el("detail-cfg-hw-badge");
+  const preview = el("detail-cfg-preview");
+  const rollbackBtn = el("btn-detail-cfg-rollback");
+  if (!plan) return;
+  state.detailConfigPlan = plan;
+  const hw = plan.hardware || {};
+  if (hwBadge) {
+    hwBadge.textContent = `${hw.adapterName || "DXGI"} · ${hw.vramMb || 0} MB · ${hw.displayHz || 60} Hz`;
+  }
+  if (rollbackBtn) {
+    rollbackBtn.disabled = !plan.hasBackup;
+    rollbackBtn.dataset.backupId = plan.latestBackupId || "";
+  }
+  if (!preview) return;
+  const targets = Array.isArray(plan.targets) ? plan.targets : [];
+  const totalPatches = targets.reduce((acc, t) => acc + (Array.isArray(t.patches) ? t.patches.length : 0), 0);
+  if (targets.length === 0) {
+    preview.innerHTML = `<div class="panel-sub">Tier: <strong>${escapeHtml(plan.tierLabel || "Balanced")}</strong> (${Number(plan.targetHz || 120)} Hz). Launch once to generate Engine.ini / prefs.ini files.</div>`;
+    return;
+  }
+  preview.innerHTML = `
+    <div class="wave3-kv"><strong>Preset:</strong> ${escapeHtml(plan.tierLabel || "Balanced")} (${Number(plan.targetHz || 120)} Hz) · ${targets.length} config(s) · ${totalPatches} patches</div>
+    ${targets
+      .slice(0, 2)
+      .map(
+        (t) => `<div class="wave3-excerpt mono-num">${escapeHtml(t.filePath)} -> ${(t.patches || [])
+          .slice(0, 3)
+          .map((p) => `${p.key}=${p.value}`)
+          .join(", ")}</div>`
+      )
+      .join("")}
+  `;
+}
+
+function renderDirectorStateReport(rep) {
+  if (!rep) return;
+  const pill = el("detail-director-score-pill");
+  const chk = el("chk-detail-director-enabled");
+  const sens = el("range-detail-director-sens");
+  const sensVal = el("detail-director-sens-val");
+  const host = el("detail-director-clips");
+  if (pill) {
+    const score = Number(rep.fusedIntensityScore || 0);
+    pill.className = `pill ${score >= 70 ? "emerald" : "gold"} mono-num`;
+    pill.textContent = `Intensity ${score}%`;
+  }
+  if (chk) chk.checked = Boolean(rep.autoDirectorEnabled);
+  if (sens && rep.sensitivityThreshold != null) {
+    sens.value = String(rep.sensitivityThreshold);
+  }
+  if (sensVal && rep.sensitivityThreshold != null) {
+    sensVal.textContent = `${Number(rep.sensitivityThreshold)}%`;
+  }
+  if (!host) return;
+  const clips = Array.isArray(rep.highlights) ? rep.highlights : [];
+  if (clips.length === 0) {
+    host.innerHTML = `<div class="panel-sub">No auto-tagged highlights recorded yet. Play or click Trim &amp; Save Highlight.</div>`;
+    return;
+  }
+  host.innerHTML = clips
+    .slice(0, 4)
+    .map(
+      (c) => `
+      <div class="wave2-history-item">
+        <div>
+          <strong>${escapeHtml(c.bossOrAchievement || c.gameTitle || "Highlight")}</strong>
+          <div class="panel-sub mono-num">${Number(c.durationSecs || 22).toFixed(1)}s · trimmed ${Number(c.deadFramesTrimmedSecs || 0).toFixed(1)}s menu · ${escapeHtml((c.tags || []).slice(0, 3).join(", "))}</div>
+        </div>
+        <span class="pill ${c.intensity >= 75 ? "emerald" : "gold"} mono-num">${Number(c.intensity || 0)}%</span>
+      </div>`
+    )
+    .join("");
+}
+
+async function refreshWave3AiDiagnostics() {
+  try {
+    const st = await getAiRuntimeStatus().catch(() => null);
+    if (!st) return;
+    state.wave3AiStatus = st;
+    const cfg = st.config || {};
+    const probe = st.probe || {};
+    if (el("wave3-ai-provider-pill")) {
+      el("wave3-ai-provider-pill").textContent = `EP: ${st.activeExecutionProvider || "CPU Fallback"}`;
+      el("wave3-ai-provider-pill").className = `pill ${st.zeroVramMode ? "emerald" : "gold"} mono-num`;
+    }
+    if (el("wave3-ai-vram-pill")) {
+      el("wave3-ai-vram-pill").textContent = `AI VRAM: ${Number(st.vramAllocatedMb || 0).toFixed(1)} MB`;
+    }
+    if (el("wave3-ai-ram-pill")) {
+      el("wave3-ai-ram-pill").textContent = `Process RAM: ${Number(st.processWorkingSetMb || 0).toFixed(1)} MB (Workers ${Number(st.workerRamMb || 0).toFixed(1)} MB)`;
+    }
+    if (el("wave3-ocr-badge")) {
+      const ocrStr = probe.oneocrAvailable ? "OneOCR (<15ms)" : probe.winrtOcrAvailable ? "WinRT Media.Ocr" : "Heuristic OCR";
+      el("wave3-ocr-badge").textContent = `OCR: ${ocrStr}`;
+    }
+    if (el("detail-ai-runtime-pill")) {
+      el("detail-ai-runtime-pill").textContent = `${st.activeExecutionProvider || "NPU"} · ${Number(st.vramAllocatedMb || 0).toFixed(1)} MB VRAM`;
+    }
+    setSelectValueSafe(el("select-wave3-provider"), cfg.preferredProvider || "auto");
+    setSelectValueSafe(el("select-wave3-target-lang"), cfg.targetLanguage || "en");
+    if (el("input-wave3-foundry-endpoint")) el("input-wave3-foundry-endpoint").value = cfg.foundryEndpoint || "http://127.0.0.1:5272/v1";
+    if (el("input-wave3-foundry-model")) el("input-wave3-foundry-model").value = cfg.foundryModel || "phi-3.5-mini-instruct-npu";
+    if (el("input-wave3-idle-ttl")) el("input-wave3-idle-ttl").value = String(cfg.idleTtlSecs || 45);
+    if (el("chk-wave3-auto-unload")) el("chk-wave3-auto-unload").checked = cfg.autoUnloadEnabled !== false;
+  } catch {
+    // Non-critical telemetry probe.
+  }
+}
+
+async function loadDetailAiSuite(game, requestId) {
+  if (!game) return;
+  state.detailDoctorReport = null;
+  renderDoctorDiagnosisReport(null);
+  if (el("detail-doctor-report")) {
+    el("detail-doctor-report").innerHTML = `<div class="panel-sub">Click Diagnose Crashes to parse Crash.log, BepInEx, CrashContext XML, .dmp files, and mod conflicts.</div>`;
+  }
+  const hz = Number(el("select-detail-cfg-hz")?.value || 120) || 120;
+  const [plan, dir, aiSt] = await Promise.all([
+    analyzeGameConfigPreset(game.id, hz).catch(() => null),
+    getDukeDirectorState(game.id).catch(() => null),
+    getAiRuntimeStatus().catch(() => null)
+  ]);
+  if (requestId !== state.activeDetailRequestId) return;
+  if (plan) renderConfiguratorPlanReport(plan);
+  if (dir) renderDirectorStateReport(dir);
+  if (aiSt && el("detail-ai-runtime-pill")) {
+    el("detail-ai-runtime-pill").textContent = `${aiSt.activeExecutionProvider || "NPU"} · ${Number(aiSt.vramAllocatedMb || 0).toFixed(1)} MB VRAM`;
+  }
+}
+
 function loadAllDetailPanels(game, requestId) {
   if (!game) return;
   if (el("detail-ach-path")) el("detail-ach-path").value = game.achievementsPath || "";
@@ -2425,6 +2626,7 @@ function loadAllDetailPanels(game, requestId) {
   loadDetailXrayScorecards(game, requestId);
   loadDetailDisplayTuning(game, requestId);
   loadDetailStorageV2(game, requestId);
+  loadDetailAiSuite(game, requestId);
 }
 
 function renderSelectedTimeMachineCheckpoint() {
@@ -3296,6 +3498,317 @@ async function initOverlayHudMode() {
     }
   });
 
+  const EQ_PRESET_BANDS = {
+    "Neutral Flat": [0, 0, 0, 0, 0],
+    "FPS Footsteps": [-2.0, -1.0, 1.5, 5.5, 4.5],
+    Cinema: [4.5, 2.5, -1.0, 1.5, 3.0],
+    "Voice Clarity": [-4.0, -2.0, 3.5, 4.5, 1.5]
+  };
+
+  const renderOverlayVisionResult = (res) => {
+    if (!res) return;
+    if (el("overlay-vision-meta")) {
+      el("overlay-vision-meta").textContent = `${res.ocrEngine || "OCR"} (${Number(res.ocrMs || 0).toFixed(1)} ms) · ${res.executionProvider || "NPU"} · ${Number(res.vramAllocatedMb || 0).toFixed(1)} MB VRAM`;
+    }
+    if (el("overlay-vision-output")) {
+      el("overlay-vision-output").textContent = res.translatedText || res.extractedText || "No screen text recognized.";
+    }
+    if (el("overlay-vision-quest")) {
+      el("overlay-vision-quest").textContent = res.questHint ? `Quest Copilot: ${res.questHint}` : "";
+    }
+  };
+
+  const renderOverlayCommsState = (comms) => {
+    if (!comms) return;
+    const toggleBtn = el("btn-overlay-comms-toggle");
+    if (toggleBtn) {
+      const span = toggleBtn.querySelector("span");
+      if (span) span.textContent = comms.listening ? "Stop Voice Tap" : "Enable Voice Tap";
+      toggleBtn.classList.toggle("btn-secondary", Boolean(comms.listening));
+      toggleBtn.classList.toggle("btn-primary", !comms.listening);
+    }
+    if (el("overlay-comms-vad-pill")) {
+      el("overlay-comms-vad-pill").textContent = comms.listening
+        ? comms.vadActive
+          ? `VAD Speech (${Math.round(Number(comms.vadSpeechProb || 0) * 100)}%)`
+          : `Tap Live (${comms.captureTapConnected ? "WASAPI" : "Standby"})`
+        : "VAD Idle";
+      el("overlay-comms-vad-pill").className = `pill ${comms.vadActive ? "emerald" : ""} mono-num`;
+    }
+    const subHost = el("overlay-comms-subtitles");
+    if (subHost) {
+      const subs = Array.isArray(comms.subtitles) ? comms.subtitles : [];
+      subHost.innerHTML =
+        subs.length > 0
+          ? subs
+              .slice(-5)
+              .reverse()
+              .map(
+                (s) => `
+              <div class="overlay-subtitle-item">
+                <span class="mono-num">[${escapeHtml(s.speaker || "Squad")} · ${Number(s.latencyMs || 0)} ms]</span>
+                <strong>${escapeHtml(s.translatedText || s.originalText || "")}</strong>
+              </div>`
+              )
+              .join("")
+          : `<div class="panel-sub">Waiting for WASAPI loopback squad audio...</div>`;
+    }
+  };
+
+  const renderOverlayAcousticsState = (ac) => {
+    if (!ac) return;
+    const sessHost = el("overlay-acoustics-sessions");
+    if (sessHost) {
+      const sessions = Array.isArray(ac.sessions) ? ac.sessions : [];
+      sessHost.innerHTML =
+        sessions.length > 0
+          ? sessions
+              .slice(0, 6)
+              .map(
+                (s) => `
+              <div class="overlay-session-row">
+                <div class="overlay-session-meta">
+                  <strong>${escapeHtml(s.displayName || s.processName || `PID ${s.pid}`)}</strong>
+                  <span class="mono-num">PID ${Number(s.pid)}${s.isActiveGame ? " · Game" : ""}</span>
+                </div>
+                <input type="range" min="0" max="100" step="1" value="${Number(s.volumePct ?? 100)}" data-session-vol-pid="${Number(s.pid)}" />
+                <button type="button" class="btn btn-secondary btn-xs" data-session-mute-pid="${Number(s.pid)}" data-session-muted="${s.muted ? "1" : "0"}">${s.muted ? "Unmute" : "Mute"}</button>
+              </div>`
+              )
+              .join("")
+          : `<div class="panel-sub">No active WASAPI audio sessions detected.</div>`;
+    }
+    const prof = ac.profile;
+    if (prof) {
+      setSelectValueSafe(el("select-overlay-eq-preset"), prof.presetName || "Neutral Flat");
+      const bands = Array.isArray(prof.bandsDb) ? prof.bandsDb : [0, 0, 0, 0, 0];
+      document.querySelectorAll("#overlay-eq-sliders .overlay-eq-band").forEach((inp) => {
+        const idx = Number(inp.dataset.band || 0);
+        const v = Number(bands[idx] || 0);
+        inp.value = String(v);
+        const valEl = inp.parentElement?.querySelector("strong");
+        if (valEl) valEl.textContent = `${v >= 0 ? "+" : ""}${v.toFixed(1)} dB`;
+      });
+      if (el("chk-overlay-denoise-enabled")) {
+        el("chk-overlay-denoise-enabled").checked = Boolean(prof.micDenoiseEnabled);
+      }
+      if (el("range-overlay-denoise-strength") && prof.micDenoiseStrength != null) {
+        el("range-overlay-denoise-strength").value = String(prof.micDenoiseStrength);
+      }
+    }
+    if (ac.denoiser && el("overlay-acoustics-latency-badge")) {
+      el("overlay-acoustics-latency-badge").textContent = `${Number(ac.denoiser.processingMs || 0).toFixed(2)} ms · ${ac.denoiser.executionProvider || "CPU"}`;
+    }
+  };
+
+  const switchOverlayTab = (tabName) => {
+    document.querySelectorAll(".overlay-tab-btn").forEach((btn) => {
+      btn.classList.toggle("is-active", btn.dataset.overlayTab === tabName);
+    });
+    ["quick", "vision", "comms", "acoustics"].forEach((name) => {
+      el(`overlay-tab-${name}`)?.classList.toggle("hidden", name !== tabName);
+    });
+    if (tabName === "vision") {
+      getLatestVisionState().then(renderOverlayVisionResult).catch(() => {});
+    } else if (tabName === "comms") {
+      getDukeCommsState().then(renderOverlayCommsState).catch(() => {});
+    } else if (tabName === "acoustics") {
+      getAcousticsState(activeOverlayGameId).then(renderOverlayAcousticsState).catch(() => {});
+    }
+  };
+
+  document.querySelectorAll(".overlay-tab-btn[data-overlay-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => switchOverlayTab(btn.dataset.overlayTab));
+  });
+
+  el("btn-overlay-vision-scan")?.addEventListener("click", async () => {
+    const btn = el("btn-overlay-vision-scan");
+    if (btn) btn.disabled = true;
+    setStatus("Capturing game frame + running NPU OCR...");
+    try {
+      const res = await triggerDukeVisionCapture({
+        gameTitle: el("overlay-active-game")?.textContent || null,
+        targetLang: el("select-overlay-vision-lang")?.value || "en",
+        mode: el("select-overlay-vision-mode")?.value || "both"
+      });
+      renderOverlayVisionResult(res);
+      setStatus(`Vision ready in ${Number(res?.totalMs || 0).toFixed(1)} ms (${res?.executionProvider || "NPU"}).`);
+    } catch (err) {
+      setStatus(String(err));
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  const runOverlayVisionQuery = async () => {
+    const text = (el("input-overlay-vision-query")?.value || "").trim();
+    if (!text) return;
+    setStatus("Analyzing via Zero-VRAM NPU copilot...");
+    try {
+      const res = await analyzeVisionTextQuery({
+        text,
+        gameTitle: el("overlay-active-game")?.textContent || null,
+        targetLang: el("select-overlay-vision-lang")?.value || "en",
+        mode: el("select-overlay-vision-mode")?.value || "both"
+      });
+      renderOverlayVisionResult(res);
+      setStatus(`Translated via ${res?.aiBackend || "NPU"}`);
+    } catch (err) {
+      setStatus(String(err));
+    }
+  };
+  el("btn-overlay-vision-ask")?.addEventListener("click", runOverlayVisionQuery);
+  el("input-overlay-vision-query")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") runOverlayVisionQuery();
+  });
+
+  el("btn-overlay-director-clip")?.addEventListener("click", async () => {
+    const btn = el("btn-overlay-director-clip");
+    if (btn) btn.disabled = true;
+    setStatus("Trimming dead menu frames & saving 22s highlight...");
+    try {
+      const res = await triggerDirectorHighlightNow({
+        gameId: activeOverlayGameId,
+        gameTitle: el("overlay-active-game")?.textContent || null,
+        targetDurationSecs: 22
+      });
+      setStatus(res?.message || "Director highlight clip queued.");
+    } catch (err) {
+      setStatus(String(err));
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  el("btn-overlay-comms-toggle")?.addEventListener("click", async () => {
+    try {
+      const cur = await getDukeCommsState().catch(() => null);
+      const next = await toggleDukeCommsListening({
+        enabled: !cur?.listening,
+        targetLanguage: el("select-overlay-comms-lang")?.value || "en",
+        voiceMacrosEnabled: true,
+        teammateSubtitlesEnabled: true
+      });
+      renderOverlayCommsState(next);
+      setStatus(next?.listening ? "Voice-to-HID + Teammate Subtitles active." : "Voice tap stopped.");
+    } catch (err) {
+      setStatus(String(err));
+    }
+  });
+
+  const dispatchOverlayCommsPhrase = async (phrase, isTeammateAudio = false) => {
+    if (!phrase || !phrase.trim()) return;
+    try {
+      const out = await processVoicePhraseCommand({ phrase: phrase.trim(), isTeammateAudio });
+      if (out?.matchedMacro && el("overlay-comms-action-log")) {
+        el("overlay-comms-action-log").textContent = `${out.matchedMacro.phrase} -> ${out.matchedMacro.targetSummary}`;
+      }
+      if (out?.status) renderOverlayCommsState(out.status);
+      setStatus(out?.matchedMacro ? `Macro triggered: ${out.matchedMacro.actionKind}` : "Phrase processed.");
+    } catch (err) {
+      setStatus(String(err));
+    }
+  };
+  document.querySelectorAll(".overlay-macro-quick[data-phrase]").forEach((btn) => {
+    btn.addEventListener("click", () => dispatchOverlayCommsPhrase(btn.dataset.phrase, false));
+  });
+  el("btn-overlay-comms-run")?.addEventListener("click", () => {
+    const val = el("input-overlay-comms-phrase")?.value || "";
+    dispatchOverlayCommsPhrase(val, false);
+  });
+
+  el("btn-overlay-acoustics-refresh")?.addEventListener("click", async () => {
+    try {
+      const ac = await getAcousticsState(activeOverlayGameId);
+      renderOverlayAcousticsState(ac);
+      setStatus("WASAPI per-process audio sessions refreshed.");
+    } catch (err) {
+      setStatus(String(err));
+    }
+  });
+
+  el("overlay-acoustics-sessions")?.addEventListener("change", async (e) => {
+    const slider = e.target.closest("input[data-session-vol-pid]");
+    if (!slider) return;
+    const pid = Number(slider.dataset.sessionVolPid || 0);
+    const muteBtn = el("overlay-acoustics-sessions")?.querySelector(`button[data-session-mute-pid="${pid}"]`);
+    const muted = muteBtn?.dataset.sessionMuted === "1";
+    try {
+      const updated = await setWasapiSessionVolume(pid, Number(slider.value || 100), muted);
+      renderOverlayAcousticsState({ sessions: updated });
+      setStatus(`PID ${pid} volume set to ${slider.value}%`);
+    } catch (err) {
+      setStatus(String(err));
+    }
+  });
+
+  el("overlay-acoustics-sessions")?.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-session-mute-pid]");
+    if (!btn) return;
+    const pid = Number(btn.dataset.sessionMutePid || 0);
+    const nextMuted = btn.dataset.sessionMuted !== "1";
+    const slider = el("overlay-acoustics-sessions")?.querySelector(`input[data-session-vol-pid="${pid}"]`);
+    const pct = Number(slider?.value ?? 100);
+    try {
+      const updated = await setWasapiSessionVolume(pid, pct, nextMuted);
+      renderOverlayAcousticsState({ sessions: updated });
+      setStatus(`PID ${pid} ${nextMuted ? "muted" : "unmuted"}.`);
+    } catch (err) {
+      setStatus(String(err));
+    }
+  });
+
+  el("select-overlay-eq-preset")?.addEventListener("change", () => {
+    const bands = EQ_PRESET_BANDS[el("select-overlay-eq-preset")?.value] || EQ_PRESET_BANDS["Neutral Flat"];
+    document.querySelectorAll("#overlay-eq-sliders .overlay-eq-band").forEach((inp) => {
+      const idx = Number(inp.dataset.band || 0);
+      const v = Number(bands[idx] || 0);
+      inp.value = String(v);
+      const valEl = inp.parentElement?.querySelector("strong");
+      if (valEl) valEl.textContent = `${v >= 0 ? "+" : ""}${v.toFixed(1)} dB`;
+    });
+  });
+
+  el("overlay-eq-sliders")?.addEventListener("input", (e) => {
+    const inp = e.target.closest(".overlay-eq-band");
+    if (!inp) return;
+    const v = Number(inp.value || 0);
+    const valEl = inp.parentElement?.querySelector("strong");
+    if (valEl) valEl.textContent = `${v >= 0 ? "+" : ""}${v.toFixed(1)} dB`;
+  });
+
+  el("btn-overlay-acoustics-save")?.addEventListener("click", async () => {
+    const bandsDb = [0, 1, 2, 3, 4].map((idx) => {
+      const inp = el("overlay-eq-sliders")?.querySelector(`.overlay-eq-band[data-band="${idx}"]`);
+      return Number(inp?.value || 0);
+    });
+    try {
+      await saveGameEqAndDenoise({
+        gameId: activeOverlayGameId,
+        presetName: el("select-overlay-eq-preset")?.value || "Neutral Flat",
+        bandsDb,
+        micDenoiseEnabled: Boolean(el("chk-overlay-denoise-enabled")?.checked),
+        micDenoiseStrength: Number(el("range-overlay-denoise-strength")?.value || 0.75)
+      });
+      setStatus("Saved per-game 5-band EQ & RNNoise profile.");
+    } catch (err) {
+      setStatus(String(err));
+    }
+  });
+
+  el("btn-overlay-denoise-bench")?.addEventListener("click", async () => {
+    try {
+      const strength = Number(el("range-overlay-denoise-strength")?.value || 0.75);
+      const tel = await testMicRnnoiseLatency(strength);
+      if (el("overlay-acoustics-latency-badge")) {
+        el("overlay-acoustics-latency-badge").textContent = `${Number(tel?.processingMs || 0).toFixed(2)} ms · -${Number(tel?.noiseReductionDb || 0).toFixed(1)} dB`;
+      }
+      setStatus(`RNNoise 10ms frame bench: ${Number(tel?.processingMs || 0).toFixed(2)} ms`);
+    } catch (err) {
+      setStatus(String(err));
+    }
+  });
+
   try {
     await listenEvent("overlay-opened", (payload) => {
       if (payload?.visible) {
@@ -3307,6 +3820,23 @@ async function initOverlayHudMode() {
     await listenEvent("game-suspend-state", () => refreshOverlayState());
     await listenEvent("quick-resume-updated", (summary) => {
       if (summary) renderOverlayQuickResume(summary);
+    });
+    await listenDukeVisionResult((res) => {
+      switchOverlayTab("vision");
+      renderOverlayVisionResult(res);
+    });
+    await listenDukeCommsVad((vad) => {
+      if (el("overlay-comms-vad-pill") && vad) {
+        el("overlay-comms-vad-pill").textContent = vad.speech ? `VAD Speech (${Math.round(Number(vad.prob || 0) * 100)}%)` : "Tap Live";
+      }
+    });
+    await listenDukeCommsAction((evt) => {
+      if (evt && el("overlay-comms-action-log")) {
+        el("overlay-comms-action-log").textContent = `${evt.phrase || evt.actionKind} -> ${evt.targetSummary || "Dispatched"}`;
+      }
+    });
+    await listenDukeCommsSubtitle(() => {
+      getDukeCommsState().then(renderOverlayCommsState).catch(() => {});
     });
 
     await refreshOverlayState();
@@ -8771,6 +9301,179 @@ function wireEvents() {
       if (btn) btn.disabled = false;
     }
   });
+
+  // -------------------------------------------------------------------------
+  // Wave 3 (v0.8.0): Detail View AI Suite (Doctor, Configurator, Director)
+  // -------------------------------------------------------------------------
+  el("btn-detail-doctor-diagnose")?.addEventListener("click", async () => {
+    const game = getSelectedGame();
+    if (!game) return;
+    const btn = el("btn-detail-doctor-diagnose");
+    if (btn) btn.disabled = true;
+    showToast("Scanning crash dumps, Unreal/Unity logs & mod load order...", "info", 2800);
+    try {
+      const rep = await diagnoseGameCrash(game.id, null);
+      renderDoctorDiagnosisReport(rep);
+      showToast(rep?.summary || "Crash diagnosis complete.", rep?.severity === "critical" ? "error" : "success", 3600);
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  el("btn-detail-doctor-revert")?.addEventListener("click", async () => {
+    const game = getSelectedGame();
+    const btn = el("btn-detail-doctor-revert");
+    const snapshotId = btn?.dataset.snapshotId;
+    if (!game || !snapshotId) return;
+    btn.disabled = true;
+    try {
+      const rep = await doctorRevertGameSnapshot(game.id, snapshotId);
+      showToast(
+        `Reverted .duke-cas snapshot (${rep?.restoredFiles || 0} files restored).`,
+        "success",
+        3800
+      );
+      await loadAllDetailPanels(game, state.activeDetailRequestId);
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  el("btn-detail-cfg-analyze")?.addEventListener("click", async () => {
+    const game = getSelectedGame();
+    if (!game) return;
+    const hz = Number(el("select-detail-cfg-hz")?.value || 120) || 120;
+    try {
+      const plan = await analyzeGameConfigPreset(game.id, hz);
+      renderConfiguratorPlanReport(plan);
+      showToast(`Synthesized ${plan?.tierLabel || "Balanced"} (${hz} Hz) config preset.`, "info", 2600);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-detail-cfg-apply")?.addEventListener("click", async () => {
+    const game = getSelectedGame();
+    if (!game) return;
+    const btn = el("btn-detail-cfg-apply");
+    const hz = Number(el("select-detail-cfg-hz")?.value || 120) || 120;
+    if (btn) btn.disabled = true;
+    try {
+      const res = await applyGameConfigPreset(game.id, hz);
+      showToast(res?.message || `Applied ${res?.patchesApplied || 0} INI/XML optimizations.`, "success", 3800);
+      const plan = await analyzeGameConfigPreset(game.id, hz).catch(() => null);
+      if (plan) renderConfiguratorPlanReport(plan);
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  el("btn-detail-cfg-rollback")?.addEventListener("click", async () => {
+    const game = getSelectedGame();
+    const btn = el("btn-detail-cfg-rollback");
+    if (!game) return;
+    if (btn) btn.disabled = true;
+    try {
+      const msg = await rollbackGameConfigPreset(game.id, btn?.dataset.backupId || null);
+      showToast(msg || "Original config restored cleanly.", "success", 3400);
+      const hz = Number(el("select-detail-cfg-hz")?.value || 120) || 120;
+      const plan = await analyzeGameConfigPreset(game.id, hz).catch(() => null);
+      if (plan) renderConfiguratorPlanReport(plan);
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  const syncDetailDirectorSettings = async () => {
+    const enabled = Boolean(el("chk-detail-director-enabled")?.checked);
+    const sensitivity = Number(el("range-detail-director-sens")?.value || 65) || 65;
+    if (el("detail-director-sens-val")) el("detail-director-sens-val").textContent = `${sensitivity}%`;
+    try {
+      const rep = await toggleDukeDirector(enabled, sensitivity);
+      renderDirectorStateReport(rep);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  };
+  el("chk-detail-director-enabled")?.addEventListener("change", syncDetailDirectorSettings);
+  el("range-detail-director-sens")?.addEventListener("change", syncDetailDirectorSettings);
+  el("range-detail-director-sens")?.addEventListener("input", () => {
+    if (el("detail-director-sens-val")) {
+      el("detail-director-sens-val").textContent = `${el("range-detail-director-sens")?.value || 65}%`;
+    }
+  });
+
+  el("btn-detail-director-clip")?.addEventListener("click", async () => {
+    const game = getSelectedGame();
+    const btn = el("btn-detail-director-clip");
+    if (!game) return;
+    if (btn) btn.disabled = true;
+    try {
+      const res = await triggerDirectorHighlightNow({
+        gameId: game.id,
+        gameTitle: game.title,
+        targetDurationSecs: 22
+      });
+      showToast(res?.message || "Highlight clip saved.", "success", 3400);
+      const rep = await getDukeDirectorState(game.id).catch(() => null);
+      if (rep) renderDirectorStateReport(rep);
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Wave 3 (v0.8.0): Settings Zero-VRAM NPU & Windows ML AI Engine
+  // -------------------------------------------------------------------------
+  el("btn-wave3-refresh-ai")?.addEventListener("click", async () => {
+    await refreshWave3AiDiagnostics();
+    showToast("Probed NPU / WinML / OneOCR & Foundry Local capabilities.", "info", 2400);
+  });
+
+  el("btn-wave3-unload-workers")?.addEventListener("click", async () => {
+    const btn = el("btn-wave3-unload-workers");
+    if (btn) btn.disabled = true;
+    try {
+      await unloadAiWorkers();
+      await refreshWave3AiDiagnostics();
+      showToast("Unloaded idle AI workers & trimmed working set.", "success", 2800);
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  el("btn-wave3-save-config")?.addEventListener("click", async () => {
+    const btn = el("btn-wave3-save-config");
+    if (btn) btn.disabled = true;
+    try {
+      await updateAiRuntimeConfig({
+        preferredProvider: el("select-wave3-provider")?.value || "auto",
+        autoUnloadEnabled: Boolean(el("chk-wave3-auto-unload")?.checked),
+        idleTtlSecs: Number(el("input-wave3-idle-ttl")?.value || 45) || 45,
+        foundryEndpoint: (el("input-wave3-foundry-endpoint")?.value || "").trim(),
+        foundryModel: (el("input-wave3-foundry-model")?.value || "").trim(),
+        targetLanguage: el("select-wave3-target-lang")?.value || "en"
+      });
+      await refreshWave3AiDiagnostics();
+      showToast("Zero-VRAM NPU AI policy updated.", "success", 2800);
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
 }
 
 function startGamepadControllerLoop() {
@@ -9483,6 +10186,21 @@ async function init() {
   refreshQuickResumeSlots().catch(() => {});
   refreshSteamCmAndInvites().catch(() => {});
   refreshFrontierDiagnostics().catch(() => {});
+  refreshWave3AiDiagnostics().catch(() => {});
+  listenDukeDirectorHighlight((res) => {
+    if (res?.entry) {
+      showToast(
+        `Duke Director clipped ${res.entry.gameTitle}: ${res.entry.bossOrAchievement} (${Number(res.entry.durationSecs || 22).toFixed(0)}s)`,
+        "info",
+        3800
+      );
+    }
+  }).catch(() => {});
+  listenDukeCommsAction((evt) => {
+    if (evt?.phrase) {
+      showToast(`Voice Macro: ${evt.phrase} -> ${evt.actionKind}`, "info", 2400);
+    }
+  }).catch(() => {});
   try {
     await Promise.resolve(loadEmulatorSettingsSection());
   } catch (err) {

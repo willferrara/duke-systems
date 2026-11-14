@@ -61,6 +61,13 @@
     <symbol id="icon-terminal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></symbol>
     <symbol id="icon-gauge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></symbol>
     <symbol id="icon-monitor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></symbol>
+    <symbol id="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="icon-stethoscope" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 2v2"/><path d="M5 2v2"/><path d="M5 3H4a2 2 0 0 0-2 2v4a6 6 0 0 0 12 0V5a2 2 0 0 0-2-2h-1"/><path d="M8 15a6 6 0 0 0 12 0v-3"/><circle cx="20" cy="10" r="2"/></symbol>
+    <symbol id="icon-wand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72"/><path d="m14 7 3 3"/><path d="M5 6v4"/><path d="M19 14v4"/><path d="M10 2v2"/><path d="M7 8H3"/><path d="M21 16h-4"/><path d="M11 3H9"/></symbol>
+    <symbol id="icon-film" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 3v18"/><path d="M3 7.5h4"/><path d="M3 12h18"/><path d="M3 16.5h4"/><path d="M17 3v18"/><path d="M17 7.5h4"/><path d="M17 16.5h4"/></symbol>
+    <symbol id="icon-volume-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></symbol>
+    <symbol id="icon-subtitles" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="14" x="3" y="5" rx="2"/><path d="M7 15h4M15 15h2M7 11h2M13 11h4"/></symbol>
+    <symbol id="icon-cpu-ai" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 12h6"/><path d="M12 9v6"/><path d="M9 2v3"/><path d="M15 2v3"/><path d="M9 19v3"/><path d="M15 19v3"/><path d="M2 9h3"/><path d="M2 15h3"/><path d="M19 9h3"/><path d="M19 15h3"/></symbol>
   </svg>
 
   <div class="window-shell">
@@ -72,7 +79,7 @@
         </button>
         <img src="assets/dukeflaglogo.png" alt="Duke Launcher" class="titlebar-emblem" />
         <span class="titlebar-title">Duke Launcher</span>
-        <span class="titlebar-version mono-num" id="app-version-pill">v0.7.0</span>
+        <span class="titlebar-version mono-num" id="app-version-pill">v0.8.0</span>
       </div>
 
       <div class="titlebar-center">
@@ -1026,6 +1033,113 @@
                         <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
                         <span>Strip Selected + CAS</span>
                       </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="panel-card detail-card-span2" id="detail-ai-suite-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>Zero-VRAM AI Suite (Doctor, Auto-Configurator &amp; Highlight Director)</h3>
+                    <p class="panel-sub">Crash root-cause &amp; mod-conflict healer with .duke-cas rollback, hardware-tuned INI/XML preset synthesizer, and multi-signal highlight director.</p>
+                  </div>
+                  <div class="detail-save-actions">
+                    <span class="pill emerald mono-num" id="detail-ai-runtime-pill">NPU / CPU Ready · 0 MB VRAM</span>
+                  </div>
+                </div>
+
+                <div class="wave2-three-col">
+                  <!-- Duke Doctor -->
+                  <div class="wave2-subpanel" id="detail-doctor-panel">
+                    <div class="wave3-subhead">
+                      <h4>
+                        <svg class="icon" aria-hidden="true"><use href="#icon-stethoscope"/></svg>
+                        <span>Duke Doctor (Crash &amp; Mod Healer)</span>
+                      </h4>
+                      <span class="pill mono-num" id="detail-doctor-status">Ready</span>
+                    </div>
+                    <p class="panel-sub">Scans Crash.log, Player.log, BepInEx, CrashContext.runtime-xml &amp; Windows .dmp headers alongside mod collisions.</p>
+                    <div class="wave3-inline-controls">
+                      <button type="button" class="btn btn-primary btn-xs" id="btn-detail-doctor-diagnose">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-stethoscope"/></svg>
+                        <span>Diagnose Crashes</span>
+                      </button>
+                      <button type="button" class="btn btn-secondary btn-xs hidden" id="btn-detail-doctor-revert">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-rotate-ccw"/></svg>
+                        <span>1-Click Revert (.duke-cas)</span>
+                      </button>
+                    </div>
+                    <div id="detail-doctor-report" class="wave3-readout">
+                      <div class="panel-sub">Run diagnostics to inspect crash dumps, faulting DLLs, and mod conflicts.</div>
+                    </div>
+                  </div>
+
+                  <!-- Duke Configurator -->
+                  <div class="wave2-subpanel" id="detail-configurator-panel">
+                    <div class="wave3-subhead">
+                      <h4>
+                        <svg class="icon" aria-hidden="true"><use href="#icon-wand"/></svg>
+                        <span>Duke Configurator (Hardware INI Tuner)</span>
+                      </h4>
+                      <span class="pill mono-num" id="detail-cfg-hw-badge">Detecting GPU...</span>
+                    </div>
+                    <div class="wave2-form-grid">
+                      <label>
+                        <span>Target Refresh Preset</span>
+                        <select id="select-detail-cfg-hz">
+                          <option value="60">60 Hz (Visual Fidelity)</option>
+                          <option value="120" selected>120 Hz (High Frame Rate)</option>
+                          <option value="165">165+ Hz (Competitive E-Sports)</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div class="wave3-inline-controls">
+                      <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-cfg-analyze">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg>
+                        <span>Synthesize Preset</span>
+                      </button>
+                      <button type="button" class="btn btn-primary btn-xs" id="btn-detail-cfg-apply">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-wand"/></svg>
+                        <span>Apply + .duke-cas</span>
+                      </button>
+                      <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-cfg-rollback">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-rotate-ccw"/></svg>
+                        <span>Rollback INI</span>
+                      </button>
+                    </div>
+                    <div id="detail-cfg-preview" class="wave3-readout">
+                      <div class="panel-sub">Detects Engine.ini, prefs.ini, Dolphin.ini, and Cemu settings for 1-click tuning.</div>
+                    </div>
+                  </div>
+
+                  <!-- Duke Director -->
+                  <div class="wave2-subpanel" id="detail-director-panel">
+                    <div class="wave3-subhead">
+                      <h4>
+                        <svg class="icon" aria-hidden="true"><use href="#icon-film"/></svg>
+                        <span>Duke Director (Auto Highlight Clips)</span>
+                      </h4>
+                      <span class="pill gold mono-num" id="detail-director-score-pill">Intensity 0%</span>
+                    </div>
+                    <div class="wave2-inline-checks">
+                      <label class="wave2-check-chip">
+                        <input type="checkbox" id="chk-detail-director-enabled" checked />
+                        <span>Auto-Fuse Achievements + ETW + Audio Peaks</span>
+                      </label>
+                    </div>
+                    <label class="wave2-sharpness-chip">
+                      <span>Trigger Sensitivity <strong class="mono-num" id="detail-director-sens-val">65%</strong></span>
+                      <input type="range" id="range-detail-director-sens" min="25" max="95" step="5" value="65" />
+                    </label>
+                    <div class="wave3-inline-controls">
+                      <button type="button" class="btn btn-primary btn-xs" id="btn-detail-director-clip">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-film"/></svg>
+                        <span>Trim &amp; Save Highlight (22s)</span>
+                      </button>
+                    </div>
+                    <div id="detail-director-clips" class="wave2-history-list">
+                      <div class="panel-sub">No auto-tagged highlights recorded yet.</div>
                     </div>
                   </div>
                 </div>
@@ -2347,6 +2461,79 @@
                 </div>
               </div>
 
+              <!-- Wave 3 (v0.8.0) Zero-VRAM NPU & Windows ML On-Device AI Suite -->
+              <div class="panel-card" id="settings-wave3-ai-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>Zero-VRAM NPU &amp; Windows ML AI Engine</h3>
+                    <p class="panel-sub">Routes OCR, Vision quest copilot, Voice-to-HID, Crash Doctor, and Highlight Director onto NPU Execution Providers (QNN / VitisAI / OpenVINO / WinML) with lazy idle unloading (&lt;25 MB RAM) and 0% gaming VRAM usage.</p>
+                  </div>
+                  <div class="settings-btn-group">
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-wave3-refresh-ai">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-cpu-ai"/></svg>
+                      <span>Probe NPU / WinML</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-wave3-unload-workers">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-zap"/></svg>
+                      <span>Unload AI Workers</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="wave3-status-strip">
+                  <span class="pill emerald mono-num" id="wave3-ai-provider-pill">EP: Auto (NPU -> DirectML -> CPU)</span>
+                  <span class="pill emerald mono-num" id="wave3-ai-vram-pill">AI VRAM: 0.0 MB</span>
+                  <span class="pill mono-num" id="wave3-ai-ram-pill">Process RAM: -- MB</span>
+                  <span class="pill mono-num" id="wave3-ocr-badge">OCR: Probing...</span>
+                </div>
+                <div class="wave2-form-grid">
+                  <label>
+                    <span>Execution Provider Priority</span>
+                    <select id="select-wave3-provider">
+                      <option value="auto" selected>Auto (NPU QNN/VitisAI/OpenVINO -> DirectML -> CPU)</option>
+                      <option value="npu">Force Zero-VRAM NPU / WinML</option>
+                      <option value="directml">DirectML (Shared GPU Compute)</option>
+                      <option value="cpu">CPU AVX2 Only (0% GPU / 0% VRAM)</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Default Translation Target Language</span>
+                    <select id="select-wave3-target-lang">
+                      <option value="en" selected>English (en)</option>
+                      <option value="es">Spanish (es)</option>
+                      <option value="fr">French (fr)</option>
+                      <option value="de">German (de)</option>
+                      <option value="ja">Japanese (ja)</option>
+                      <option value="ko">Korean (ko)</option>
+                      <option value="zh">Chinese (zh)</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Foundry Local / OpenAI-Compatible Endpoint</span>
+                    <input type="text" id="input-wave3-foundry-endpoint" value="http://127.0.0.1:5272/v1" placeholder="http://127.0.0.1:5272/v1" />
+                  </label>
+                  <label>
+                    <span>Local NPU Model / Alias</span>
+                    <input type="text" id="input-wave3-foundry-model" value="phi-3.5-mini-instruct-npu" placeholder="phi-3.5-mini-instruct-npu" />
+                  </label>
+                  <label>
+                    <span>Auto-Unload Idle TTL (Seconds)</span>
+                    <input type="number" id="input-wave3-idle-ttl" min="15" max="900" step="15" value="45" />
+                  </label>
+                  <div class="wave2-inline-checks">
+                    <label class="wave2-check-chip">
+                      <input type="checkbox" id="chk-wave3-auto-unload" checked />
+                      <span>Auto-Unload Workers When Idle (&lt;25 MB Target)</span>
+                    </label>
+                  </div>
+                </div>
+                <div class="settings-btn-group">
+                  <button type="button" class="btn btn-primary btn-sm" id="btn-wave3-save-config">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>
+                    <span>Save NPU AI Policy</span>
+                  </button>
+                </div>
+              </div>
+
               <!-- Card 9: Consoles & Emulators (Portable Provisioner & ROM Scanner) -->
               <div class="panel-card" id="settings-consoles-card">
                 <div class="panel-head">
@@ -2778,36 +2965,172 @@
         <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
       </button>
     </div>
-    <div class="overlay-actions-grid">
-      <button type="button" class="overlay-action-btn" id="btn-overlay-suspend">
-        <svg class="icon" aria-hidden="true"><use href="#icon-pause"/></svg>
-        <span>Freeze / Resume Game</span>
+
+    <div class="overlay-tabbar" role="tablist" aria-label="Overlay Workspaces">
+      <button type="button" class="overlay-tab-btn is-active" data-overlay-tab="quick" id="btn-overlay-tab-quick">
+        <svg class="icon" aria-hidden="true"><use href="#icon-gamepad-2"/></svg>
+        <span>Quick</span>
       </button>
-      <button type="button" class="overlay-action-btn" id="btn-overlay-purge-ram">
-        <svg class="icon" aria-hidden="true"><use href="#icon-cpu"/></svg>
-        <span>Purge Standby RAM</span>
+      <button type="button" class="overlay-tab-btn" data-overlay-tab="vision" id="btn-overlay-tab-vision">
+        <svg class="icon" aria-hidden="true"><use href="#icon-eye"/></svg>
+        <span>Vision</span>
       </button>
-      <button type="button" class="overlay-action-btn" id="btn-overlay-replay-clip">
-        <svg class="icon" aria-hidden="true"><use href="#icon-video"/></svg>
-        <span>Save Replay Clip</span>
+      <button type="button" class="overlay-tab-btn" data-overlay-tab="comms" id="btn-overlay-tab-comms">
+        <svg class="icon" aria-hidden="true"><use href="#icon-subtitles"/></svg>
+        <span>Comms</span>
       </button>
-      <button type="button" class="overlay-action-btn" id="btn-overlay-refresh-friends">
-        <svg class="icon" aria-hidden="true"><use href="#icon-users"/></svg>
-        <span>Refresh Online Friends</span>
+      <button type="button" class="overlay-tab-btn" data-overlay-tab="acoustics" id="btn-overlay-tab-acoustics">
+        <svg class="icon" aria-hidden="true"><use href="#icon-volume-2"/></svg>
+        <span>Acoustics</span>
       </button>
     </div>
-    <div class="overlay-quick-resume-section" id="overlay-quick-resume-section">
-      <div class="overlay-section-label">Quick Resume Standby Slots (Max 3)</div>
-      <div id="overlay-quick-resume-list" class="overlay-qr-list">
-        <div class="panel-sub">No suspended slots active.</div>
+
+    <!-- Tab 1: Quick Session Controls -->
+    <div class="overlay-tab-pane" id="overlay-tab-quick">
+      <div class="overlay-actions-grid">
+        <button type="button" class="overlay-action-btn" id="btn-overlay-suspend">
+          <svg class="icon" aria-hidden="true"><use href="#icon-pause"/></svg>
+          <span>Freeze / Resume Game</span>
+        </button>
+        <button type="button" class="overlay-action-btn" id="btn-overlay-purge-ram">
+          <svg class="icon" aria-hidden="true"><use href="#icon-cpu"/></svg>
+          <span>Purge Standby RAM</span>
+        </button>
+        <button type="button" class="overlay-action-btn" id="btn-overlay-replay-clip">
+          <svg class="icon" aria-hidden="true"><use href="#icon-video"/></svg>
+          <span>Save Replay Clip</span>
+        </button>
+        <button type="button" class="overlay-action-btn" id="btn-overlay-refresh-friends">
+          <svg class="icon" aria-hidden="true"><use href="#icon-users"/></svg>
+          <span>Refresh Online Friends</span>
+        </button>
+      </div>
+      <div class="overlay-quick-resume-section" id="overlay-quick-resume-section">
+        <div class="overlay-section-label">Quick Resume Standby Slots (Max 3)</div>
+        <div id="overlay-quick-resume-list" class="overlay-qr-list">
+          <div class="panel-sub">No suspended slots active.</div>
+        </div>
+      </div>
+      <div class="overlay-friends-section">
+        <div class="overlay-section-label">Online Friends &amp; Lobby Join</div>
+        <div id="overlay-friends-list" class="overlay-friends-list">
+          <div class="panel-sub">Loading presence...</div>
+        </div>
       </div>
     </div>
-    <div class="overlay-friends-section">
-      <div class="overlay-section-label">Online Friends &amp; Lobby Join</div>
-      <div id="overlay-friends-list" class="overlay-friends-list">
-        <div class="panel-sub">Loading presence...</div>
+
+    <!-- Tab 2: Duke Vision & Highlight Director -->
+    <div class="overlay-tab-pane hidden" id="overlay-tab-vision">
+      <div class="overlay-ai-toolbar">
+        <button type="button" class="overlay-action-btn" id="btn-overlay-vision-scan">
+          <svg class="icon" aria-hidden="true"><use href="#icon-eye"/></svg>
+          <span>Scan Screen (Ctrl+Shift+T)</span>
+        </button>
+        <button type="button" class="overlay-action-btn" id="btn-overlay-director-clip">
+          <svg class="icon" aria-hidden="true"><use href="#icon-film"/></svg>
+          <span>Director Auto-Clip (22s)</span>
+        </button>
+      </div>
+      <div class="overlay-ai-row">
+        <select id="select-overlay-vision-lang" aria-label="Target Translation Language">
+          <option value="en" selected>To English</option>
+          <option value="es">To Spanish</option>
+          <option value="fr">To French</option>
+          <option value="de">To German</option>
+          <option value="ja">To Japanese</option>
+        </select>
+        <select id="select-overlay-vision-mode" aria-label="Vision Analysis Mode">
+          <option value="both" selected>Translate + Quest Copilot</option>
+          <option value="translate">Subtitle Translate Only</option>
+          <option value="quest_copilot">Quest / Item Hint Only</option>
+        </select>
+      </div>
+      <div class="overlay-ai-query-row">
+        <input type="text" id="input-overlay-vision-query" placeholder="Paste foreign dialogue or item/quest clue..." />
+        <button type="button" class="btn btn-primary btn-xs" id="btn-overlay-vision-ask">Analyze</button>
+      </div>
+      <div class="overlay-vision-card">
+        <div class="overlay-section-label mono-num" id="overlay-vision-meta">OCR Ready · NPU / DirectML Zero-VRAM</div>
+        <div class="overlay-vision-subtitle" id="overlay-vision-output">Press Ctrl+Shift+T or Guide+Y in-game to translate dialogue or inspect quests.</div>
+        <div class="overlay-vision-quest" id="overlay-vision-quest"></div>
       </div>
     </div>
+
+    <!-- Tab 3: Duke Comms (Voice Macros & Live Teammate Subtitles) -->
+    <div class="overlay-tab-pane hidden" id="overlay-tab-comms">
+      <div class="overlay-ai-row">
+        <button type="button" class="btn btn-primary btn-xs" id="btn-overlay-comms-toggle">
+          <svg class="icon" aria-hidden="true"><use href="#icon-mic"/></svg>
+          <span>Enable Voice Tap</span>
+        </button>
+        <span class="pill mono-num" id="overlay-comms-vad-pill">VAD Idle</span>
+        <select id="select-overlay-comms-lang" aria-label="Squad Translation Language">
+          <option value="en" selected>Squad -> English</option>
+          <option value="es">Squad -> Spanish</option>
+          <option value="fr">Squad -> French</option>
+          <option value="de">Squad -> German</option>
+          <option value="ja">Squad -> Japanese</option>
+        </select>
+      </div>
+      <div class="overlay-macro-chips">
+        <button type="button" class="btn btn-secondary btn-xs overlay-macro-quick" data-phrase="Quick save">Quick Save</button>
+        <button type="button" class="btn btn-secondary btn-xs overlay-macro-quick" data-phrase="Freeze game">Freeze Game</button>
+        <button type="button" class="btn btn-secondary btn-xs overlay-macro-quick" data-phrase="Save clip">Save Clip</button>
+        <button type="button" class="btn btn-secondary btn-xs overlay-macro-quick" data-phrase="Switch game">Switch Game</button>
+      </div>
+      <div class="overlay-ai-query-row">
+        <input type="text" id="input-overlay-comms-phrase" placeholder="Voice macro test or squad line..." />
+        <button type="button" class="btn btn-secondary btn-xs" id="btn-overlay-comms-run">Trigger</button>
+      </div>
+      <div class="overlay-section-label">Action Feed &amp; Live Teammate Subtitles (~200 ms)</div>
+      <div class="overlay-comms-action-log mono-num" id="overlay-comms-action-log">Voice-to-HID standing by.</div>
+      <div class="overlay-comms-subtitles" id="overlay-comms-subtitles">
+        <div class="panel-sub">Waiting for WASAPI loopback squad audio...</div>
+      </div>
+    </div>
+
+    <!-- Tab 4: Duke Acoustics (WASAPI Per-Game Mixer, 5-Band EQ & RNNoise Mic Denoiser) -->
+    <div class="overlay-tab-pane hidden" id="overlay-tab-acoustics">
+      <div class="overlay-ai-row">
+        <span class="overlay-section-label">Per-Game WASAPI Mixer</span>
+        <button type="button" class="btn btn-secondary btn-xs" id="btn-overlay-acoustics-refresh">
+          <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+          <span>Refresh Sessions</span>
+        </button>
+      </div>
+      <div class="overlay-acoustics-sessions" id="overlay-acoustics-sessions">
+        <div class="panel-sub">Scanning IAudioSessionManager2 sessions...</div>
+      </div>
+      <div class="overlay-ai-row">
+        <span class="overlay-section-label">5-Band Acoustic EQ</span>
+        <select id="select-overlay-eq-preset" aria-label="EQ Preset">
+          <option value="Neutral Flat">Neutral Flat</option>
+          <option value="FPS Footsteps">FPS Footsteps</option>
+          <option value="Cinema">Cinema</option>
+          <option value="Voice Clarity">Voice Clarity</option>
+        </select>
+      </div>
+      <div class="overlay-eq-grid" id="overlay-eq-sliders">
+        <label><span>60Hz</span><input type="range" class="overlay-eq-band" data-band="0" min="-12" max="12" step="0.5" value="0" /><strong class="mono-num">0 dB</strong></label>
+        <label><span>230Hz</span><input type="range" class="overlay-eq-band" data-band="1" min="-12" max="12" step="0.5" value="0" /><strong class="mono-num">0 dB</strong></label>
+        <label><span>910Hz</span><input type="range" class="overlay-eq-band" data-band="2" min="-12" max="12" step="0.5" value="0" /><strong class="mono-num">0 dB</strong></label>
+        <label><span>3.6k</span><input type="range" class="overlay-eq-band" data-band="3" min="-12" max="12" step="0.5" value="0" /><strong class="mono-num">0 dB</strong></label>
+        <label><span>12k</span><input type="range" class="overlay-eq-band" data-band="4" min="-12" max="12" step="0.5" value="0" /><strong class="mono-num">0 dB</strong></label>
+      </div>
+      <div class="overlay-ai-row">
+        <label class="wave2-check-chip">
+          <input type="checkbox" id="chk-overlay-denoise-enabled" checked />
+          <span>RNNoise Mic Denoise</span>
+        </label>
+        <input type="range" id="range-overlay-denoise-strength" min="0" max="1" step="0.05" value="0.75" aria-label="Mic Denoise Strength" />
+        <span class="pill emerald mono-num" id="overlay-acoustics-latency-badge">&lt;5 ms</span>
+      </div>
+      <div class="overlay-ai-row">
+        <button type="button" class="btn btn-primary btn-xs" id="btn-overlay-acoustics-save">Save EQ &amp; Denoise</button>
+        <button type="button" class="btn btn-secondary btn-xs" id="btn-overlay-denoise-bench">Bench Denoiser</button>
+      </div>
+    </div>
+
     <div class="overlay-status-line mono-num" id="overlay-status-line">Ready (Alt+G or Guide button)</div>
   </section>
 

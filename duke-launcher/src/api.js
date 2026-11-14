@@ -946,7 +946,7 @@ export async function getAppVersion() {
     // Fall back to explicit Rust compile-time CARGO_PKG_VERSION IPC
   }
   const backendVer = await invokeCommand("get_app_version");
-  return String(backendVer || "0.7.0").trim().replace(/^v/i, "");
+  return String(backendVer || "0.8.0").trim().replace(/^v/i, "");
 }
 
 export async function resolveCatalogCover(req = {}) {
@@ -1412,6 +1412,195 @@ export async function deduplicateLibraryBlake3(extraLibraryRoot = null, minFileK
   return invokeCommand("deduplicate_library_blake3", {
     extraLibraryRoot: extraLibraryRoot ? String(extraLibraryRoot) : null,
     minFileKb: minFileKb != null ? Number(minFileKb) : null
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Wave 3 (v0.8.0): Zero-VRAM NPU / Windows ML On-Device AI Suite
+// ---------------------------------------------------------------------------
+
+export async function getAiRuntimeStatus() {
+  return invokeCommand("get_ai_runtime_status");
+}
+
+export async function updateAiRuntimeConfig(req = {}) {
+  return invokeCommand("update_ai_runtime_config", {
+    preferredProvider: req.preferredProvider ?? null,
+    autoUnloadEnabled: req.autoUnloadEnabled ?? null,
+    idleTtlSecs: req.idleTtlSecs != null ? Number(req.idleTtlSecs) : null,
+    foundryEndpoint: req.foundryEndpoint ?? null,
+    foundryModel: req.foundryModel ?? null,
+    targetLanguage: req.targetLanguage ?? null
+  });
+}
+
+export async function unloadAiWorkers() {
+  return invokeCommand("unload_ai_workers");
+}
+
+export async function triggerDukeVisionCapture(req = {}) {
+  return invokeCommand("trigger_duke_vision_capture", {
+    gameTitle: req.gameTitle ?? null,
+    sourceLang: req.sourceLang ?? null,
+    targetLang: req.targetLang ?? null,
+    mode: req.mode ?? null
+  });
+}
+
+export async function analyzeVisionTextQuery(req = {}) {
+  return invokeCommand("analyze_vision_text_query", {
+    text: String(req.text || ""),
+    gameTitle: req.gameTitle ?? null,
+    sourceLang: req.sourceLang ?? null,
+    targetLang: req.targetLang ?? null,
+    mode: req.mode ?? null
+  });
+}
+
+export async function getLatestVisionState() {
+  return invokeCommand("get_latest_vision_state");
+}
+
+export function listenDukeVisionResult(callback) {
+  return listenEvent("duke-vision-result", callback);
+}
+
+export async function getDukeCommsState() {
+  return invokeCommand("get_duke_comms_state");
+}
+
+export async function toggleDukeCommsListening(req = {}) {
+  return invokeCommand("toggle_duke_comms_listening", {
+    enabled: Boolean(req.enabled),
+    targetLanguage: req.targetLanguage ?? null,
+    voiceMacrosEnabled: req.voiceMacrosEnabled ?? null,
+    teammateSubtitlesEnabled: req.teammateSubtitlesEnabled ?? null
+  });
+}
+
+export async function processVoicePhraseCommand(req = {}) {
+  return invokeCommand("process_voice_phrase_command", {
+    phrase: String(req.phrase || ""),
+    isTeammateAudio: Boolean(req.isTeammateAudio),
+    sourceLang: req.sourceLang ?? null,
+    speaker: req.speaker ?? null
+  });
+}
+
+export async function upsertVoiceMacroRule(rule = {}) {
+  return invokeCommand("upsert_voice_macro_rule", {
+    id: rule.id ?? null,
+    phrase: String(rule.phrase || ""),
+    actionKind: String(rule.actionKind || "HidKeys"),
+    keys: Array.isArray(rule.keys) ? rule.keys.map((k) => String(k)) : [],
+    holdMs: rule.holdMs != null ? Number(rule.holdMs) : 50,
+    description: rule.description ?? null,
+    enabled: rule.enabled !== false
+  });
+}
+
+export function listenDukeCommsVad(callback) {
+  return listenEvent("duke-comms-vad", callback);
+}
+
+export function listenDukeCommsAction(callback) {
+  return listenEvent("duke-comms-action", callback);
+}
+
+export function listenDukeCommsSubtitle(callback) {
+  return listenEvent("duke-comms-subtitle", callback);
+}
+
+export async function diagnoseGameCrash(gameId, extraLogPath = null) {
+  return invokeCommand("diagnose_game_crash", {
+    gameId: String(gameId),
+    extraLogPath: extraLogPath ? String(extraLogPath) : null
+  });
+}
+
+export async function doctorRevertGameSnapshot(gameId, snapshotId) {
+  return invokeCommand("doctor_revert_game_snapshot", {
+    gameId: String(gameId),
+    snapshotId: String(snapshotId)
+  });
+}
+
+export async function getDukeDirectorState(gameId = null) {
+  return invokeCommand("get_duke_director_state", {
+    gameId: gameId ? String(gameId) : null
+  });
+}
+
+export async function toggleDukeDirector(enabled, sensitivity = null) {
+  return invokeCommand("toggle_duke_director", {
+    enabled: Boolean(enabled),
+    sensitivity: sensitivity != null ? Number(sensitivity) : null
+  });
+}
+
+export async function triggerDirectorHighlightNow(req = {}) {
+  return invokeCommand("trigger_director_highlight_now", {
+    gameId: req.gameId ?? null,
+    gameTitle: req.gameTitle ?? null,
+    bossOrAchievement: req.bossOrAchievement ?? null,
+    targetDurationSecs: req.targetDurationSecs != null ? Number(req.targetDurationSecs) : null
+  });
+}
+
+export function listenDukeDirectorHighlight(callback) {
+  return listenEvent("duke-director-highlight", callback);
+}
+
+export async function analyzeGameConfigPreset(gameId, targetHz = null) {
+  return invokeCommand("analyze_game_config_preset", {
+    gameId: String(gameId),
+    targetHz: targetHz != null ? Number(targetHz) : null
+  });
+}
+
+export async function applyGameConfigPreset(gameId, targetHz = null) {
+  return invokeCommand("apply_game_config_preset", {
+    gameId: String(gameId),
+    targetHz: targetHz != null ? Number(targetHz) : null
+  });
+}
+
+export async function rollbackGameConfigPreset(gameId, backupId = null) {
+  return invokeCommand("rollback_game_config_preset", {
+    gameId: String(gameId),
+    backupId: backupId ? String(backupId) : null
+  });
+}
+
+export async function getAcousticsState(gameId = null) {
+  return invokeCommand("get_acoustics_state", {
+    gameId: gameId ? String(gameId) : null
+  });
+}
+
+export async function setWasapiSessionVolume(pid, volumePct, muted = false) {
+  return invokeCommand("set_wasapi_session_volume", {
+    pid: Number(pid),
+    volumePct: Number(volumePct),
+    muted: Boolean(muted)
+  });
+}
+
+export async function saveGameEqAndDenoise(req = {}) {
+  const rawBands = Array.isArray(req.bandsDb) ? req.bandsDb : [0, 0, 0, 0, 0];
+  const bandsDb = [0, 1, 2, 3, 4].map((i) => Number(rawBands[i] || 0));
+  return invokeCommand("save_game_eq_and_denoise", {
+    gameId: req.gameId ? String(req.gameId) : null,
+    presetName: String(req.presetName || "Neutral Flat"),
+    bandsDb,
+    micDenoiseEnabled: Boolean(req.micDenoiseEnabled),
+    micDenoiseStrength: req.micDenoiseStrength != null ? Number(req.micDenoiseStrength) : 0.72
+  });
+}
+
+export async function testMicRnnoiseLatency(strength = 0.75) {
+  return invokeCommand("test_mic_rnnoise_latency", {
+    strength: Number(strength)
   });
 }
 

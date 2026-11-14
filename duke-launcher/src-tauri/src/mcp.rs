@@ -109,6 +109,19 @@ pub fn build_mcp_tools_list() -> Value {
                 }
             },
             {
+                "name": "diagnose_game_crash",
+                "description": "Parses crash logs, Windows .dmp minidumps, mod-graph DLL collisions, and GPU driver state via Duke Doctor.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "game_id": { "type": "string", "description": "Library game ID to diagnose" },
+                        "extra_log_path": { "type": "string", "description": "Optional explicit path to Crash.log, Player.log, or .dmp file" }
+                    },
+                    "required": ["game_id"],
+                    "additionalProperties": false
+                }
+            },
+            {
                 "name": "suspend_or_resume_game",
                 "description": "Freezes or thaws a running game process via NtSuspendProcess / NtResumeProcess and trims physical working-set RAM.",
                 "inputSchema": {
@@ -442,6 +455,21 @@ async fn execute_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             .await?;
             serde_json::to_value(report).map_err(|e| format!("Serialize error: {}", e))
         }
+        "diagnose_game_crash" => {
+            let game_id = args
+                .get("game_id")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "Missing required argument: game_id".to_string())?
+                .to_string();
+            let extra_log = args
+                .get("extra_log_path")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let report = crate::duke_doctor::diagnose_game_crash_sync(&game_id, extra_log.as_deref())?;
+            serde_json::to_value(report).map_err(|e| format!("Serialize error: {}", e))
+        }
         "suspend_or_resume_game" => {
             let explicit_pid = args
                 .get("pid")
@@ -668,6 +696,7 @@ mod tests {
                 "scan_binary",
                 "backup_saves",
                 "import_libraries",
+                "diagnose_game_crash",
                 "suspend_or_resume_game",
                 "discover_saves",
             ]

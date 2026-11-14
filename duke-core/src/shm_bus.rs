@@ -6,12 +6,15 @@
 
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
+use std::sync::atomic::{fence, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DUKE_SHM_NAME: &str = r"Local\duke-suite-shm-v1";
+pub const DUKE_AUDIO_TAP_SHM_NAME: &str = r"Local\duke-capture-audio-tap-v1";
 pub const SHM_RING_CAPACITY: usize = 1024;
+pub const AUDIO_TAP_RING_CAPACITY: usize = 32_768; // ~2.048s @ 16 kHz mono
 const SHM_MAGIC: u64 = 0x4455_4B45_5348_4D31; // "DUKESHM1"
+const AUDIO_TAP_MAGIC: u64 = 0x4455_4B45_4155_4431; // "DUKEAUD1"
 const SHM_VERSION: u32 = 1;
 
 #[repr(u32)]
@@ -28,6 +31,8 @@ pub enum ShmEventType {
     AchievementUnlocked = 8,
     ProfileSwitch = 9,
     CoOpInputP2 = 10,
+    HighlightPeak = 11,
+    VoiceMacro = 12,
 }
 
 impl ShmEventType {
@@ -43,6 +48,8 @@ impl ShmEventType {
             8 => Self::AchievementUnlocked,
             9 => Self::ProfileSwitch,
             10 => Self::CoOpInputP2,
+            11 => Self::HighlightPeak,
+            12 => Self::VoiceMacro,
             _ => Self::None,
         }
     }
@@ -446,6 +453,64 @@ impl ShmEventFrame {
             payload_b,
             "p2-pad",
         )
+    }
+
+    /// Builds a zero-allocation Wave 3 AI highlight peak trigger frame for `duke-capture`.
+    pub fn highlight_peak(
+        source_app: ShmSourceApp,
+        pid: u32,
+        intensity: u8,
+        duration_secs: u8,
+        tag: &str,
+    ) -> Self {
+        let packed = ((intensity as u64) << 8) | (duration_secs as u64);
+        Self::with_tag(
+            ShmEventType::HighlightPeak,
+            source_app,
+            pid,
+            packed,
+            fnv1a_hash64(tag.as_bytes()),
+            tag,
+        )
+    }
+
+    /// Builds a zero-allocation Wave 3 voice-macro trigger frame for `duke-input`.
+    pub fn voice_macro(
+        source_app: ShmSourceApp,
+        pid: u32,
+        vk_code: u16,
+        hold_ms: u16,
+        action_tag: &str,
+    ) -> Self {
+        let packed = ((vk_code as u64) << 16) | (hold_ms as u64);
+        Self::with_tag(
+            ShmEventType::VoiceMacro,
+            source_app,
+            pid,
+            packed,
+            fnv1a_hash64(action_tag.as_bytes()),
+            action_tag,
+        )
+    }
+
+    /// Decodes a `HighlightPeak` frame as `(intensity, duration_secs, tag)`.
+    pub fn decode_highlight_peak(&self) -> Option<(u8, u8, String)> {
+        if self.kind() != ShmEventType::HighlightPeak {
+            return None;
+        }
+        let intensity = ((self.payload_a >> 8) & 0xFF) as u8;
+        let duration_secs = (self.payload_a & 0xFF) as u8;
+        Some((intensity, duration_secs, self.tag_str().to_string()))
+    }
+
+    /// Decodes a `VoiceMacro` frame as `(vk_code, hold_ms, action_tag)`.
+    pub fn decode_voice_macro(&self) -> Option<(u16, u16, String)> {
+        if self.kind() != ShmEventType::VoiceMacro {
+            return None;
+        }
+        let vk_code = ((self.payload_a >> 16) & 0xFFFF) as u16;
+        let hold_ms = (self.payload_a & 0xFFFF) as u16;
+        Some((vk_code, hold_ms, self.tag_str().to_string()))
     }
 
     /// Decodes a `GameLaunched` frame into its structured payload.
@@ -987,6 +1052,272 @@ impl Drop for DukeShmBus {
     }
 }
 
+/// Telemetry counters published by `duke-capture` into `Local\duke-capture-audio-tap-v1`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AudioTapStats {
+    pub sys_rms: f32,
+    pub mic_rms: f32,
+    pub motion_score: f32,
+    pub transient_epoch: u32,
+    pub last_update_ms: u64,
+    pub sys_write_idx: u64,
+    pub mic_write_idx: u64,
+}
+
+#[repr(C, align(64))]
+struct AudioTapRegion {
+    magic: AtomicU64,
+    sys_write_idx: AtomicU64,
+    mic_write_idx: AtomicU64,
+    sys_rms_bits: AtomicU32,
+    mic_rms_bits: AtomicU32,
+    motion_score_bits: AtomicU32,
+    transient_epoch: AtomicU32,
+    last_update_ms: AtomicU64,
+    _pad: [u8; 16],
+    sys_ring: [AtomicU16; AUDIO_TAP_RING_CAPACITY],
+    mic_ring: [AtomicU16; AUDIO_TAP_RING_CAPACITY],
+}
+
+/// Lock-free 16 kHz shared-memory WASAPI loopback + microphone ring tap (~128 KiB).
+pub struct DukeAudioTapShm {
+    region: NonNull<AudioTapRegion>,
+    #[cfg(target_os = "windows")]
+    mapping_handle: windows::Win32::Foundation::HANDLE,
+    #[cfg(not(target_os = "windows"))]
+    _owned_backing: Option<Box<AudioTapRegion>>,
+}
+
+unsafe impl Send for DukeAudioTapShm {}
+unsafe impl Sync for DukeAudioTapShm {}
+
+impl DukeAudioTapShm {
+    pub fn open_or_create() -> Result<Self, String> {
+        Self::open_or_create_named(DUKE_AUDIO_TAP_SHM_NAME)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn open_or_create_named(mapping_name: &str) -> Result<Self, String> {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, INVALID_HANDLE_VALUE};
+        use windows::Win32::System::Memory::{
+            CreateFileMappingW, MapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
+        };
+
+        let wide_name: Vec<u16> = OsStr::new(mapping_name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let region_bytes = std::mem::size_of::<AudioTapRegion>();
+        let high = ((region_bytes as u64) >> 32) as u32;
+        let low = (region_bytes as u64 & 0xFFFF_FFFF) as u32;
+
+        let handle = unsafe {
+            CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                None,
+                PAGE_READWRITE,
+                high,
+                low,
+                PCWSTR(wide_name.as_ptr()),
+            )
+        }
+        .map_err(|e| format!("CreateFileMappingW('{}') failed: {}", mapping_name, e))?;
+
+        let already_exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+        let mapped = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, region_bytes) };
+        if mapped.Value.is_null() {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return Err(format!("MapViewOfFile('{}') returned null.", mapping_name));
+        }
+
+        let ptr = mapped.Value as *mut AudioTapRegion;
+        let Some(region_nn) = NonNull::new(ptr) else {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return Err("Mapped AudioTap SHM pointer was null.".to_string());
+        };
+
+        if !already_exists {
+            unsafe {
+                std::ptr::write_bytes(ptr as *mut u8, 0, region_bytes);
+                (*ptr).magic.store(AUDIO_TAP_MAGIC, Ordering::Release);
+            }
+        } else {
+            for _ in 0..100 {
+                if unsafe { (*ptr).magic.load(Ordering::Acquire) } == AUDIO_TAP_MAGIC {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_micros(50));
+            }
+        }
+
+        Ok(Self {
+            region: region_nn,
+            mapping_handle: handle,
+        })
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub fn open_or_create_named(_mapping_name: &str) -> Result<Self, String> {
+        let region = Box::new(unsafe { MaybeUninit::<AudioTapRegion>::zeroed().assume_init() });
+        region.magic.store(AUDIO_TAP_MAGIC, Ordering::Release);
+        let ptr = NonNull::from(region.as_ref());
+        Ok(Self {
+            region: ptr,
+            _owned_backing: Some(region),
+        })
+    }
+
+    #[inline]
+    fn region(&self) -> &AudioTapRegion {
+        unsafe { self.region.as_ref() }
+    }
+
+    /// Downsamples interleaved stereo 48 kHz `f32` audio into the 16 kHz mono ring buffer.
+    pub fn push_stereo_48k_decimated(&self, is_mic: bool, stereo_samples: &[f32]) -> f32 {
+        if stereo_samples.len() < 6 {
+            return 0.0;
+        }
+        let reg = self.region();
+        let write_idx_atomic = if is_mic {
+            &reg.mic_write_idx
+        } else {
+            &reg.sys_write_idx
+        };
+        let ring = if is_mic { &reg.mic_ring } else { &reg.sys_ring };
+        let mut cursor = write_idx_atomic.load(Ordering::Acquire);
+        let mask = AUDIO_TAP_RING_CAPACITY as u64 - 1;
+
+        let mut sum_sq = 0.0f64;
+        let mut count = 0usize;
+        // 48 kHz stereo = 2 floats/frame; step 3 frames (6 floats) -> 16 kHz mono
+        for idx in (0..stereo_samples.len().saturating_sub(5)).step_by(6) {
+            let chunk = &stereo_samples[idx..idx + 6];
+            let mono = (chunk[0] + chunk[1] + chunk[2] + chunk[3] + chunk[4] + chunk[5]) / 6.0;
+            let clamped = mono.clamp(-1.0, 1.0);
+            sum_sq += (clamped as f64) * (clamped as f64);
+            count += 1;
+            let s16 = (clamped * i16::MAX as f32).round() as i16;
+            ring[(cursor & mask) as usize].store(s16 as u16, Ordering::Relaxed);
+            cursor = cursor.wrapping_add(1);
+        }
+        fence(Ordering::Release);
+        write_idx_atomic.store(cursor, Ordering::Release);
+
+        let rms = if count > 0 {
+            (sum_sq / count as f64).sqrt() as f32
+        } else {
+            0.0
+        };
+        if is_mic {
+            reg.mic_rms_bits.store(rms.to_bits(), Ordering::Relaxed);
+        } else {
+            let prev_rms = f32::from_bits(reg.sys_rms_bits.load(Ordering::Relaxed));
+            reg.sys_rms_bits.store(rms.to_bits(), Ordering::Relaxed);
+            if rms > 0.28 && rms > prev_rms * 1.45 {
+                reg.transient_epoch.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+        reg.last_update_ms
+            .store(now_unix_micros() / 1000, Ordering::Relaxed);
+        rms
+    }
+
+    pub fn set_motion_score(&self, score: f32) {
+        let reg = self.region();
+        reg.motion_score_bits
+            .store(score.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        reg.last_update_ms
+            .store(now_unix_micros() / 1000, Ordering::Relaxed);
+    }
+
+    pub fn read_stats(&self) -> AudioTapStats {
+        let reg = self.region();
+        AudioTapStats {
+            sys_rms: f32::from_bits(reg.sys_rms_bits.load(Ordering::Relaxed)),
+            mic_rms: f32::from_bits(reg.mic_rms_bits.load(Ordering::Relaxed)),
+            motion_score: f32::from_bits(reg.motion_score_bits.load(Ordering::Relaxed)),
+            transient_epoch: reg.transient_epoch.load(Ordering::Acquire),
+            last_update_ms: reg.last_update_ms.load(Ordering::Acquire),
+            sys_write_idx: reg.sys_write_idx.load(Ordering::Acquire),
+            mic_write_idx: reg.mic_write_idx.load(Ordering::Acquire),
+        }
+    }
+
+    /// Reads newly available 16 kHz mono float samples from both rings since caller's cursors.
+    pub fn read_new_mono_samples(
+        &self,
+        sys_cursor: &mut u64,
+        mic_cursor: &mut u64,
+        max_samples: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let reg = self.region();
+        let sys_out = Self::drain_ring(
+            &reg.sys_write_idx,
+            &reg.sys_ring,
+            sys_cursor,
+            max_samples,
+        );
+        let mic_out = Self::drain_ring(
+            &reg.mic_write_idx,
+            &reg.mic_ring,
+            mic_cursor,
+            max_samples,
+        );
+        (sys_out, mic_out)
+    }
+
+    fn drain_ring(
+        write_idx: &AtomicU64,
+        ring: &[AtomicU16; AUDIO_TAP_RING_CAPACITY],
+        cursor: &mut u64,
+        max_samples: usize,
+    ) -> Vec<f32> {
+        let head = write_idx.load(Ordering::Acquire);
+        if head <= *cursor {
+            if *cursor > head {
+                *cursor = head;
+            }
+            return Vec::new();
+        }
+        let available = head - *cursor;
+        let cap = AUDIO_TAP_RING_CAPACITY as u64;
+        if available > cap {
+            *cursor = head.saturating_sub(cap.min(max_samples as u64));
+        }
+        let count = (head - *cursor).min(max_samples as u64) as usize;
+        let mask = cap - 1;
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            let slot = ((*cursor + i as u64) & mask) as usize;
+            let raw = ring[slot].load(Ordering::Relaxed) as i16;
+            out.push((raw as f32) / i16::MAX as f32);
+        }
+        *cursor += count as u64;
+        out
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for DukeAudioTapShm {
+    fn drop(&mut self) {
+        unsafe {
+            use windows::Win32::Foundation::CloseHandle;
+            use windows::Win32::System::Memory::{MEMORY_MAPPED_VIEW_ADDRESS, UnmapViewOfFile};
+            let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
+                Value: self.region.as_ptr() as *mut std::ffi::c_void,
+            });
+            let _ = CloseHandle(self.mapping_handle);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1174,6 +1505,14 @@ mod tests {
         );
         producer.publish_frame(exit_frame);
 
+        let peak_frame =
+            ShmEventFrame::highlight_peak(ShmSourceApp::DukeLauncher, 4242, 92, 22, "BossPhase");
+        producer.publish_frame(peak_frame);
+
+        let voice_frame =
+            ShmEventFrame::voice_macro(ShmSourceApp::DukeLauncher, 4242, 0x74, 40, "quick_save");
+        producer.publish_frame(voice_frame);
+
         let rx1 = consumer.try_recv().unwrap().decode_game_launched().unwrap();
         assert_eq!(rx1.pid, 4242);
         assert_eq!(rx1.app_id, 1145350);
@@ -1206,5 +1545,52 @@ mod tests {
         let rx5 = consumer.try_recv().unwrap().decode_game_exited().unwrap();
         assert_eq!(rx5.app_id, 1145350);
         assert_eq!(rx5.exe_hash, exe_hash);
+
+        let rx6 = consumer.try_recv().unwrap().decode_highlight_peak().unwrap();
+        assert_eq!(rx6.0, 92);
+        assert_eq!(rx6.1, 22);
+        assert_eq!(rx6.2, "BossPhase");
+
+        let rx7 = consumer.try_recv().unwrap().decode_voice_macro().unwrap();
+        assert_eq!(rx7.0, 0x74);
+        assert_eq!(rx7.1, 40);
+        assert_eq!(rx7.2, "quick_save");
+    }
+
+    #[test]
+    fn audio_tap_shm_decimates_and_streams_loopback_and_mic() {
+        let name = format!(r"Local\duke-audio-tap-unit-{}", std::process::id());
+        let writer = DukeAudioTapShm::open_or_create_named(&name).unwrap();
+        let reader = DukeAudioTapShm::open_or_create_named(&name).unwrap();
+
+        let mut stereo_sys = Vec::with_capacity(600);
+        let mut stereo_mic = Vec::with_capacity(600);
+        for i in 0..300 {
+            let v_sys = ((i as f32 * 0.05).sin()) * 0.5;
+            let v_mic = ((i as f32 * 0.08).cos()) * 0.25;
+            stereo_sys.push(v_sys);
+            stereo_sys.push(v_sys);
+            stereo_mic.push(v_mic);
+            stereo_mic.push(v_mic);
+        }
+
+        let rms_sys = writer.push_stereo_48k_decimated(false, &stereo_sys);
+        let rms_mic = writer.push_stereo_48k_decimated(true, &stereo_mic);
+        writer.set_motion_score(0.73);
+        assert!(rms_sys > 0.1);
+        assert!(rms_mic > 0.05);
+
+        let stats = reader.read_stats();
+        assert!((stats.motion_score - 0.73).abs() < 0.01);
+        assert_eq!(stats.sys_write_idx, 100);
+        assert_eq!(stats.mic_write_idx, 100);
+
+        let mut c_sys = 0u64;
+        let mut c_mic = 0u64;
+        let (rx_sys, rx_mic) = reader.read_new_mono_samples(&mut c_sys, &mut c_mic, 256);
+        assert_eq!(rx_sys.len(), 100);
+        assert_eq!(rx_mic.len(), 100);
+        assert_eq!(c_sys, 100);
+        assert_eq!(c_mic, 100);
     }
 }

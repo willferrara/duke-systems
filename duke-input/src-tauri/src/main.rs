@@ -30,7 +30,7 @@ use hid::{
 use injector::{send_mouse_move, InputActionEngine};
 use profiles::{
     build_default_profiles, load_store, save_store, set_windows_autostart, AppSettings,
-    InputProfile, MacroSequence, ProfileStore,
+    InputProfile, MacroMode, MacroSequence, MacroStep, MacroStepKind, ProfileStore,
 };
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -234,6 +234,24 @@ fn poll_shm_events(app: &AppHandle, state: &AppState, shm_rx: Option<&mut DukeSh
             }
             ShmEventType::RamPurge => {
                 trim_process_working_set();
+            }
+            ShmEventType::VoiceMacro => {
+                if let Some((vk_code, hold_ms, tag)) = frame.decode_voice_macro() {
+                    if let Some(key_name) = vk_code_to_voice_key_name(vk_code) {
+                        let steps = build_voice_macro_steps(&[key_name.to_string()], hold_ms as u32);
+                        let seq = MacroSequence {
+                            id: format!("shm_voice_{}", tag),
+                            name: format!("Voice SHM: {}", tag),
+                            mode: MacroMode::Sequence,
+                            repeat_delay_ms: 0,
+                            steps,
+                        };
+                        *state
+                            .pending_macro_test
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = Some(seq);
+                    }
+                }
             }
             _ => {}
         }
@@ -1670,6 +1688,28 @@ fn main() {
                     DukeEvent::RamPurgeRequested { .. } => {
                         trim_process_working_set();
                     }
+                    DukeEvent::VoiceMacroTriggered {
+                        phrase,
+                        action_id,
+                        keys,
+                        hold_ms,
+                        ..
+                    } => {
+                        let steps = build_voice_macro_steps(&keys, hold_ms);
+                        if !steps.is_empty() {
+                            let seq = MacroSequence {
+                                id: action_id,
+                                name: format!("Voice: {}", phrase),
+                                mode: MacroMode::Sequence,
+                                repeat_delay_ms: 0,
+                                steps,
+                            };
+                            *bus_state
+                                .pending_macro_test
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner()) = Some(seq);
+                        }
+                    }
                     _ => {}
                 })
             });
@@ -1759,9 +1799,71 @@ fn main() {
     });
 }
 
+fn vk_code_to_voice_key_name(vk: u16) -> Option<&'static str> {
+    match vk {
+        0x70 => Some("F1"),
+        0x71 => Some("F2"),
+        0x72 => Some("F3"),
+        0x73 => Some("F4"),
+        0x74 => Some("F5"),
+        0x75 => Some("F6"),
+        0x76 => Some("F7"),
+        0x77 => Some("F8"),
+        0x78 => Some("F9"),
+        0x79 => Some("F10"),
+        0x7A => Some("F11"),
+        0x7B => Some("F12"),
+        0x20 => Some("Space"),
+        0x0D => Some("Enter"),
+        0x1B => Some("Esc"),
+        _ => None,
+    }
+}
+
+fn build_voice_macro_steps(keys: &[String], hold_ms: u32) -> Vec<MacroStep> {
+    let clean: Vec<&str> = keys
+        .iter()
+        .map(|k| k.trim())
+        .filter(|k| !k.is_empty())
+        .collect();
+    if clean.is_empty() {
+        return Vec::new();
+    }
+    let mut steps = Vec::with_capacity(clean.len() * 2 + 1);
+    for k in &clean {
+        steps.push(MacroStep {
+            kind: MacroStepKind::KeyDown,
+            value: (*k).to_string(),
+        });
+    }
+    steps.push(MacroStep {
+        kind: MacroStepKind::DelayMs,
+        value: hold_ms.clamp(20, 500).to_string(),
+    });
+    for k in clean.iter().rev() {
+        steps.push(MacroStep {
+            kind: MacroStepKind::KeyUp,
+            value: (*k).to_string(),
+        });
+    }
+    steps
+}
+
 #[cfg(test)]
 mod wave1_tests {
     use super::*;
+
+    #[test]
+    fn builds_balanced_voice_macro_key_steps() {
+        let steps = build_voice_macro_steps(&["Ctrl".into(), "F5".into()], 45);
+        assert_eq!(steps.len(), 5);
+        assert_eq!(steps[0].kind, MacroStepKind::KeyDown);
+        assert_eq!(steps[1].kind, MacroStepKind::KeyDown);
+        assert_eq!(steps[2].kind, MacroStepKind::DelayMs);
+        assert_eq!(steps[2].value, "45");
+        assert_eq!(steps[3].value, "F5");
+        assert_eq!(steps[4].value, "Ctrl");
+    }
 
     #[test]
     fn selects_bezier5_console_and_linked_app_profiles() {

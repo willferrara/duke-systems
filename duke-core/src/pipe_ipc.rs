@@ -70,6 +70,39 @@ pub enum DukeEvent {
         game_title: Option<String>,
         source: String,
     },
+    VoiceMacroTriggered {
+        phrase: String,
+        action_id: String,
+        keys: Vec<String>,
+        hold_ms: u32,
+        source: String,
+    },
+    HighlightClipRequested {
+        game_title: Option<String>,
+        achievement_or_boss: Option<String>,
+        intensity: u8,
+        trim_start_offset_secs: f32,
+        duration_secs: f32,
+        trim_dead_frames: bool,
+        source: String,
+    },
+    CaptureSignalTelemetry {
+        system_peak_pct: u32,
+        mic_peak_pct: u32,
+        transient_spike: bool,
+        motion_score: f32,
+        ring_duration_secs: f32,
+    },
+    SubtitleBroadcast {
+        channel: String,
+        source_lang: String,
+        target_lang: String,
+        original_text: String,
+        translated_text: String,
+        quest_hint: Option<String>,
+        confidence: f32,
+        backend: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -639,6 +672,22 @@ mod tests {
             platform_id: 7,
             curve_mode: "Bezier5Point".to_string(),
         });
+        hub.publish(DukeEvent::VoiceMacroTriggered {
+            phrase: "Save clip".to_string(),
+            action_id: "macro_save_clip".to_string(),
+            keys: vec!["F9".to_string()],
+            hold_ms: 35,
+            source: "duke-comms".to_string(),
+        });
+        hub.publish(DukeEvent::HighlightClipRequested {
+            game_title: Some("Hades II".to_string()),
+            achievement_or_boss: Some("Chronos".to_string()),
+            intensity: 94,
+            trim_start_offset_secs: 6.5,
+            duration_secs: 22.0,
+            trim_dead_frames: true,
+            source: "duke-director".to_string(),
+        });
         hub.publish(DukeEvent::GameExited {
             title: "Hades II".to_string(),
             exe_name: "Hades2.exe".to_string(),
@@ -659,6 +708,12 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, DukeEvent::ProfileSwitch { platform_id: 7, .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, DukeEvent::VoiceMacroTriggered { hold_ms: 35, .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, DukeEvent::HighlightClipRequested { intensity: 94, .. })));
         assert!(events
             .iter()
             .any(|e| matches!(e, DukeEvent::GameExited { app_id: 1145350, .. })));

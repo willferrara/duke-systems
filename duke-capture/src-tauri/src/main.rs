@@ -1,6 +1,8 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ai_bridge;
+
 use duke_core::pipe_ipc::{DukeBus, DukeEvent};
 use duke_core::shm_bus::{DukeShmBus, ShmEventType, ShmSourceApp};
 use duke_core::tray_daemon::{handle_run_event, install_standard_tray, TrayDaemonConfig, TrayDaemonState};
@@ -295,6 +297,9 @@ pub struct ClipEntry {
 struct EncodedSegment {
     duration_ms: u64,
     bytes: Vec<u8>,
+    motion_score: f32,
+    sys_rms: f32,
+    transient_spike: bool,
 }
 
 struct AudioMixerBuffers {
@@ -1301,6 +1306,7 @@ fn spawn_wasapi_workers(mic_device_id: Option<String>, generation: u64) {
                                                     .collect();
                                                 let pct = ((peak.sqrt() * 100.0).round() as u32).min(100);
                                                 SYSTEM_LEVEL_PCT.store(pct, Ordering::Relaxed);
+                                                ai_bridge::on_wasapi_samples(false, &scaled);
 
                                                 if REPLAY_RUNNING.load(Ordering::Relaxed) {
                                                     if let Ok(mut guard) = hub_sys.lock() {
@@ -1454,6 +1460,7 @@ fn spawn_wasapi_workers(mic_device_id: Option<String>, generation: u64) {
                                                     .collect();
                                                 let pct = ((peak.sqrt() * 100.0).round() as u32).min(100);
                                                 MIC_LEVEL_PCT.store(pct, Ordering::Relaxed);
+                                                ai_bridge::on_wasapi_samples(true, &scaled);
 
                                                 if REPLAY_RUNNING.load(Ordering::Relaxed) {
                                                     if let Ok(mut guard) = hub_mic.lock() {
@@ -1924,9 +1931,13 @@ fn encode_segment_mf_ram(seg: &RawSegmentInput) -> Result<EncodedSegment, String
         if mp4_bytes.is_empty() {
             return Err("Encoded segment produced 0 bytes.".to_string());
         }
+        let (motion_score, sys_rms, _mic_rms, transient_spike) = ai_bridge::current_signal_snapshot();
         Ok(EncodedSegment {
             duration_ms: seg.duration_ms,
             bytes: mp4_bytes,
+            motion_score,
+            sys_rms,
+            transient_spike,
         })
     }
     #[cfg(not(target_os = "windows"))]
@@ -2003,6 +2014,7 @@ fn spawn_capture_pipeline(app: AppHandle) {
 
             let mut seg_frames: Vec<Vec<u8>> = Vec::with_capacity(frames_per_seg);
 
+            let mut frame_counter: u64 = 0;
             while !CAPTURE_STOP_SIGNAL.load(Ordering::Relaxed) && REPLAY_RUNNING.load(Ordering::Relaxed) {
                 let tick_start = Instant::now();
 
@@ -2014,6 +2026,10 @@ fn spawn_capture_pipeline(app: AppHandle) {
                 let (sw, sh, bgra) = capturer.capture_bgra_frame();
                 let (cur_w, cur_h) = target_dimensions(sw, sh, &live_cfg.resolution);
                 let frame_scaled = downscale_bgra_nearest(&bgra, sw, sh, cur_w, cur_h);
+                frame_counter = frame_counter.wrapping_add(1);
+                if frame_counter % 6 == 0 {
+                    let _ = ai_bridge::update_video_motion_and_frame(&frame_scaled, cur_w, cur_h);
+                }
                 seg_frames.push(frame_scaled);
 
                 if seg_frames.len() >= frames_per_seg {
@@ -2474,6 +2490,172 @@ async fn save_replay_tagged(
 
     ACTIVE_SAVE_IN_FLIGHT.store(false, Ordering::SeqCst);
     result
+}
+
+async fn save_director_highlight_internal(
+    app: &AppHandle,
+    game_override: Option<String>,
+    achievement_or_boss: Option<String>,
+    intensity: u8,
+    duration_secs: f32,
+    trim_dead_frames: bool,
+) -> Result<ClipEntry, String> {
+    if ACTIVE_SAVE_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+        return Err("Clip save already in progress...".to_string());
+    }
+
+    let result = tokio::task::spawn_blocking({
+        let app_clone = app.clone();
+        move || {
+            let cfg = get_config_lock(Some(&app_clone))
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_else(|_| default_config(Some(&app_clone)));
+
+            let segments: Vec<EncodedSegment> = get_ring_buffer()
+                .lock()
+                .map(|rb| rb.iter().cloned().collect())
+                .unwrap_or_default();
+
+            let summaries: Vec<ai_bridge::SegmentSignalSummary> = segments
+                .iter()
+                .enumerate()
+                .map(|(index, seg)| {
+                    let combined = (seg.motion_score * 0.50
+                        + (seg.sys_rms * 1.4).min(1.0) * 0.35
+                        + if seg.transient_spike { 0.30 } else { 0.0 })
+                    .clamp(0.0, 1.0);
+                    ai_bridge::SegmentSignalSummary {
+                        index,
+                        duration_ms: seg.duration_ms,
+                        motion_score: seg.motion_score,
+                        sys_rms: seg.sys_rms,
+                        transient_spike: seg.transient_spike,
+                        combined_score: combined,
+                    }
+                })
+                .collect();
+
+            let chosen = ai_bridge::select_highlight_window(&summaries, trim_dead_frames, duration_secs)
+                .ok_or_else(|| {
+                    "Replay ring buffer has no completed segments yet (wait ~2 seconds after starting).".to_string()
+                })?;
+
+            let slice = &segments[chosen.start_idx..chosen.end_idx_exclusive];
+
+            let game_raw = game_override
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(resolve_active_game_tag);
+            let game_name = sanitize_filename_part(&game_raw);
+
+            let clips_root = PathBuf::from(&cfg.clips_dir);
+            let game_dir = clips_root.join(&game_name);
+            fs::create_dir_all(&game_dir)
+                .map_err(|e| format!("Failed creating clip folder '{}': {}", game_dir.display(), e))?;
+
+            let now_secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let stamp = format_timestamp_filename(now_secs);
+            let final_intensity = intensity.max(chosen.peak_intensity);
+            let tag_suffix = match achievement_or_boss.as_deref() {
+                Some(label) if !label.trim().is_empty() => {
+                    format!("{}__I{}", sanitize_filename_part(label), final_intensity)
+                }
+                _ => format!("AI_Highlight_I{}", final_intensity),
+            };
+            let file_name = format_achievement_clip_filename(&game_name, Some(&tag_suffix), &stamp);
+            let out_path = game_dir.join(&file_name);
+
+            #[cfg(target_os = "windows")]
+            stitch_ram_segments_mf(slice, &out_path, cfg.bitrate_kbps * 1000)?;
+
+            let meta = fs::metadata(&out_path)
+                .map_err(|e| format!("Saved highlight metadata unreadable: {}", e))?;
+            let duration_secs = parse_mp4_duration_secs(&out_path);
+
+            let clip = ClipEntry {
+                id: out_path.to_string_lossy().to_string(),
+                file_name,
+                full_path: out_path.to_string_lossy().to_string(),
+                game_name,
+                size_bytes: meta.len(),
+                duration_secs,
+                created_at: now_secs,
+            };
+
+            if let Some(bus) = DUKE_BUS.get() {
+                bus.publish(DukeEvent::ClipSaved {
+                    game_title: clip.game_name.clone(),
+                    file_path: clip.full_path.clone(),
+                    duration_secs: clip.duration_secs as f32,
+                });
+            }
+
+            Ok(clip)
+        }
+    })
+    .await
+    .map_err(|e| format!("Director save worker panicked: {}", e))?;
+
+    ACTIVE_SAVE_IN_FLIGHT.store(false, Ordering::SeqCst);
+    result
+}
+
+#[tauri::command]
+fn get_wasapi_ai_stream_telemetry() -> ai_bridge::AiSignalTelemetry {
+    let sys_pct = SYSTEM_LEVEL_PCT.load(Ordering::Relaxed);
+    let mic_pct = MIC_LEVEL_PCT.load(Ordering::Relaxed);
+    if let Ok(rb) = get_ring_buffer().lock() {
+        ai_bridge::build_ring_telemetry_queue(sys_pct, mic_pct, &rb, |s| s.duration_ms)
+    } else {
+        ai_bridge::AiSignalTelemetry {
+            system_peak_pct: sys_pct,
+            mic_peak_pct: mic_pct,
+            sys_rms: 0.0,
+            mic_rms: 0.0,
+            transient_spike: false,
+            motion_score: 0.0,
+            ring_segments: 0,
+            ring_duration_secs: 0.0,
+            shm_active: ai_bridge::get_audio_tap_shm().is_some(),
+        }
+    }
+}
+
+#[tauri::command]
+async fn capture_latest_frame_snapshot(app: AppHandle) -> Result<ai_bridge::VisionFrameSnapshotInfo, String> {
+    tokio::task::spawn_blocking(move || {
+        ai_bridge::get_cached_or_capture_frame(&app, || {
+            let mut cap = ScreenCapturer::new();
+            cap.capture_bgra_frame()
+        })
+    })
+    .await
+    .map_err(|e| format!("Vision capture worker panicked: {}", e))?
+}
+
+#[tauri::command]
+async fn save_director_highlight_clip(
+    app: AppHandle,
+    game_override: Option<String>,
+    achievement_or_boss: Option<String>,
+    intensity: Option<u8>,
+    duration_secs: Option<f32>,
+    trim_dead_frames: Option<bool>,
+) -> Result<ClipEntry, String> {
+    let clip = save_director_highlight_internal(
+        &app,
+        game_override,
+        achievement_or_boss,
+        intensity.unwrap_or(80),
+        duration_secs.unwrap_or(22.0),
+        trim_dead_frames.unwrap_or(true),
+    )
+    .await?;
+    let _ = app.emit("clip-saved", &clip);
+    Ok(clip)
 }
 
 fn collect_clips_in_dir(root: &Path) -> Vec<ClipEntry> {
@@ -3470,6 +3652,28 @@ fn main() {
                                         }
                                     });
                                 }
+                                ShmEventType::HighlightPeak
+                                    if REPLAY_RUNNING.load(Ordering::Relaxed) =>
+                                {
+                                    if let Some((intensity, dur_secs, tag)) = frame.decode_highlight_peak() {
+                                        let clip_app = shm_app.clone();
+                                        let label = if tag.trim().is_empty() { None } else { Some(tag) };
+                                        tauri::async_runtime::spawn(async move {
+                                            if let Ok(clip) = save_director_highlight_internal(
+                                                &clip_app,
+                                                None,
+                                                label,
+                                                intensity,
+                                                dur_secs as f32,
+                                                true,
+                                            )
+                                            .await
+                                            {
+                                                let _ = clip_app.emit("clip-saved", clip);
+                                            }
+                                        });
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -3537,6 +3741,30 @@ fn main() {
                             }
                         });
                     }
+                    DukeEvent::HighlightClipRequested {
+                        game_title,
+                        achievement_or_boss,
+                        intensity,
+                        duration_secs,
+                        trim_dead_frames,
+                        ..
+                    } if REPLAY_RUNNING.load(Ordering::Relaxed) => {
+                        let clip_app = bus_app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Ok(clip) = save_director_highlight_internal(
+                                &clip_app,
+                                game_title,
+                                achievement_or_boss,
+                                intensity,
+                                duration_secs,
+                                trim_dead_frames,
+                            )
+                            .await
+                            {
+                                let _ = clip_app.emit("clip-saved", clip);
+                            }
+                        });
+                    }
                     _ => {}
                 })
             });
@@ -3562,6 +3790,20 @@ fn main() {
                         }),
                     );
                     trim_ticks += 1;
+                    if trim_ticks % 6 == 0 {
+                        let tel = get_wasapi_ai_stream_telemetry();
+                        if tel.transient_spike || REPLAY_RUNNING.load(Ordering::Relaxed) {
+                            if let Some(bus) = DUKE_BUS.get() {
+                                bus.publish(DukeEvent::CaptureSignalTelemetry {
+                                    system_peak_pct: tel.system_peak_pct,
+                                    mic_peak_pct: tel.mic_peak_pct,
+                                    transient_spike: tel.transient_spike,
+                                    motion_score: tel.motion_score,
+                                    ring_duration_secs: tel.ring_duration_secs,
+                                });
+                            }
+                        }
+                    }
                     // Every ~60 seconds (705 * 85ms)
                     if trim_ticks >= 705 {
                         trim_ticks = 0;
@@ -3599,7 +3841,10 @@ fn main() {
             install_ffmpeg_essentials,
             set_auto_trim_enabled,
             trim_working_set,
-            get_system_telemetry
+            get_system_telemetry,
+            get_wasapi_ai_stream_telemetry,
+            capture_latest_frame_snapshot,
+            save_director_highlight_clip
         ])
         .build(tauri::generate_context!())
         .expect("error while building Duke Capture Tauri application");
