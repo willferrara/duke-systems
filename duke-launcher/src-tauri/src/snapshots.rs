@@ -82,6 +82,16 @@ pub struct SnapshotRestoreReport {
     pub elapsed_ms: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotGcReport {
+    pub games_scanned: usize,
+    pub snapshots_pruned: usize,
+    pub blobs_removed: usize,
+    pub bytes_freed: u64,
+    pub freed_formatted: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct StatIndexCache {
@@ -676,16 +686,8 @@ pub fn restore_snapshot_in_dir(
     })
 }
 
-pub fn delete_snapshot_in_cas(cas_dir: &Path, snapshot_id: &str) -> Result<Vec<GameSnapshotSummary>, String> {
-    let manifest_path = cas_dir
-        .join("manifests")
-        .join(format!("{}.json", snapshot_id));
-    if manifest_path.is_file() {
-        fs::remove_file(&manifest_path)
-            .map_err(|e| format!("Failed to delete snapshot manifest: {}", e))?;
-    }
-
-    // Collect every blob hash still referenced by remaining snapshots before pruning orphans.
+/// Removes unreferenced blobs inside `.duke-cas/blobs/` and returns `(blobs_removed, bytes_freed)`.
+pub fn gc_cas_blobs(cas_dir: &Path) -> Result<(usize, u64), String> {
     let mut referenced = HashSet::new();
     let manifests_dir = cas_dir.join("manifests");
     if manifests_dir.is_dir() {
@@ -700,6 +702,8 @@ pub fn delete_snapshot_in_cas(cas_dir: &Path, snapshot_id: &str) -> Result<Vec<G
         }
     }
 
+    let mut blobs_removed = 0usize;
+    let mut bytes_freed = 0u64;
     let blobs_dir = cas_dir.join("blobs");
     if blobs_dir.is_dir() {
         for entry in WalkDir::new(&blobs_dir).into_iter().flatten() {
@@ -710,11 +714,42 @@ pub fn delete_snapshot_in_cas(cas_dir: &Path, snapshot_id: &str) -> Result<Vec<G
                 continue;
             };
             if !referenced.contains(stem) {
-                let _ = fs::remove_file(entry.path());
+                let sz = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                if fs::remove_file(entry.path()).is_ok() {
+                    blobs_removed += 1;
+                    bytes_freed = bytes_freed.saturating_add(sz);
+                }
             }
         }
     }
 
+    Ok((blobs_removed, bytes_freed))
+}
+
+/// Keeps at most `max_count` newest snapshots inside `cas_dir/manifests/`, returning the count deleted.
+pub fn prune_snapshots_to_limit(cas_dir: &Path, max_count: usize) -> Result<usize, String> {
+    let keep = max_count.max(1);
+    let summaries = list_snapshots_in_cas(cas_dir)?;
+    let mut removed = 0usize;
+    for old in summaries.into_iter().skip(keep) {
+        let manifest_path = cas_dir.join("manifests").join(format!("{}.json", old.id));
+        if manifest_path.is_file() && fs::remove_file(&manifest_path).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+pub fn delete_snapshot_in_cas(cas_dir: &Path, snapshot_id: &str) -> Result<Vec<GameSnapshotSummary>, String> {
+    let manifest_path = cas_dir
+        .join("manifests")
+        .join(format!("{}.json", snapshot_id));
+    if manifest_path.is_file() {
+        fs::remove_file(&manifest_path)
+            .map_err(|e| format!("Failed to delete snapshot manifest: {}", e))?;
+    }
+
+    let _ = gc_cas_blobs(cas_dir)?;
     list_snapshots_in_cas(cas_dir)
 }
 
@@ -725,14 +760,67 @@ pub async fn create_game_snapshot(
 ) -> Result<GameSnapshotSummary, String> {
     let game_dir = resolve_game_dir_by_id(&game_id)?;
     let cas_dir = game_dir.join(CAS_DIR_NAME);
+    let max_keep = crate::load_settings_standalone()
+        .max_restore_points
+        .clamp(1, 50) as usize;
     let label_owned = label;
     tokio::task::spawn_blocking(move || {
         let manifest =
             create_snapshot_in_dir(&game_id, &game_dir, &cas_dir, label_owned.as_deref())?;
+        if prune_snapshots_to_limit(&cas_dir, max_keep).unwrap_or(0) > 0 {
+            let _ = gc_cas_blobs(&cas_dir);
+        }
         Ok(GameSnapshotSummary::from(&manifest))
     })
     .await
     .map_err(|e| format!("Snapshot worker failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn reclaim_snapshot_space() -> Result<SnapshotGcReport, String> {
+    let library = crate::load_library_standalone()?;
+    let max_keep = crate::load_settings_standalone()
+        .max_restore_points
+        .clamp(1, 50) as usize;
+    tokio::task::spawn_blocking(move || {
+        let mut seen_cas_dirs = HashSet::new();
+        let mut games_scanned = 0usize;
+        let mut snapshots_pruned = 0usize;
+        let mut blobs_removed = 0usize;
+        let mut bytes_freed = 0u64;
+
+        for entry in &library {
+            let game_dir = if !entry.install_dir.trim().is_empty()
+                && Path::new(&entry.install_dir).is_dir()
+            {
+                PathBuf::from(&entry.install_dir)
+            } else if !entry.exe_path.trim().is_empty() {
+                crate::resolve_game_root_dir(Path::new(&entry.exe_path))
+            } else {
+                continue;
+            };
+            let cas_dir = game_dir.join(CAS_DIR_NAME);
+            if !cas_dir.is_dir() || !seen_cas_dirs.insert(cas_dir.clone()) {
+                continue;
+            }
+            games_scanned += 1;
+            snapshots_pruned += prune_snapshots_to_limit(&cas_dir, max_keep).unwrap_or(0);
+            if let Ok((removed, freed)) = gc_cas_blobs(&cas_dir) {
+                blobs_removed += removed;
+                bytes_freed = bytes_freed.saturating_add(freed);
+            }
+        }
+
+        Ok(SnapshotGcReport {
+            games_scanned,
+            snapshots_pruned,
+            blobs_removed,
+            bytes_freed,
+            freed_formatted: crate::format_bytes(bytes_freed),
+        })
+    })
+    .await
+    .map_err(|e| format!("Restore point cleanup worker failed: {}", e))?
 }
 
 #[tauri::command]

@@ -78,7 +78,47 @@ export async function updateLauncherSettings(patch = {}) {
     psnNpsso:
       typeof patch.psnNpsso === "string" ? patch.psnNpsso : null,
     clearPsnNpsso:
-      typeof patch.clearPsnNpsso === "boolean" ? patch.clearPsnNpsso : null
+      typeof patch.clearPsnNpsso === "boolean" ? patch.clearPsnNpsso : null,
+    defaultSaveDir:
+      typeof patch.defaultSaveDir === "string" ? patch.defaultSaveDir : null,
+    downloadSpeedPreset:
+      typeof patch.downloadSpeedPreset === "string" ? patch.downloadSpeedPreset : null,
+    compactLibraryCards:
+      typeof patch.compactLibraryCards === "boolean" ? patch.compactLibraryCards : null,
+    performanceBoostEnabled:
+      typeof patch.performanceBoostEnabled === "boolean" ? patch.performanceBoostEnabled : null,
+    autoBackupSavesOnExit:
+      typeof patch.autoBackupSavesOnExit === "boolean" ? patch.autoBackupSavesOnExit : null,
+    cpuPriorityMode:
+      typeof patch.cpuPriorityMode === "string" ? patch.cpuPriorityMode : null,
+    ramTrimMode:
+      typeof patch.ramTrimMode === "string" ? patch.ramTrimMode : null,
+    autoFreezeMinimized:
+      typeof patch.autoFreezeMinimized === "boolean" ? patch.autoFreezeMinimized : null,
+    nvmeCacheBudgetPct:
+      typeof patch.nvmeCacheBudgetPct === "number" ? patch.nvmeCacheBudgetPct : null,
+    dohEnabled:
+      typeof patch.dohEnabled === "boolean" ? patch.dohEnabled : null,
+    customProxyUrl:
+      typeof patch.customProxyUrl === "string" ? patch.customProxyUrl : null,
+    customSpeedCapMbps:
+      typeof patch.customSpeedCapMbps === "number" ? patch.customSpeedCapMbps : null,
+    autoUnblockMotw:
+      typeof patch.autoUnblockMotw === "boolean" ? patch.autoUnblockMotw : null,
+    portableSandboxDefault:
+      typeof patch.portableSandboxDefault === "boolean" ? patch.portableSandboxDefault : null,
+    maxRestorePoints:
+      typeof patch.maxRestorePoints === "number" ? patch.maxRestorePoints : null,
+    blockGameTelemetry:
+      typeof patch.blockGameTelemetry === "boolean" ? patch.blockGameTelemetry : null,
+    globalLaunchArgs:
+      typeof patch.globalLaunchArgs === "string" ? patch.globalLaunchArgs : null,
+    swarmAutoSyncSaves:
+      typeof patch.swarmAutoSyncSaves === "boolean" ? patch.swarmAutoSyncSaves : null,
+    startMinimizedWithWindows:
+      typeof patch.startMinimizedWithWindows === "boolean"
+        ? patch.startMinimizedWithWindows
+        : null
   });
 }
 
@@ -520,6 +560,33 @@ export async function pickDownloadFolder() {
   return null;
 }
 
+export async function pickGameFolder() {
+  if (window.__TAURI__?.dialog?.open) {
+    const selected = await window.__TAURI__.dialog.open({
+      multiple: false,
+      directory: true,
+      title: "Select Game Folder"
+    });
+    return typeof selected === "string" ? selected : null;
+  }
+  return null;
+}
+
+export async function pickExecutableOrShortcutFile() {
+  if (window.__TAURI__?.dialog?.open) {
+    const selected = await window.__TAURI__.dialog.open({
+      multiple: false,
+      directory: false,
+      title: "Select Game Executable or Shortcut",
+      filters: [
+        { name: "Game Executable or Shortcut", extensions: ["exe", "lnk", "bat", "cmd"] }
+      ]
+    });
+    return typeof selected === "string" ? selected : null;
+  }
+  return null;
+}
+
 export function isValidHttpUrl(rawUrl) {
   try {
     const parsed = new URL(String(rawUrl || "").trim());
@@ -527,6 +594,22 @@ export function isValidHttpUrl(rawUrl) {
   } catch {
     return false;
   }
+}
+
+export function isValidDownloadUrl(rawUrl) {
+  const trimmed = String(rawUrl || "").trim();
+  if (!trimmed) return false;
+  if (isValidHttpUrl(trimmed)) return true;
+  if (/^duke:\/\/download\b/i.test(trimmed)) {
+    try {
+      const parsed = new URL(trimmed);
+      const inner = parsed.searchParams.get("url");
+      return Boolean(inner && isValidHttpUrl(inner));
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 export async function openExternalUrl(url) {
@@ -722,5 +805,35 @@ export async function triggerReplayClipIpc() {
 
 export async function purgeSuiteRamIpc() {
   return invokeCommand("purge_suite_ram_ipc");
+}
+
+export async function ingestDroppedPaths(paths = []) {
+  return invokeCommand("ingest_dropped_paths", {
+    paths: Array.isArray(paths) ? paths : []
+  });
+}
+
+export async function scanAndCleanDesktopShortcuts() {
+  return invokeCommand("scan_and_clean_desktop_shortcuts");
+}
+
+export async function autoFixGame(gameId) {
+  return invokeCommand("auto_fix_game", { gameId });
+}
+
+export async function getDiskFreeSpace(path = null) {
+  return invokeCommand("get_disk_free_space", { path: path || null });
+}
+
+export async function reclaimSnapshotSpace() {
+  return invokeCommand("reclaim_snapshot_space");
+}
+
+export async function registerDukeProtocol() {
+  return invokeCommand("register_duke_protocol");
+}
+
+export async function runSubsystemBenchmark() {
+  return invokeCommand("run_subsystem_benchmark");
 }
 

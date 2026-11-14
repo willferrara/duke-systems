@@ -4,6 +4,7 @@ import {
   applyCustomArtwork,
   applyGameUpdate,
   applyWindowBackdrop,
+  autoFixGame,
   beamGameFromPeer,
   buildDirectorySearchUrl,
   bulkImportSearchSites,
@@ -29,6 +30,7 @@ import {
   getActiveGameSessions,
   getCatalogGameDetails,
   getCatalogMmapStats,
+  getDiskFreeSpace,
   getGameAchievements,
   getGameCompatStatus,
   getGameExtendedTelemetry,
@@ -44,8 +46,10 @@ import {
   importExistingLibraries,
   importSourceFile,
   importSourceUrl,
+  ingestDroppedPaths,
   initWindowControls,
   invokeCommand,
+  isValidDownloadUrl,
   isValidHttpUrl,
   joinFriendSession,
   linkLocalGameWithSteamId,
@@ -59,6 +63,8 @@ import {
   pickAnyFileForScan,
   pickDownloadFolder,
   pickExecutableFile,
+  pickExecutableOrShortcutFile,
+  pickGameFolder,
   pickJsonSourceFile,
   pollGamepadState,
   preflightCheckExe,
@@ -66,13 +72,17 @@ import {
   purgeSuiteRamIpc,
   queryCatalogMmap,
   readClipboardText,
+  reclaimSnapshotSpace,
   refreshAllImportedSources,
   refreshImportedSource,
+  registerDukeProtocol,
   removeImportedSource,
   removeSearchSite,
   resetDefaultSearchSites,
   restoreGameSave,
   restoreGameSnapshot,
+  runSubsystemBenchmark,
+  scanAndCleanDesktopShortcuts,
   searchImportedSources,
   searchSteamGridDbArtwork,
   setGameAchievementsPath,
@@ -158,6 +168,26 @@ const state = {
   swarmEnabled: false,
   swarmNodeName: "",
   swarmPeers: [],
+  settingsTab: "essentials",
+  defaultSaveDir: "",
+  downloadSpeedPreset: "max",
+  compactLibraryCards: false,
+  performanceBoostEnabled: true,
+  autoBackupSavesOnExit: true,
+  cpuPriorityMode: "auto",
+  ramTrimMode: "standard",
+  autoFreezeMinimized: false,
+  nvmeCacheBudgetPct: 25,
+  dohEnabled: true,
+  customProxyUrl: "",
+  customSpeedCapMbps: 0,
+  autoUnblockMotw: true,
+  portableSandboxDefault: false,
+  maxRestorePoints: 5,
+  blockGameTelemetry: true,
+  globalLaunchArgs: "",
+  swarmAutoSyncSaves: true,
+  startMinimizedWithWindows: false,
   clipboardBannerUrl: "",
   seenClipboardUrls: new Set(),
   clipboardFocusTimer: null,
@@ -256,6 +286,93 @@ function applyTheme(themeId) {
   document.body.setAttribute("data-theme", valid);
   localStorage.setItem("duke_launcher_theme", valid);
   applyWindowBackdrop(valid).catch(() => {});
+  renderThemes();
+}
+
+function applyCompactLibraryCards(enabled) {
+  state.compactLibraryCards = Boolean(enabled);
+  el("library-grid")?.classList.toggle("compact-cards", state.compactLibraryCards);
+  if (el("setting-compact-cards")) {
+    el("setting-compact-cards").checked = state.compactLibraryCards;
+  }
+}
+
+function snapNvmeBudgetPct(rawPct) {
+  const val = Number(rawPct);
+  const stops = [0, 10, 25, 40];
+  let closest = 25;
+  let minDiff = Infinity;
+  for (const s of stops) {
+    const diff = Math.abs(val - s);
+    if (diff < minDiff) {
+      minDiff = diff;
+      closest = s;
+    }
+  }
+  return closest;
+}
+
+function renderNvmeBudgetUi(pct) {
+  const snapped = snapNvmeBudgetPct(pct);
+  const label =
+    snapped === 0
+      ? "0% Off"
+      : snapped === 25
+        ? "25% Recommended"
+        : snapped === 40
+          ? "40% Max"
+          : `${snapped}%`;
+  if (el("setting-nvme-cache-budget")) {
+    el("setting-nvme-cache-budget").value = String(snapped);
+  }
+  if (el("setting-nvme-cache-budget-val")) {
+    el("setting-nvme-cache-budget-val").textContent = label;
+  }
+  document.querySelectorAll("#nvme-budget-presets [data-nvme-pct]").forEach((btn) => {
+    btn.classList.toggle("active", Number(btn.dataset.nvmePct) === snapped);
+  });
+}
+
+async function refreshSettingsDriveSpaceBar(customPath = null) {
+  try {
+    const info = await getDiskFreeSpace(customPath || state.defaultSaveDir || null);
+    if (!info) return;
+    if (el("setting-default-save-dir") && info.path) {
+      el("setting-default-save-dir").value = info.path;
+      if (!state.defaultSaveDir) {
+        state.defaultSaveDir = info.path;
+      }
+    }
+    if (el("settings-drive-space-label")) {
+      el("settings-drive-space-label").textContent = `${info.rootDrive || "Drive"} · ${info.freeFormatted || "--"} free of ${info.totalFormatted || "--"}`;
+    }
+    const usedPct = Math.max(0, Math.min(100, Number(info.usedPct || 0)));
+    if (el("settings-drive-space-pct")) {
+      el("settings-drive-space-pct").textContent = `${usedPct.toFixed(0)}% used (${Number(info.freePct || 0).toFixed(0)}% free)`;
+    }
+    if (el("settings-drive-space-fill")) {
+      el("settings-drive-space-fill").style.width = `${usedPct.toFixed(1)}%`;
+    }
+  } catch {
+    // Drive telemetry is non-critical when path is pending.
+  }
+}
+
+function switchSettingsTab(tabName = "essentials") {
+  const target = tabName === "advanced" ? "advanced" : "essentials";
+  state.settingsTab = target;
+  el("settings-panel-essentials")?.classList.toggle("hidden", target !== "essentials");
+  el("settings-panel-advanced")?.classList.toggle("hidden", target !== "advanced");
+  const essBtn = el("btn-settings-tab-essentials");
+  const advBtn = el("btn-settings-tab-advanced");
+  if (essBtn) {
+    essBtn.classList.toggle("active", target === "essentials");
+    essBtn.setAttribute("aria-selected", String(target === "essentials"));
+  }
+  if (advBtn) {
+    advBtn.classList.toggle("active", target === "advanced");
+    advBtn.setAttribute("aria-selected", String(target === "advanced"));
+  }
 }
 
 function renderThemes() {
@@ -819,8 +936,13 @@ async function openGameDetail(gameId) {
           : "disabled"
         : "inherit";
   }
-  if (el("detail-description")) el("detail-description").textContent = "Querying Steam store metadata over DoH...";
+  if (el("detail-description")) el("detail-description").textContent = "Loading game description and details...";
   if (el("detail-news-list")) el("detail-news-list").innerHTML = `<div class="panel-sub">Loading recent updates...</div>`;
+  if (el("detail-autofix-summary")) {
+    el("detail-autofix-summary").textContent = "";
+    el("detail-autofix-summary").classList.add("hidden");
+    el("detail-autofix-summary").classList.remove("warn");
+  }
 
   loadDetailSavePaths(game, requestId, false);
   loadAllDetailPanels(game, requestId);
@@ -1127,11 +1249,11 @@ function renderDetailUpdateState(game, checkReport = null) {
 function renderDetailCompat(report) {
   state.detailCompatStatus = report || null;
   if (el("detail-compat-arch-pill")) {
-    const base = report?.is32bit ? "PE32 (32-bit)" : "PE32+ (64-bit)";
-    el("detail-compat-arch-pill").textContent = report?.largeAddressAware ? `${base} · LAA` : base;
+    const base = report?.is32bit ? "32-bit Game" : "64-bit Game";
+    el("detail-compat-arch-pill").textContent = report?.largeAddressAware ? `${base} · 4 GB Ready` : base;
   }
   if (el("detail-compat-status")) {
-    el("detail-compat-status").textContent = report?.statusMessage || "PE inspection complete.";
+    el("detail-compat-status").textContent = report?.statusMessage || "Compatibility check finished.";
   }
 
   const strip = el("detail-compat-dx-list");
@@ -1139,10 +1261,10 @@ function renderDetailCompat(report) {
     const apis = Array.isArray(report?.legacyDxImports) ? report.legacyDxImports : [];
     const pills = apis.map((api) => `<span class="pill accent mono-num">${escapeHtml(api)}</span>`);
     if (apis.length === 0) {
-      pills.push(`<span class="pill">No D3D8-11 legacy imports</span>`);
+      pills.push(`<span class="pill">Modern DirectX Ready</span>`);
     }
     pills.push(
-      `<span class="pill mono-num">${report?.dxvkSourceReady ? "DXVK Repo Ready" : "DXVK Repo Empty"}</span>`
+      `<span class="pill mono-num">${report?.dxvkSourceReady ? "Graphics Fix Ready" : "Graphics Fix Optional"}</span>`
     );
     strip.innerHTML = pills.join("");
   }
@@ -1428,11 +1550,113 @@ function toggleFriendsDrawer(forceOpen = null) {
 
 function syncSettingsUiFromBackend(settings) {
   if (!settings) return;
+  state.autoCleanCompleted = Boolean(settings.autoCleanCompleted ?? true);
+  state.autoDetectClipboard = Boolean(settings.autoDetectClipboard ?? true);
+  state.nvmePrefetchEnabled = Boolean(settings.nvmePrefetchEnabled ?? true);
+  state.swarmEnabled = Boolean(settings.swarmEnabled ?? false);
+  state.swarmNodeName = String(settings.swarmNodeName || "");
+  state.swarmPeers = Array.isArray(settings.swarmPeers) ? settings.swarmPeers : [];
+  state.steamgriddbApiKey = String(settings.steamgriddbApiKey || "");
+  state.suspendHotkey = String(settings.suspendHotkey || "Ctrl+Alt+P");
   state.steamApiKeyConfigured = Boolean(settings.steamApiKeyConfigured);
   state.xboxApiKeyConfigured = Boolean(settings.xboxApiKeyConfigured);
   state.psnNpssoConfigured = Boolean(settings.psnNpssoConfigured);
   state.steamIdOverride = String(settings.steamIdOverride || "");
   state.detectedSteamId = String(settings.detectedSteamId || "");
+
+  // Essentials fields
+  state.defaultSaveDir = String(settings.defaultSaveDir || state.customSaveDir || "");
+  if (state.defaultSaveDir) {
+    state.customSaveDir = state.defaultSaveDir;
+    localStorage.setItem("duke_launcher_dl_dir", state.defaultSaveDir);
+  }
+  state.downloadSpeedPreset = String(settings.downloadSpeedPreset || "max");
+  state.compactLibraryCards = Boolean(settings.compactLibraryCards ?? false);
+  state.performanceBoostEnabled = Boolean(settings.performanceBoostEnabled ?? true);
+  state.autoBackupSavesOnExit = Boolean(settings.autoBackupSavesOnExit ?? true);
+
+  // Advanced Engine fields
+  state.cpuPriorityMode = String(settings.cpuPriorityMode || "auto");
+  state.ramTrimMode = String(settings.ramTrimMode || "standard");
+  state.autoFreezeMinimized = Boolean(settings.autoFreezeMinimized ?? false);
+  state.nvmeCacheBudgetPct = snapNvmeBudgetPct(settings.nvmeCacheBudgetPct ?? 25);
+  state.dohEnabled = Boolean(settings.dohEnabled ?? true);
+  state.customProxyUrl = String(settings.customProxyUrl || "");
+  state.customSpeedCapMbps = Number(settings.customSpeedCapMbps || 0);
+  state.autoUnblockMotw = Boolean(settings.autoUnblockMotw ?? true);
+  state.portableSandboxDefault = Boolean(settings.portableSandboxDefault ?? false);
+  state.maxRestorePoints = Number(settings.maxRestorePoints || 5);
+  state.blockGameTelemetry = Boolean(settings.blockGameTelemetry ?? true);
+  state.globalLaunchArgs = String(settings.globalLaunchArgs || "");
+  state.swarmAutoSyncSaves = Boolean(settings.swarmAutoSyncSaves ?? true);
+  state.startMinimizedWithWindows = Boolean(settings.startMinimizedWithWindows ?? false);
+
+  applyCompactLibraryCards(state.compactLibraryCards);
+
+  if (el("setting-default-save-dir") && state.defaultSaveDir) {
+    el("setting-default-save-dir").value = state.defaultSaveDir;
+  }
+  if (el("input-dl-dir") && state.customSaveDir) {
+    el("input-dl-dir").value = state.customSaveDir;
+  }
+  refreshSettingsDriveSpaceBar(state.defaultSaveDir || null);
+
+  document.querySelectorAll("#setting-speed-preset-group [data-speed-preset]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.speedPreset === state.downloadSpeedPreset);
+  });
+
+  if (el("setting-performance-boost")) {
+    el("setting-performance-boost").checked = state.performanceBoostEnabled;
+  }
+  if (el("setting-auto-backup-saves-exit")) {
+    el("setting-auto-backup-saves-exit").checked = state.autoBackupSavesOnExit;
+  }
+
+  if (el("setting-cpu-priority-mode")) el("setting-cpu-priority-mode").value = state.cpuPriorityMode;
+  if (el("setting-ram-trim-mode")) el("setting-ram-trim-mode").value = state.ramTrimMode;
+  if (el("setting-auto-freeze-minimized")) {
+    el("setting-auto-freeze-minimized").checked = state.autoFreezeMinimized;
+  }
+  if (el("setting-nvme-prefetch")) el("setting-nvme-prefetch").checked = state.nvmePrefetchEnabled;
+  renderNvmeBudgetUi(state.nvmeCacheBudgetPct);
+
+  if (el("setting-doh-enabled")) el("setting-doh-enabled").checked = state.dohEnabled;
+  if (el("sidebar-doh-badge")) {
+    el("sidebar-doh-badge").textContent = state.dohEnabled ? "Active" : "Bypassed";
+  }
+  if (el("setting-custom-proxy-url")) el("setting-custom-proxy-url").value = state.customProxyUrl;
+  if (el("setting-custom-speed-cap")) {
+    el("setting-custom-speed-cap").value =
+      state.customSpeedCapMbps > 0 ? String(state.customSpeedCapMbps) : "";
+  }
+  if (el("setting-auto-unblock-motw")) el("setting-auto-unblock-motw").checked = state.autoUnblockMotw;
+  if (el("setting-auto-clean-completed")) el("setting-auto-clean-completed").checked = state.autoCleanCompleted;
+  if (el("setting-auto-detect-clipboard")) {
+    el("setting-auto-detect-clipboard").checked = state.autoDetectClipboard;
+  }
+
+  if (el("setting-portable-sandbox-default")) {
+    el("setting-portable-sandbox-default").checked = state.portableSandboxDefault;
+  }
+  if (el("setting-max-restore-points")) {
+    el("setting-max-restore-points").value = String(state.maxRestorePoints);
+  }
+  if (el("setting-block-game-telemetry")) {
+    el("setting-block-game-telemetry").checked = state.blockGameTelemetry;
+  }
+  if (el("setting-global-launch-args")) el("setting-global-launch-args").value = state.globalLaunchArgs;
+
+  if (el("setting-swarm-enabled")) el("setting-swarm-enabled").checked = state.swarmEnabled;
+  if (el("setting-swarm-node-name")) el("setting-swarm-node-name").value = state.swarmNodeName;
+  if (el("setting-swarm-peers")) el("setting-swarm-peers").value = state.swarmPeers.join(", ");
+  if (el("setting-swarm-auto-sync-saves")) {
+    el("setting-swarm-auto-sync-saves").checked = state.swarmAutoSyncSaves;
+  }
+  if (el("setting-steamgriddb-key")) el("setting-steamgriddb-key").value = state.steamgriddbApiKey;
+  if (el("setting-suspend-hotkey")) el("setting-suspend-hotkey").value = state.suspendHotkey;
+  if (el("setting-start-minimized-windows")) {
+    el("setting-start-minimized-windows").checked = state.startMinimizedWithWindows;
+  }
 
   if (el("setting-detected-steam-id")) {
     el("setting-detected-steam-id").textContent =
@@ -2236,12 +2460,12 @@ function updateCatalogResultsSummary() {
 
   if (statusSub) {
     if (c.syncing) {
-      statusSub.textContent = `Streaming index over DoH · ${c.totalCached.toLocaleString()} / ${Number(c.syncTarget || 30000).toLocaleString()}+ indexed`;
+      statusSub.textContent = `Updating catalog · ${c.totalCached.toLocaleString()} / ${Number(c.syncTarget || 30000).toLocaleString()}+ games ready`;
     } else if (c.fetchedAt > 0) {
       const when = new Date(c.fetchedAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      statusSub.textContent = `${c.fromCache ? "Zero-copy 24h .dkcat mmap" : "Synced via encrypted DoH"} · Updated ${when} · ${c.totalCached.toLocaleString()} indexed`;
+      statusSub.textContent = `${c.fromCache ? "Instant offline index" : "Updated catalog"} · Synced ${when} · ${c.totalCached.toLocaleString()} games`;
     } else {
-      statusSub.textContent = "Zero-copy .dkcat mmap engine · Ready";
+      statusSub.textContent = "Instant offline game catalog · Ready";
     }
   }
 
@@ -2552,7 +2776,7 @@ function populateCatalogModal(entry) {
   if (el("catalog-modal-title")) el("catalog-modal-title").textContent = entry.name || "Steam Game";
   if (el("catalog-modal-desc")) {
     el("catalog-modal-desc").textContent =
-      entry.shortDescription || "Steam catalog entry indexed locally over DoH.";
+      entry.shortDescription || "Game catalog entry stored in local offline library.";
   }
 
   const priceLabel =
@@ -2700,7 +2924,7 @@ async function runSgdbSearch() {
   if (!queryOrAppId) return;
 
   const container = el("sgdb-results-container");
-  if (container) container.innerHTML = `<div class="panel-sub">Querying SteamGridDB over DoH...</div>`;
+  if (container) container.innerHTML = `<div class="panel-sub">Searching artwork on SteamGridDB...</div>`;
 
   try {
     state.sgdbResults = await searchSteamGridDbArtwork(queryOrAppId);
@@ -2770,19 +2994,19 @@ function renderRestoreSnapshots() {
                 `<option value="${escapeHtml(s.path)}">${escapeHtml(s.filename)} (${escapeHtml(s.sizeFormatted || formatBytesJs(s.sizeBytes))})</option>`
             )
             .join("")
-        : `<option value="">No backup snapshots found</option>`;
+        : `<option value="">No saved backups found</option>`;
   }
 
   if (list) {
     if (snaps.length === 0) {
-      list.innerHTML = `<div class="panel-sub">No rolling snapshots exist for this game yet. Click Backup Saves first.</div>`;
+      list.innerHTML = `<div class="panel-sub">No save-file backups exist for this game yet. Click Back Up Saves first.</div>`;
     } else {
       list.innerHTML = snaps
         .map(
           (s) => `
           <div class="restore-snapshot-item">
             <span>${escapeHtml(s.filename)} · ${escapeHtml(formatSyncTimestamp(s.createdTs))}</span>
-            <span>${escapeHtml(s.sizeFormatted || formatBytesJs(s.sizeBytes))} (${Number(s.rootCount || 1)} root${Number(s.rootCount || 1) === 1 ? "" : "s"})</span>
+            <span>${escapeHtml(s.sizeFormatted || formatBytesJs(s.sizeBytes))} (${Number(s.rootCount || 1)} folder${Number(s.rootCount || 1) === 1 ? "" : "s"})</span>
           </div>
         `
         )
@@ -2794,9 +3018,9 @@ function renderRestoreSnapshots() {
 async function openRestoreSaveModal(game) {
   if (!game) return;
   state.restoreSaveState = { gameId: game.id, snapshots: [] };
-  if (el("restore-save-title")) el("restore-save-title").textContent = `Restore Save: ${game.title}`;
+  if (el("restore-save-title")) el("restore-save-title").textContent = `Restore Saves: ${game.title}`;
   if (el("restore-save-subtitle")) {
-    el("restore-save-subtitle").textContent = "Select a rolling zip snapshot to safely restore your game save files.";
+    el("restore-save-subtitle").textContent = "Pick a saved backup below to safely restore your game save files.";
   }
   renderRestoreSnapshots();
   el("restore-save-modal")?.classList.remove("hidden");
@@ -2818,7 +3042,7 @@ function renderSnapshotsModalList() {
     ? state.snapshotModalState.snapshots
     : [];
   if (snaps.length === 0) {
-    list.innerHTML = `<div class="panel-sub">No copy-on-write snapshots yet. Enter a label and click Create Snapshot.</div>`;
+    list.innerHTML = `<div class="panel-sub">No restore points saved yet. Click Save Restore Point above to create one in 1 second.</div>`;
     return;
   }
   list.innerHTML = snaps
@@ -2827,10 +3051,10 @@ function renderSnapshotsModalList() {
       <div class="restore-snapshot-item">
         <div>
           <strong>${escapeHtml(s.label || s.id)}</strong>
-          <span class="panel-sub"> · ${escapeHtml(formatSyncTimestamp(s.createdAt))} · ${Number(s.fileCount || 0).toLocaleString()} files (${escapeHtml(formatBytesJs(s.totalBytes || 0))}, ${Number(s.deduplicatedFiles || 0)} deduped, ${Number(s.elapsedMs || 0)} ms)</span>
+          <span class="panel-sub"> · ${escapeHtml(formatSyncTimestamp(s.createdAt))} · ${Number(s.fileCount || 0).toLocaleString()} files (${escapeHtml(formatBytesJs(s.totalBytes || 0))}, ${Number(s.deduplicatedFiles || 0)} shared, ${Number(s.elapsedMs || 0)} ms)</span>
         </div>
         <div class="snapshot-row-actions">
-          <button type="button" class="btn btn-primary btn-xs" data-snapshot-restore="${escapeHtml(s.id)}">Restore</button>
+          <button type="button" class="btn btn-primary btn-xs" data-snapshot-restore="${escapeHtml(s.id)}">Restore Backup</button>
           <button type="button" class="btn btn-danger-ghost btn-xs" data-snapshot-delete="${escapeHtml(s.id)}">Delete</button>
         </div>
       </div>
@@ -2842,9 +3066,9 @@ function renderSnapshotsModalList() {
 async function openSnapshotsModal(game) {
   if (!game) return;
   state.snapshotModalState = { gameId: game.id, gameTitle: game.title, snapshots: [] };
-  if (el("snapshots-modal-title")) el("snapshots-modal-title").textContent = `Snapshots: ${game.title}`;
+  if (el("snapshots-modal-title")) el("snapshots-modal-title").textContent = `Restore Points: ${game.title}`;
   if (el("input-snapshot-label")) el("input-snapshot-label").value = "";
-  if (el("snapshots-list")) el("snapshots-list").innerHTML = `<div class="panel-sub">Loading .duke-cas manifests...</div>`;
+  if (el("snapshots-list")) el("snapshots-list").innerHTML = `<div class="panel-sub">Loading saved restore points...</div>`;
   el("snapshots-modal")?.classList.remove("hidden");
   try {
     const snaps = await listGameSnapshots(game.id);
@@ -2868,11 +3092,11 @@ function renderPreflightModal() {
   const missing = Array.isArray(report.missingDlls) ? report.missingDlls : [];
   const totalImported = Array.isArray(report.importedDlls) ? report.importedDlls.length : 0;
   if (subEl) {
-    subEl.textContent = `${report.architecture || "PE"} · ${totalImported} imports scanned in ${Number(report.elapsedUs || 0)} us · ${report.systemDirChecked || "System32"}`;
+    subEl.textContent = `${report.architecture || "Windows App"} · ${totalImported} runtime files checked in ${Number(report.elapsedUs || 0)} us`;
   }
 
   if (missing.length === 0) {
-    listEl.innerHTML = `<div class="restore-snapshot-item"><span>All ${totalImported} imported DLLs resolved cleanly in game directory or Windows system path.</span></div>`;
+    listEl.innerHTML = `<div class="restore-snapshot-item"><span>All ${totalImported} required Windows runtime files are present and ready to play.</span></div>`;
   } else {
     listEl.innerHTML = missing
       .map(
@@ -2882,7 +3106,7 @@ function renderPreflightModal() {
             <strong>${escapeHtml(d.name)}</strong>
             ${d.isRuntimeHint ? `<span class="panel-sub"> (${escapeHtml(d.isRuntimeHint)})</span>` : ""}
           </div>
-          <span class="pill">${d.healCandidatePath ? "Local Redist Available" : "Missing Runtime"}</span>
+          <span class="pill">${d.healCandidatePath ? "Auto-Repair Available" : "Missing Runtime File"}</span>
         </div>
       `
       )
@@ -2897,8 +3121,8 @@ function openPreflightModal(game, report, manualInspect = false) {
   state.preflightModalState = { game, report, manualInspect };
   if (el("preflight-modal-title")) {
     el("preflight-modal-title").textContent = game
-      ? `Pre-Flight Check: ${game.title}`
-      : "Pre-Flight DLL Dependency Report";
+      ? `Missing Files Check: ${game.title}`
+      : "Missing Windows Files Check";
   }
   renderPreflightModal();
   el("preflight-modal")?.classList.remove("hidden");
@@ -3251,10 +3475,85 @@ function scheduleClipboardDetection() {
   }, 160);
 }
 
+async function handleIngestPathsFlow(paths) {
+  const cleanPaths = Array.isArray(paths)
+    ? paths.map((p) => String(p || "").trim()).filter(Boolean)
+    : [];
+  if (cleanPaths.length === 0) return null;
+
+  showToast("Adding dropped game to My Games...", "info", 2400);
+  try {
+    const res = await ingestDroppedPaths(cleanPaths);
+    if (Array.isArray(res?.library)) {
+      state.library = res.library;
+      invalidateSidebarIcons();
+      renderSidebarGameList();
+      renderLibraryGrid();
+      updateSidebarTelemetry();
+    }
+    const added = Number(res?.addedCount || 0);
+    const titles = Array.isArray(res?.addedTitles) ? res.addedTitles : [];
+    const skippedReasons = Array.isArray(res?.skippedReasons) ? res.skippedReasons : [];
+
+    if (added > 0) {
+      if (state.activeTab !== "library") {
+        switchTab("library", false);
+        renderLibraryGrid();
+      }
+      const label = titles.length > 0 ? titles.join(", ") : `${added} game(s)`;
+      showToast(`Added ${label} to My Games — ready to play.`, "success", 3600);
+    } else if (skippedReasons.length > 0) {
+      showToast(skippedReasons[0], "info", 3800);
+    } else {
+      showToast("No new game executables found in dropped items.", "info", 3200);
+    }
+    return res;
+  } catch (err) {
+    showToast(String(err), "error");
+    return null;
+  }
+}
+
+async function initDragAndDropIngestion() {
+  const overlay = el("drop-ingest-overlay");
+  const showOverlay = () => overlay?.classList.remove("hidden");
+  const hideOverlay = () => overlay?.classList.add("hidden");
+
+  window.addEventListener("dragover", (e) => {
+    e.preventDefault();
+  });
+  window.addEventListener("drop", (e) => {
+    e.preventDefault();
+    hideOverlay();
+  });
+
+  try {
+    const webview = window.__TAURI__?.webview?.getCurrentWebview?.();
+    if (webview && typeof webview.onDragDropEvent === "function") {
+      await webview.onDragDropEvent((event) => {
+        const type = event?.payload?.type;
+        if (type === "enter" || type === "over") {
+          showOverlay();
+        } else if (type === "leave" || type === "cancel") {
+          hideOverlay();
+        } else if (type === "drop") {
+          hideOverlay();
+          const paths = Array.isArray(event?.payload?.paths) ? event.payload.paths : [];
+          if (paths.length > 0) {
+            handleIngestPathsFlow(paths);
+          }
+        }
+      });
+    }
+  } catch {
+    // WebView drag-drop API may be unavailable in non-Tauri preview environments.
+  }
+}
+
 async function startDownloadFromUrl(urlVal, switchToDownloader = false) {
   const url = String(urlVal || el("input-dl-url")?.value || "").trim();
-  if (!isValidHttpUrl(url)) {
-    showToast("Enter a valid http:// or https:// URL.", "error");
+  if (!isValidDownloadUrl(url)) {
+    showToast("Enter a valid http://, https://, or duke:// download URL.", "error");
     return false;
   }
   const mode = el("select-dl-speed-mode")?.value || "unlimited";
@@ -3262,7 +3561,7 @@ async function startDownloadFromUrl(urlVal, switchToDownloader = false) {
   try {
     state.downloadJobs = await invokeCommand("enqueue_download", {
       url,
-      customSaveDir: state.customSaveDir || null,
+      customSaveDir: state.defaultSaveDir || state.customSaveDir || null,
       threads: 8,
       maxSpeedMbps
     });
@@ -3271,7 +3570,7 @@ async function startDownloadFromUrl(urlVal, switchToDownloader = false) {
     renderDownloadJobs();
     updateSidebarTelemetry();
     if (switchToDownloader) switchTab("downloader");
-    showToast("Added download to 8-worker queue.", "success");
+    showToast("Download started! Check Downloads to see progress.", "success");
     return true;
   } catch (err) {
     showToast(String(err), "error");
@@ -3296,9 +3595,18 @@ function wireEvents() {
         }
       }
       if (tab === "downloader") renderDownloadJobs();
-      if (tab === "sources" || tab === "settings") renderSources();
+      if (tab === "sources") renderSources();
+      if (tab === "settings") {
+        renderSources();
+        refreshSettingsDriveSpaceBar();
+        refreshSwarmAndMmapTelemetry();
+      }
     });
   });
+
+  // Settings Mode Switcher (Essentials vs. Advanced Engine)
+  el("btn-settings-tab-essentials")?.addEventListener("click", () => switchSettingsTab("essentials"));
+  el("btn-settings-tab-advanced")?.addEventListener("click", () => switchSettingsTab("advanced"));
 
   el("detail-news-list")?.addEventListener("click", (e) => {
     const linkBtn = e.target.closest("[data-external-url]");
@@ -3568,6 +3876,428 @@ function wireEvents() {
     }
   });
 
+  // --- Essentials Settings Listeners ---
+  el("btn-settings-browse-save-dir")?.addEventListener("click", async () => {
+    const dir = await pickDownloadFolder();
+    if (!dir) return;
+    try {
+      const updated = await updateLauncherSettings({ defaultSaveDir: dir });
+      syncSettingsUiFromBackend(updated);
+      showToast(`Games save folder updated: ${dir}`, "success");
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-settings-open-save-dir")?.addEventListener("click", async () => {
+    const target = state.defaultSaveDir || state.customSaveDir;
+    if (!target) {
+      await refreshSettingsDriveSpaceBar();
+    }
+    const dirToOpen = state.defaultSaveDir || state.customSaveDir;
+    if (!dirToOpen) return;
+    invokeCommand("open_game_folder", { path: dirToOpen }).catch((err) => showToast(String(err), "error"));
+  });
+
+  el("setting-speed-preset-group")?.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-speed-preset]");
+    if (!btn) return;
+    const preset = btn.dataset.speedPreset;
+    try {
+      const updated = await updateLauncherSettings({ downloadSpeedPreset: preset });
+      syncSettingsUiFromBackend(updated);
+      const labels = {
+        max: "Download speed set to Max Speed.",
+        balanced: "Download speed set to Balanced (25 MB/s).",
+        background: "Download speed set to Background (5 MB/s)."
+      };
+      showToast(labels[preset] || "Download speed updated.", "success", 2400);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("setting-compact-cards")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    applyCompactLibraryCards(checked);
+    try {
+      const updated = await updateLauncherSettings({ compactLibraryCards: checked });
+      syncSettingsUiFromBackend(updated);
+      showToast(
+        checked ? "Compact library cards enabled." : "Standard library cards restored.",
+        "info",
+        2200
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("setting-performance-boost")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const updated = await updateLauncherSettings({ performanceBoostEnabled: checked });
+      syncSettingsUiFromBackend(updated);
+      showToast(
+        checked
+          ? "Game Performance Boost enabled — games will get priority speed & RAM cleanup on Play."
+          : "Game Performance Boost turned off.",
+        "info",
+        2600
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("setting-auto-backup-saves-exit")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const updated = await updateLauncherSettings({ autoBackupSavesOnExit: checked });
+      syncSettingsUiFromBackend(updated);
+      showToast(
+        checked ? "Automatic save backups on game quit enabled." : "Automatic save backups on quit disabled.",
+        "info",
+        2400
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-clean-desktop-shortcuts")?.addEventListener("click", async () => {
+    const btn = el("btn-clean-desktop-shortcuts");
+    const summaryEl = el("desktop-cleanup-summary");
+    if (btn) btn.disabled = true;
+    showToast("Scanning Desktop shortcuts for games...", "info", 2400);
+    try {
+      const rep = await scanAndCleanDesktopShortcuts();
+      if (Array.isArray(rep?.library)) {
+        state.library = rep.library;
+        invalidateSidebarIcons();
+        renderSidebarGameList();
+        renderLibraryGrid();
+        updateSidebarTelemetry();
+      }
+      const imported = Number(rep?.importedCount || 0);
+      const moved = Number(rep?.movedToBackup || 0);
+      const skipped = Number(rep?.skippedNonGame || 0);
+      const msg =
+        moved > 0
+          ? `Added ${imported} game(s) and moved ${moved} Desktop shortcut(s) to "${rep.backupDir}" (${skipped} non-game shortcuts left untouched).`
+          : `Checked ${Number(rep?.scannedShortcuts || 0)} Desktop shortcut(s): no game shortcuts needed moving.`;
+      if (summaryEl) {
+        summaryEl.textContent = msg;
+        summaryEl.classList.remove("hidden", "warn");
+      }
+      showToast(msg, imported > 0 ? "success" : "info", 4200);
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  // --- Advanced Engine Settings Listeners ---
+  el("setting-cpu-priority-mode")?.addEventListener("change", async (e) => {
+    const cpuPriorityMode = String(e.target.value || "auto");
+    try {
+      const updated = await updateLauncherSettings({ cpuPriorityMode });
+      syncSettingsUiFromBackend(updated);
+      showToast(`CPU Priority Mode updated to "${cpuPriorityMode}".`, "success", 2400);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("setting-ram-trim-mode")?.addEventListener("change", async (e) => {
+    const ramTrimMode = String(e.target.value || "standard");
+    try {
+      const updated = await updateLauncherSettings({ ramTrimMode });
+      syncSettingsUiFromBackend(updated);
+      showToast(`Working-Set RAM Trim Mode set to "${ramTrimMode}".`, "success", 2400);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("setting-auto-freeze-minimized")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const updated = await updateLauncherSettings({ autoFreezeMinimized: checked });
+      syncSettingsUiFromBackend(updated);
+      showToast(
+        checked
+          ? "Auto-Freeze Minimized Single-Player Games enabled."
+          : "Auto-Freeze Minimized Games disabled.",
+        "info",
+        2500
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  const commitNvmeBudgetPct = async (rawPct) => {
+    const snapped = snapNvmeBudgetPct(rawPct);
+    renderNvmeBudgetUi(snapped);
+    try {
+      const updated = await updateLauncherSettings({ nvmeCacheBudgetPct: snapped });
+      syncSettingsUiFromBackend(updated);
+      showToast(`Standby RAM cache budget set to ${snapped}%.`, "success", 2200);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  };
+  el("setting-nvme-cache-budget")?.addEventListener("input", (e) => {
+    renderNvmeBudgetUi(e.target.value);
+  });
+  el("setting-nvme-cache-budget")?.addEventListener("change", (e) => {
+    commitNvmeBudgetPct(e.target.value);
+  });
+  el("nvme-budget-presets")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-nvme-pct]");
+    if (btn) commitNvmeBudgetPct(btn.dataset.nvmePct);
+  });
+
+  el("setting-doh-enabled")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const updated = await updateLauncherSettings({ dohEnabled: checked });
+      syncSettingsUiFromBackend(updated);
+      showToast(
+        checked ? "Encrypted DNS-over-HTTPS (1.1.1.1 / 9.9.9.9) enabled." : "Encrypted DNS-over-HTTPS bypassed (system DNS).",
+        "info",
+        2600
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-save-custom-proxy")?.addEventListener("click", async () => {
+    const customProxyUrl = (el("setting-custom-proxy-url")?.value || "").trim();
+    try {
+      const updated = await updateLauncherSettings({ customProxyUrl });
+      syncSettingsUiFromBackend(updated);
+      showToast(
+        customProxyUrl ? `Custom proxy applied: ${customProxyUrl}` : "Custom proxy cleared (direct connection).",
+        "success",
+        2800
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-save-custom-speed-cap")?.addEventListener("click", async () => {
+    const raw = Number(el("setting-custom-speed-cap")?.value || 0);
+    const customSpeedCapMbps = Number.isFinite(raw) && raw > 0 ? raw : 0;
+    try {
+      const updated = await updateLauncherSettings({ customSpeedCapMbps });
+      syncSettingsUiFromBackend(updated);
+      showToast(
+        customSpeedCapMbps > 0
+          ? `Download speed cap set to ${customSpeedCapMbps} MB/s.`
+          : "Download speed cap set to unlimited.",
+        "success",
+        2400
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("setting-auto-unblock-motw")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const updated = await updateLauncherSettings({ autoUnblockMotw: checked });
+      syncSettingsUiFromBackend(updated);
+      showToast(
+        checked ? "Automatic MOTW (:Zone.Identifier) unblocking enabled." : "Automatic MOTW unblocking disabled.",
+        "info",
+        2400
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("setting-portable-sandbox-default")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const updated = await updateLauncherSettings({ portableSandboxDefault: checked });
+      syncSettingsUiFromBackend(updated);
+      showToast(
+        checked ? "New games will isolate saves inside .duke-profile/ by default." : "Default portable save sandboxing disabled.",
+        "info",
+        2600
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("setting-max-restore-points")?.addEventListener("change", async (e) => {
+    const maxRestorePoints = Number(e.target.value || 5);
+    try {
+      const updated = await updateLauncherSettings({ maxRestorePoints });
+      syncSettingsUiFromBackend(updated);
+      showToast(`Retaining up to ${maxRestorePoints} restore points per game.`, "success", 2400);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-reclaim-snapshot-space")?.addEventListener("click", async () => {
+    const btn = el("btn-reclaim-snapshot-space");
+    const resEl = el("reclaim-space-result");
+    if (btn) btn.disabled = true;
+    showToast("Scanning restore point cache for unused space...", "info", 2200);
+    try {
+      const rep = await reclaimSnapshotSpace();
+      const summary = `Cleaned ${Number(rep?.blobsRemoved || 0)} unused data block(s) across ${Number(rep?.gamesScanned || 0)} game(s) — reclaimed ${rep?.freedFormatted || "0 B"}.`;
+      if (resEl) {
+        resEl.textContent = summary;
+        resEl.classList.remove("hidden");
+      }
+      showToast(summary, "success", 3800);
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  el("setting-block-game-telemetry")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const updated = await updateLauncherSettings({ blockGameTelemetry: checked });
+      syncSettingsUiFromBackend(updated);
+      showToast(
+        checked ? "Game telemetry & crash reporter blocking enabled." : "Game telemetry blocking disabled.",
+        "info",
+        2400
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-save-global-launch-args")?.addEventListener("click", async () => {
+    const globalLaunchArgs = (el("setting-global-launch-args")?.value || "").trim();
+    try {
+      const updated = await updateLauncherSettings({ globalLaunchArgs });
+      syncSettingsUiFromBackend(updated);
+      showToast(
+        globalLaunchArgs ? `Global launch arguments saved: ${globalLaunchArgs}` : "Global launch arguments cleared.",
+        "success",
+        2600
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("setting-swarm-auto-sync-saves")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const updated = await updateLauncherSettings({ swarmAutoSyncSaves: checked });
+      syncSettingsUiFromBackend(updated);
+      showToast(
+        checked ? "Swarm auto-sync on game exit enabled." : "Swarm auto-sync on game exit disabled.",
+        "info",
+        2400
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-settings-sync-catalog")?.addEventListener("click", async () => {
+    showToast("Syncing 30,000+ game catalog...", "info", 2600);
+    await loadCatalogData({ query: state.catalog.searchQuery, forceRefresh: true });
+    await refreshSwarmAndMmapTelemetry();
+  });
+
+  el("btn-settings-open-search-sites")?.addEventListener("click", () => {
+    switchTab("sources");
+    renderSources();
+  });
+
+  el("btn-settings-open-json-feeds")?.addEventListener("click", () => {
+    state.jsonFeedsExpanded = true;
+    switchTab("sources");
+    el("json-feeds-body")?.classList.remove("hidden");
+    el("btn-toggle-json-feeds")?.setAttribute("aria-expanded", "true");
+    el("json-feeds-card")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    renderSources();
+  });
+
+  el("btn-register-duke-protocol")?.addEventListener("click", async () => {
+    try {
+      const msg = await registerDukeProtocol();
+      showToast(msg || "Registered duke:// browser download links.", "success", 3200);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("setting-start-minimized-windows")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const updated = await updateLauncherSettings({ startMinimizedWithWindows: checked });
+      syncSettingsUiFromBackend(updated);
+      showToast(
+        checked ? "Duke Launcher will start minimized to tray with Windows." : "Windows startup tray launch removed.",
+        "info",
+        2600
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-copy-mcp-config")?.addEventListener("click", async () => {
+    const sampleConfig = JSON.stringify(
+      {
+        mcpServers: {
+          "duke-launcher": {
+            command: "duke-launcher.exe",
+            args: ["--mcp"]
+          }
+        }
+      },
+      null,
+      2
+    );
+    const ok = await copyTextToClipboard(sampleConfig);
+    showToast(
+      ok ? "Copied --mcp AI agent config JSON to clipboard." : "Could not copy MCP config JSON.",
+      ok ? "success" : "error",
+      3000
+    );
+  });
+
+  el("btn-run-subsystem-bench")?.addEventListener("click", async () => {
+    const btn = el("btn-run-subsystem-bench");
+    const out = el("settings-bench-output");
+    if (btn) btn.disabled = true;
+    showToast("Running hardware subsystem latency benchmarks...", "info", 2400);
+    try {
+      const res = await runSubsystemBenchmark();
+      if (out) {
+        out.textContent = String(res?.table || JSON.stringify(res?.report || res, null, 2));
+        out.classList.remove("hidden");
+      }
+      showToast("Hardware subsystem benchmark finished.", "success", 2800);
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
   el("setting-auto-detect-clipboard")?.addEventListener("change", async (e) => {
     const checked = Boolean(e.target.checked);
     try {
@@ -3679,7 +4409,7 @@ function wireEvents() {
       return;
     }
     btn.disabled = true;
-    showToast(`Beaming ${gameKey} over LAN via FastCDC...`, "info", 3200);
+    showToast(`Copying ${gameKey} over local network...`, "info", 3200);
     try {
       const report = await beamGameFromPeer({
         peerAddr,
@@ -3733,11 +4463,11 @@ function wireEvents() {
   el("btn-settings-import-libraries")?.addEventListener("click", runImportLibrariesFlow);
 
   el("btn-settings-sync-ludusavi")?.addEventListener("click", async () => {
-    showToast("Syncing Ludusavi save-location manifest over DoH...", "info");
+    showToast("Updating save-location database...", "info");
     try {
       const status = await syncLudusaviManifest(true);
       showToast(
-        `Ludusavi manifest synced (${Number(status?.entryCount || 0).toLocaleString()} game schemas).`,
+        `Save-location database updated (${Number(status?.entryCount || 0).toLocaleString()} games).`,
         "success"
       );
     } catch (err) {
@@ -3905,7 +4635,46 @@ function wireEvents() {
   });
 
   el("btn-quick-add-exe")?.addEventListener("click", addLocalGameFlow);
-  el("btn-empty-add-game")?.addEventListener("click", addLocalGameFlow);
+  el("btn-empty-add-game")?.addEventListener("click", async () => {
+    const chosen = await pickExecutableOrShortcutFile();
+    if (chosen) await handleIngestPathsFlow([chosen]);
+  });
+  el("btn-empty-add-folder")?.addEventListener("click", async () => {
+    const folder = await pickGameFolder();
+    if (folder) await handleIngestPathsFlow([folder]);
+  });
+  el("btn-empty-find-game")?.addEventListener("click", () => {
+    switchTab("catalog");
+    syncCatalogFilterControlsToDom();
+    if (!state.catalog.loaded && !state.catalog.loading) {
+      loadCatalogData({ query: state.catalog.searchQuery, forceRefresh: false });
+    } else if (state.catalog.renderedCount === 0 && !state.catalog.loading) {
+      renderCatalogView(true);
+    } else {
+      updateCatalogResultsSummary();
+    }
+    el("input-catalog-search")?.focus();
+  });
+  el("btn-empty-paste-link")?.addEventListener("click", async () => {
+    const clip = (await readSystemClipboardText()).trim();
+    if (isValidDownloadUrl(clip)) {
+      await startDownloadFromUrl(clip, true);
+    } else {
+      switchTab("downloader");
+      renderDownloadJobs();
+      el("input-dl-url")?.focus();
+      showToast("Copy or paste a game download link, then press Queue Download.", "info", 3200);
+    }
+  });
+  el("card-empty-find-game")?.addEventListener("click", (e) => {
+    if (!e.target.closest("button")) el("btn-empty-find-game")?.click();
+  });
+  el("card-empty-import-libraries")?.addEventListener("click", (e) => {
+    if (!e.target.closest("button")) runImportLibrariesFlow();
+  });
+  el("card-empty-add-game")?.addEventListener("click", (e) => {
+    if (!e.target.closest("button")) el("btn-empty-add-folder")?.click();
+  });
   el("btn-import-libraries")?.addEventListener("click", runImportLibrariesFlow);
   el("btn-empty-import-libraries")?.addEventListener("click", runImportLibrariesFlow);
   el("titlebar-suspend-pill")?.addEventListener("click", (e) => {
@@ -3985,6 +4754,53 @@ function wireEvents() {
       openGameDetailView(g.id);
     })
   );
+  el("btn-detail-autofix")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-detail-autofix");
+      const summaryEl = el("detail-autofix-summary");
+      if (btn) btn.disabled = true;
+      showToast(`Running Auto-Fix on ${g.title}...`, "info", 2600);
+      try {
+        const rep = await autoFixGame(g.id);
+        state.library = await invokeCommand("get_local_library");
+        const updatedGame = state.library.find((x) => x.id === g.id);
+        if (updatedGame && el("detail-toggle-sandbox")) {
+          el("detail-toggle-sandbox").checked = Boolean(updatedGame.sandboxEnabled);
+        }
+        const unresolved = Array.isArray(rep?.unresolvedDlls) ? rep.unresolvedDlls : [];
+        if (summaryEl) {
+          summaryEl.textContent = rep?.summary || "Auto-Fix finished.";
+          summaryEl.classList.remove("hidden");
+          summaryEl.classList.toggle("warn", unresolved.length > 0);
+        }
+        showToast(rep?.summary || "Auto-Fix finished.", unresolved.length > 0 ? "info" : "success", 4200);
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
+  el("btn-detail-save-restore-point")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-detail-save-restore-point");
+      if (btn) btn.disabled = true;
+      showToast(`Saving 1-second restore point for ${g.title}...`, "info", 2200);
+      try {
+        const stamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const created = await createGameSnapshot(g.id, `Restore Point (${stamp})`);
+        showToast(
+          `Restore point saved in ${Number(created?.elapsedMs || 0)} ms — uses 0 GB extra space.`,
+          "success",
+          3600
+        );
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
   el("btn-detail-snapshots")?.addEventListener("click", () =>
     withSelectedGame((g) => openSnapshotsModal(g))
   );
@@ -4001,12 +4817,12 @@ function wireEvents() {
   el("btn-detail-scan")?.addEventListener("click", () => withSelectedGame((g) => scanFileFlow(g.exePath)));
   el("btn-detail-compress")?.addEventListener("click", () =>
     withSelectedGame(async (g) => {
-      showToast("Compressing game folder with XPRESS8K...", "info");
+      showToast("Shrinking game folder size (lossless)...", "info");
       const res = await compressGameFolder(g.id);
       state.library = await invokeCommand("get_local_library");
       openGameDetailView(g.id);
       updateSidebarTelemetry();
-      showToast(res?.message || "Compression finished.", "success");
+      showToast(res?.message || "Disk compression finished.", "success");
     })
   );
   el("btn-detail-backup-saves")?.addEventListener("click", () =>
@@ -4065,7 +4881,7 @@ function wireEvents() {
           gameId: g.id,
           nvmePrefetchOverride: mode
         });
-        showToast(`NVMe Pre-Warm mode set to "${mode}".`, "success");
+        showToast(`Fast Startup mode set to "${mode}".`, "success");
       } catch (err) {
         showToast(String(err), "error");
       }
@@ -4196,7 +5012,7 @@ function wireEvents() {
     withSelectedGame(async (g) => {
       const btn = el("btn-apply-game-update");
       if (btn) btn.disabled = true;
-      showToast("Taking pre-update .duke-cas snapshot & applying portable update...", "info", 3200);
+      showToast("Saving automatic restore point & updating game...", "info", 3200);
       try {
         const res = await applyGameUpdate(g.id);
         if (Array.isArray(res?.games)) {
@@ -4224,15 +5040,15 @@ function wireEvents() {
       if (btn) btn.disabled = true;
       showToast(
         enable
-          ? "Creating .duke-cas snapshot & patching 4GB LAA PE header..."
-          : "Creating .duke-cas snapshot & reverting 4GB LAA PE header...",
+          ? "Saving restore point & unlocking 4 GB memory support..."
+          : "Saving restore point & restoring original memory limit...",
         "info",
         2400
       );
       try {
         const report = await toggleGameLaaPatch(g.id, enable);
         renderDetailCompat(report);
-        showToast(report?.statusMessage || "4GB LAA updated.", "success", 3600);
+        showToast(report?.statusMessage || "4 GB memory support updated.", "success", 3600);
       } catch (err) {
         showToast(String(err), "error");
       } finally {
@@ -4247,7 +5063,7 @@ function wireEvents() {
       const btn = el("btn-toggle-dxvk");
       if (btn) btn.disabled = true;
       showToast(
-        enable ? "Deploying DXVK DLLs with pre-patch snapshot..." : "Removing DXVK DLLs...",
+        enable ? "Saving restore point & applying Vulkan graphics fix..." : "Removing graphics fix files...",
         "info",
         2400
       );
@@ -4348,20 +5164,45 @@ function wireEvents() {
     const dir = await pickDownloadFolder();
     if (dir) {
       state.customSaveDir = dir;
+      state.defaultSaveDir = dir;
       localStorage.setItem("duke_launcher_dl_dir", dir);
       if (el("input-dl-dir")) el("input-dl-dir").value = dir;
+      updateLauncherSettings({ defaultSaveDir: dir })
+        .then((updated) => syncSettingsUiFromBackend(updated))
+        .catch(() => {});
     }
   });
 
   el("btn-start-dl")?.addEventListener("click", () => startDownloadFromUrl());
   el("btn-paste-and-dl")?.addEventListener("click", async () => {
     const clip = (await readSystemClipboardText()).trim();
-    if (!isValidHttpUrl(clip)) {
-      showToast("Clipboard does not contain a valid http:// or https:// download URL.", "error");
+    if (!isValidDownloadUrl(clip)) {
+      showToast("Clipboard does not contain a valid http://, https://, or duke:// download URL.", "error");
       return;
     }
     if (el("input-dl-url")) el("input-dl-url").value = clip;
     await startDownloadFromUrl(clip, false);
+  });
+
+  // Global Ctrl+V / Cmd+V Paste-to-Download
+  document.addEventListener("keydown", async (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+    if (String(e.key || "").toLowerCase() !== "v") return;
+    const active = document.activeElement;
+    if (
+      active &&
+      typeof active.closest === "function" &&
+      active.closest("input, textarea, select, [contenteditable], [contenteditable='true']")
+    ) {
+      return;
+    }
+    const clip = (await readSystemClipboardText()).trim();
+    if (!isValidDownloadUrl(clip)) return;
+    e.preventDefault();
+    const ok = await startDownloadFromUrl(clip, false);
+    if (ok) {
+      showToast(`Pasted & queued download: ${truncateClipboardUrl(clip, 56)}`, "success", 3600);
+    }
   });
 
   el("btn-clipboard-download")?.addEventListener("click", async () => {
@@ -4519,8 +5360,8 @@ function wireEvents() {
   const handleDirectFindUrlDownload = async () => {
     const input = el("input-find-direct-url");
     const url = (input?.value || "").trim();
-    if (!isValidHttpUrl(url)) {
-      showToast("Paste a valid http:// or https:// direct file link first.", "error");
+    if (!isValidDownloadUrl(url)) {
+      showToast("Paste a valid http://, https://, or duke:// direct link first.", "error");
       return;
     }
     const ok = await startDownloadFromUrl(url, true);
@@ -4651,7 +5492,7 @@ function wireEvents() {
       showToast("Enter a valid http:// or https:// Hydra JSON manifest URL.", "error");
       return;
     }
-    showToast("Importing Hydra JSON feed over DoH...", "info", 2400);
+    showToast("Importing game source feed...", "info", 2400);
     try {
       const added = await importSourceUrl(url);
       if (el("input-source-url")) el("input-source-url").value = "";
@@ -4905,14 +5746,14 @@ function wireEvents() {
     const label = el("input-snapshot-label")?.value || "";
     const btn = el("btn-create-snapshot");
     if (btn) btn.disabled = true;
-    showToast("Creating copy-on-write BLAKE3 snapshot...", "info", 2200);
+    showToast("Saving 1-second restore point...", "info", 2200);
     try {
       const created = await createGameSnapshot(gid, label);
       state.snapshotModalState.snapshots = await listGameSnapshots(gid);
       if (el("input-snapshot-label")) el("input-snapshot-label").value = "";
       renderSnapshotsModalList();
       showToast(
-        `Snapshot "${created?.label || created?.id}" ready in ${Number(created?.elapsedMs || 0)} ms (${Number(created?.deduplicatedFiles || 0)} deduped).`,
+        `Restore point "${created?.label || created?.id}" saved in ${Number(created?.elapsedMs || 0)} ms — 0 GB extra space used.`,
         "success",
         3500
       );
@@ -4933,7 +5774,7 @@ function wireEvents() {
       try {
         const rep = await restoreGameSnapshot(gid, snapshotId);
         showToast(
-          `Restored "${rep?.label || snapshotId}" in ${Number(rep?.elapsedMs || 0)} ms (${Number(rep?.hardlinkedFiles || 0)} hardlinked, ${Number(rep?.removedFiles || 0)} cleaned).`,
+          `Restored backup "${rep?.label || snapshotId}" in ${Number(rep?.elapsedMs || 0)} ms (${Number(rep?.hardlinkedFiles || 0)} files linked, ${Number(rep?.removedFiles || 0)} cleaned).`,
           "success",
           4000
         );
@@ -4951,7 +5792,7 @@ function wireEvents() {
       try {
         state.snapshotModalState.snapshots = await deleteGameSnapshot(gid, snapshotId);
         renderSnapshotsModalList();
-        showToast("Snapshot deleted and unreferenced blobs garbage-collected.", "info", 2400);
+        showToast("Restore point deleted and unused backup space reclaimed.", "info", 2400);
       } catch (err) {
         showToast(String(err), "error");
       } finally {
@@ -5271,42 +6112,12 @@ async function init() {
     }
   });
   wireEvents();
+  switchSettingsTab("essentials");
+  initDragAndDropIngestion();
 
   getLauncherSettings()
     .then((settings) => {
-      state.autoCleanCompleted = Boolean(settings?.autoCleanCompleted ?? true);
-      state.autoDetectClipboard = Boolean(settings?.autoDetectClipboard ?? true);
-      state.nvmePrefetchEnabled = Boolean(settings?.nvmePrefetchEnabled ?? true);
-      state.swarmEnabled = Boolean(settings?.swarmEnabled ?? false);
-      state.swarmNodeName = String(settings?.swarmNodeName || "");
-      state.swarmPeers = Array.isArray(settings?.swarmPeers) ? settings.swarmPeers : [];
-      state.steamgriddbApiKey = String(settings?.steamgriddbApiKey || "");
-      state.suspendHotkey = String(settings?.suspendHotkey || "Ctrl+Alt+P");
       syncSettingsUiFromBackend(settings);
-      if (el("setting-auto-clean-completed")) {
-        el("setting-auto-clean-completed").checked = state.autoCleanCompleted;
-      }
-      if (el("setting-auto-detect-clipboard")) {
-        el("setting-auto-detect-clipboard").checked = state.autoDetectClipboard;
-      }
-      if (el("setting-nvme-prefetch")) {
-        el("setting-nvme-prefetch").checked = state.nvmePrefetchEnabled;
-      }
-      if (el("setting-swarm-enabled")) {
-        el("setting-swarm-enabled").checked = state.swarmEnabled;
-      }
-      if (el("setting-swarm-node-name")) {
-        el("setting-swarm-node-name").value = state.swarmNodeName;
-      }
-      if (el("setting-swarm-peers")) {
-        el("setting-swarm-peers").value = state.swarmPeers.join(", ");
-      }
-      if (el("setting-steamgriddb-key")) {
-        el("setting-steamgriddb-key").value = state.steamgriddbApiKey;
-      }
-      if (el("setting-suspend-hotkey")) {
-        el("setting-suspend-hotkey").value = state.suspendHotkey;
-      }
       applyCouchMode(Boolean(settings?.couchMode), false);
       if (state.autoDetectClipboard) {
         scheduleClipboardDetection();
@@ -5437,12 +6248,11 @@ async function init() {
     if (!payload || Number(payload.warmedMb || 0) <= 0) return;
     const files = Number(payload.filesWarmed || 0);
     const warmedMb = Number(payload.warmedMb || 0);
-    const gbps = Number(payload.throughputGbS || 0);
     const ms = Number(payload.elapsedMs || 0);
     showToast(
-      `NVMe Warmer: ${warmedMb.toFixed(1)} MB (${files} pack${files === 1 ? "" : "s"}) @ ${gbps.toFixed(2)} GB/s (${ms} ms)`,
+      `Fast Startup pre-loaded ${warmedMb.toFixed(1)} MB (${files} archive${files === 1 ? "" : "s"}) in ${ms} ms.`,
       "success",
-      3600
+      3200
     );
   });
 
@@ -5462,7 +6272,7 @@ async function init() {
   await listenEvent("directory-download-intercepted", (payload) => {
     const fileLabel = payload?.fileName || "file";
     const siteLabel = payload?.siteTitle || "Safe Browser";
-    showToast(`Auto-grabbed "${fileLabel}" from ${siteLabel} -> 8-worker queue.`, "success", 3400);
+    showToast(`Auto-grabbed "${fileLabel}" from ${siteLabel} -> Downloads queue.`, "success", 3400);
     refreshDownloadJobs();
   });
 

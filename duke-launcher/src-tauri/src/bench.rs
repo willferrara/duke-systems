@@ -24,7 +24,8 @@ const BLAKE3_PASSES: usize = 32; // 128 MiB streamed in 64 KiB chunks
 const BLAKE3_CHUNK_BYTES: usize = 64 * 1024;
 const FASTCDC_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BenchReport {
     pub shm_frames: usize,
     pub shm_ops_per_sec: f64,

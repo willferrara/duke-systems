@@ -150,9 +150,18 @@ fn collect_archive_candidates(root: &Path, min_file_bytes: u64) -> Vec<(PathBuf,
     found
 }
 
-/// Computes bounded prefetch budget (`<= 25%` of available physical RAM) and assigns target byte caps.
-fn plan_prefetch_slices(candidates: &[(PathBuf, u64)], avail_phys_bytes: u64) -> (u64, Vec<(PathBuf, u64, u64)>) {
-    let budget = avail_phys_bytes / 4;
+/// Computes bounded prefetch budget (`budget_pct` clamped `0..=40%` of available physical RAM)
+/// and assigns target byte caps.
+fn plan_prefetch_slices_with_pct(
+    candidates: &[(PathBuf, u64)],
+    avail_phys_bytes: u64,
+    budget_pct: u8,
+) -> (u64, Vec<(PathBuf, u64, u64)>) {
+    let clamped_pct = budget_pct.min(40) as u64;
+    if clamped_pct == 0 {
+        return (0, Vec::new());
+    }
+    let budget = avail_phys_bytes.saturating_mul(clamped_pct) / 100;
     if budget == 0 {
         return (0, Vec::new());
     }
@@ -169,6 +178,12 @@ fn plan_prefetch_slices(candidates: &[(PathBuf, u64)], avail_phys_bytes: u64) ->
         }
     }
     (budget, plan)
+}
+
+#[cfg(test)]
+/// Computes bounded prefetch budget (`<= 25%` of available physical RAM) and assigns target byte caps.
+fn plan_prefetch_slices(candidates: &[(PathBuf, u64)], avail_phys_bytes: u64) -> (u64, Vec<(PathBuf, u64, u64)>) {
+    plan_prefetch_slices_with_pct(candidates, avail_phys_bytes, 25)
 }
 
 #[cfg(target_os = "windows")]
@@ -430,7 +445,12 @@ fn warm_single_file_windows(path: &Path, target_bytes: u64) -> Result<(u64, bool
 /// Scans `game_dir` for large game archives (> 32 MiB) capped at 25% of available physical RAM
 /// and warms Windows Standby RAM cache across parallel worker threads.
 pub fn warm_game_assets(game_dir: &Path) -> Result<PrefetchReport, String> {
-    warm_game_assets_with_min_size(game_dir, DEFAULT_MIN_ARCHIVE_BYTES)
+    warm_game_assets_with_options(game_dir, DEFAULT_MIN_ARCHIVE_BYTES, 25)
+}
+
+/// Scans `game_dir` for large game archives (> 32 MiB) with a configurable RAM budget percentage (`0..=40`).
+pub fn warm_game_assets_with_budget_pct(game_dir: &Path, budget_pct: u8) -> Result<PrefetchReport, String> {
+    warm_game_assets_with_options(game_dir, DEFAULT_MIN_ARCHIVE_BYTES, budget_pct)
 }
 
 /// Configurable variant allowing unit tests to validate full Win32 `PrefetchVirtualMemory`
@@ -439,14 +459,23 @@ pub fn warm_game_assets_with_min_size(
     game_dir: &Path,
     min_file_bytes: u64,
 ) -> Result<PrefetchReport, String> {
-    if !game_dir.exists() || !game_dir.is_dir() {
+    warm_game_assets_with_options(game_dir, min_file_bytes, 25)
+}
+
+/// Configurable Standby RAM prefetcher with explicit file threshold and percentage budget (`0..=40`).
+pub fn warm_game_assets_with_options(
+    game_dir: &Path,
+    min_file_bytes: u64,
+    budget_pct: u8,
+) -> Result<PrefetchReport, String> {
+    if budget_pct == 0 || !game_dir.exists() || !game_dir.is_dir() {
         return Ok(PrefetchReport::default());
     }
 
     let started = Instant::now();
     let avail_phys = query_available_physical_ram_bytes();
     let candidates = collect_archive_candidates(game_dir, min_file_bytes);
-    let (budget_bytes, plan) = plan_prefetch_slices(&candidates, avail_phys);
+    let (budget_bytes, plan) = plan_prefetch_slices_with_pct(&candidates, avail_phys, budget_pct);
 
     if plan.is_empty() {
         return Ok(PrefetchReport {
@@ -565,6 +594,18 @@ mod tests {
         // Production 32 MiB threshold skips small files cleanly
         let prod_report = warm_game_assets(&dir).unwrap();
         assert_eq!(prod_report.files_warmed, 0);
+
+        // 0% budget cleanly disables pre-launch caching
+        let off_report = warm_game_assets_with_options(&dir, 64 * 1024, 0).unwrap();
+        assert_eq!(off_report.files_warmed, 0);
+        assert_eq!(off_report.budget_bytes, 0);
+
+        // Custom percentage slice bounds (clamped at 40%)
+        let candidates = vec![(PathBuf::from("game\\pak0.pak"), 1024 * 1024 * 1024)];
+        let (b10, _) = plan_prefetch_slices_with_pct(&candidates, 1000, 10);
+        let (b40, _) = plan_prefetch_slices_with_pct(&candidates, 1000, 99);
+        assert_eq!(b10, 100);
+        assert_eq!(b40, 400);
 
         // Lower threshold exercises full CreateFileMappingW + PrefetchVirtualMemory + Overlapped path
         let report = warm_game_assets_with_min_size(&dir, 64 * 1024).unwrap();

@@ -1098,7 +1098,10 @@ pub(crate) async fn backup_game_saves_core(
         let entries_vec: Vec<(String, Vec<u8>)> = collected_files.into_iter().collect();
         crate::write_pure_rust_zip_archive(&zip_path, &entries_vec)?;
 
-        // Rolling 5 snapshot retention per game
+        // Configurable rolling save snapshot retention per game (defaults to 5)
+        let max_keep = crate::load_settings_standalone()
+            .max_restore_points
+            .clamp(1, 50) as usize;
         if let Ok(read_dir) = fs::read_dir(&backups_dir) {
             let mut game_snapshots: Vec<(SystemTime, PathBuf)> = read_dir
                 .filter_map(|e| e.ok())
@@ -1121,7 +1124,7 @@ pub(crate) async fn backup_game_saves_core(
                 .collect();
 
             game_snapshots.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-            for (_, old_path) in game_snapshots.into_iter().skip(5) {
+            for (_, old_path) in game_snapshots.into_iter().skip(max_keep) {
                 let _ = fs::remove_file(old_path);
             }
         }

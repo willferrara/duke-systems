@@ -120,6 +120,9 @@ static QUEUE_RUNNER_ACTIVE: AtomicBool = AtomicBool::new(false);
 static PRICE_SYNC_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CATALOG_SYNC_ACTIVE: AtomicBool = AtomicBool::new(false);
 static GLOBAL_SPEED_LIMIT_KBPS: AtomicU64 = AtomicU64::new(0);
+static RAM_TRIM_MODE: AtomicU64 = AtomicU64::new(1);
+static AUTO_FREEZE_MINIMIZED: AtomicBool = AtomicBool::new(false);
+static AUTO_UNBLOCK_MOTW: AtomicBool = AtomicBool::new(true);
 
 const CATALOG_TARGET_COUNT: usize = 30_000;
 const CATALOG_HARVEST_PAGES: u32 = 30;
@@ -447,6 +450,8 @@ pub struct DownloadJob {
     pub added_at: u64,
 }
 
+pub type AppSettings = LauncherSettings;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct LauncherSettings {
@@ -484,6 +489,46 @@ pub struct LauncherSettings {
     pub psn_npsso_configured: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detected_steam_id: Option<String>,
+    // --- Essentials UX Fields ---
+    #[serde(alias = "default_save_dir")]
+    pub default_save_dir: Option<String>,
+    #[serde(alias = "download_speed_preset")]
+    pub download_speed_preset: String,
+    #[serde(alias = "compact_library_cards")]
+    pub compact_library_cards: bool,
+    #[serde(alias = "performance_boost_enabled")]
+    pub performance_boost_enabled: bool,
+    #[serde(alias = "auto_backup_saves_on_exit")]
+    pub auto_backup_saves_on_exit: bool,
+    // --- Advanced Engine Fields ---
+    #[serde(alias = "cpu_priority_mode")]
+    pub cpu_priority_mode: String,
+    #[serde(alias = "ram_trim_mode")]
+    pub ram_trim_mode: String,
+    #[serde(alias = "auto_freeze_minimized")]
+    pub auto_freeze_minimized: bool,
+    #[serde(alias = "nvme_cache_budget_pct")]
+    pub nvme_cache_budget_pct: u8,
+    #[serde(alias = "doh_enabled")]
+    pub doh_enabled: bool,
+    #[serde(alias = "custom_proxy_url")]
+    pub custom_proxy_url: Option<String>,
+    #[serde(alias = "custom_speed_cap_mbps")]
+    pub custom_speed_cap_mbps: f64,
+    #[serde(alias = "auto_unblock_motw")]
+    pub auto_unblock_motw: bool,
+    #[serde(alias = "portable_sandbox_default")]
+    pub portable_sandbox_default: bool,
+    #[serde(alias = "max_restore_points")]
+    pub max_restore_points: u32,
+    #[serde(alias = "block_game_telemetry")]
+    pub block_game_telemetry: bool,
+    #[serde(alias = "global_launch_args")]
+    pub global_launch_args: Option<String>,
+    #[serde(alias = "swarm_auto_sync_saves")]
+    pub swarm_auto_sync_saves: bool,
+    #[serde(alias = "start_minimized_with_windows")]
+    pub start_minimized_with_windows: bool,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -536,7 +581,56 @@ impl Default for LauncherSettings {
             xbox_api_key_configured: false,
             psn_npsso_configured: false,
             detected_steam_id: None,
+            default_save_dir: None,
+            download_speed_preset: "max".to_string(),
+            compact_library_cards: false,
+            performance_boost_enabled: true,
+            auto_backup_saves_on_exit: false,
+            cpu_priority_mode: "auto".to_string(),
+            ram_trim_mode: "standard".to_string(),
+            auto_freeze_minimized: false,
+            nvme_cache_budget_pct: 25,
+            doh_enabled: true,
+            custom_proxy_url: None,
+            custom_speed_cap_mbps: 0.0,
+            auto_unblock_motw: true,
+            portable_sandbox_default: false,
+            max_restore_points: 5,
+            block_game_telemetry: true,
+            global_launch_args: None,
+            swarm_auto_sync_saves: false,
+            start_minimized_with_windows: false,
         }
+    }
+}
+
+fn effective_speed_limit_kbps(settings: &LauncherSettings) -> u64 {
+    if settings.custom_speed_cap_mbps > 0.0 {
+        return (settings.custom_speed_cap_mbps * 1024.0) as u64;
+    }
+    match settings.download_speed_preset.trim().to_ascii_lowercase().as_str() {
+        "balanced" => 15 * 1024,
+        "background" => 3 * 1024,
+        _ => 0,
+    }
+}
+
+fn apply_runtime_settings(settings: &LauncherSettings) {
+    let _ = duke_core::net_doh::set_network_privacy_config(
+        settings.doh_enabled,
+        settings.custom_proxy_url.as_deref(),
+    );
+    GLOBAL_SPEED_LIMIT_KBPS.store(effective_speed_limit_kbps(settings), Ordering::Relaxed);
+    let ram_mode = match settings.ram_trim_mode.trim().to_ascii_lowercase().as_str() {
+        "off" => 0,
+        "aggressive" => 2,
+        _ => 1,
+    };
+    RAM_TRIM_MODE.store(ram_mode, Ordering::Relaxed);
+    AUTO_FREEZE_MINIMIZED.store(settings.auto_freeze_minimized, Ordering::Relaxed);
+    AUTO_UNBLOCK_MOTW.store(settings.auto_unblock_motw, Ordering::Relaxed);
+    if let Ok(mut guard) = get_active_hotkey_cell().lock() {
+        *guard = settings.suspend_hotkey.clone();
     }
 }
 
@@ -673,6 +767,10 @@ pub(crate) fn validate_external_http_url(raw_url: &str) -> Result<Url, String> {
 }
 
 fn resolve_default_downloads_dir(app: &AppHandle) -> PathBuf {
+    let settings = load_settings_from_disk(app);
+    if let Some(custom) = settings.default_save_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return PathBuf::from(custom);
+    }
     if let Ok(dl) = app.path().download_dir() {
         return dl;
     }
@@ -836,17 +934,16 @@ pub(crate) fn clean_game_title(raw: &str) -> String {
     }
 }
 
-/// Automatically strips the Windows NTFS Mark-of-the-Web (`:Zone.Identifier` alternate data stream)
-/// from a file or extracted game folder so Windows SmartScreen never blocks or slows down first game launch.
-fn unblock_ntfs_zone_identifier(target: &Path) {
+/// Unconditionally strips `:Zone.Identifier` NTFS streams on a file or tree and returns count cleared.
+fn unblock_ntfs_zone_identifier_raw(target: &Path) -> usize {
     if !target.exists() {
-        return;
+        return 0;
     }
     if target.is_file() {
         let ads_path = format!("{}:Zone.Identifier", target.display());
-        let _ = std::fs::remove_file(ads_path);
-        return;
+        return usize::from(std::fs::remove_file(ads_path).is_ok());
     }
+    let mut cleared = 0usize;
     for entry in WalkDir::new(target)
         .max_depth(6)
         .follow_links(false)
@@ -855,8 +952,20 @@ fn unblock_ntfs_zone_identifier(target: &Path) {
     {
         let p = entry.path();
         let ads_path = format!("{}:Zone.Identifier", p.display());
-        let _ = std::fs::remove_file(ads_path);
+        if std::fs::remove_file(ads_path).is_ok() {
+            cleared += 1;
+        }
     }
+    cleared
+}
+
+/// Automatically strips the Windows NTFS Mark-of-the-Web (`:Zone.Identifier` alternate data stream)
+/// when `auto_unblock_motw` is enabled so Windows SmartScreen never blocks or slows down first game launch.
+fn unblock_ntfs_zone_identifier(target: &Path) {
+    if !AUTO_UNBLOCK_MOTW.load(Ordering::Relaxed) {
+        return;
+    }
+    let _ = unblock_ntfs_zone_identifier_raw(target);
 }
 
 /// Validates that no path inside `dest_dir` contains `..` traversal, external symlinks, or decompression bombs (Zip-Slip protection),
@@ -1078,55 +1187,131 @@ fn extract_archive_to_folder_sync(archive_path: &Path, dest_dir: &Path) -> Resul
     Err("Could not extract archive automatically. Make sure 7-Zip, WinRAR, or Windows 11 Archive support is installed.".to_string())
 }
 
-/// Scans up to 6 levels deep to find the best playable `.exe`, scoring by file size, title match,
-/// Unreal (`-Win64-Shipping.exe`), Unity (`UnityPlayer.dll` sibling), and Godot (`.pck` sibling) bonuses,
-/// while strictly blacklisting crash handlers, CEF subprocesses, installers, and redistributables.
-pub(crate) fn find_best_game_exe_in_folder(folder: &Path, expected_game_title: &str) -> Option<PathBuf> {
+const IGNORED_GAME_SUBDIRS: &[&str] = &[
+    "_commonredist",
+    "redist",
+    "directx",
+    "vcredist",
+    "dotnet",
+    "easyanticheat",
+    "battleye",
+    "support",
+    "installers",
+    "mono",
+    "crashreporter",
+];
+
+const PENALIZED_HELPER_EXES: &[&str] = &[
+    "unitycrashhandler32",
+    "unitycrashhandler64",
+    "unitycrashhandler",
+    "unrealcefsubprocess",
+    "ueprereqsetup_x64",
+    "ueprereqsetup",
+    "ue4prereqsetup",
+    "crashreportclient",
+    "crashreport",
+    "crashhandler",
+    "vc_redist",
+    "vcredist",
+    "dxsetup",
+    "dxwebsetup",
+    "dotnetfx",
+    "dotnet",
+    "unins000",
+    "unins0",
+    "unins",
+    "uninstall",
+    "setup",
+    "easyanticheat",
+    "battleye",
+    "steamclient_loader",
+    "benchmark",
+    "dedicatedserver",
+    "crs-handler",
+];
+
+/// Scores a candidate `.exe` inside a game folder. Helper utilities, crash handlers,
+/// uninstallers, and redistributables receive a heavy negative penalty so they never beat
+/// a genuine game executable.
+pub(crate) fn score_exe_candidate(
+    path: &Path,
+    file_size: u64,
+    expected_title: &str,
+    title_words: &[String],
+) -> i64 {
+    let path_lower = path.to_string_lossy().to_lowercase();
+    if IGNORED_GAME_SUBDIRS.iter().any(|d| path_lower.contains(d)) {
+        return i64::MIN / 2;
+    }
+
+    let file_name_lower = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let stem_lower = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if PENALIZED_HELPER_EXES
+        .iter()
+        .any(|bad| stem_lower.contains(bad) || file_name_lower.starts_with(bad))
+    {
+        return i64::MIN / 2 + (file_size.min(100_000) as i64);
+    }
+
+    let mut score: i64 = i64::try_from(file_size).unwrap_or(i64::MAX / 4);
+    let clean_expected_slug: String = clean_game_title(expected_title)
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect();
+    let stem_slug: String = stem_lower
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect();
+
+    if !clean_expected_slug.is_empty() && stem_slug == clean_expected_slug {
+        score = score.saturating_add(800 * 1024 * 1024);
+    } else if title_words.iter().any(|w| stem_lower.contains(w)) {
+        score = score.saturating_add(500 * 1024 * 1024);
+    }
+
+    if file_name_lower.ends_with("-win64-shipping.exe")
+        || file_name_lower.ends_with("-win32-shipping.exe")
+        || stem_lower.contains("shipping")
+    {
+        score = score.saturating_add(450 * 1024 * 1024);
+    }
+
+    if let Some(parent) = path.parent() {
+        if parent.join("UnityPlayer.dll").exists()
+            || parent.join(format!("{}_Data", stem_lower)).exists()
+        {
+            score = score.saturating_add(400 * 1024 * 1024);
+        }
+        if parent.join(format!("{}.pck", stem_lower)).exists()
+            || parent.join("data.pck").exists()
+        {
+            score = score.saturating_add(380 * 1024 * 1024);
+        }
+    }
+
+    score
+}
+
+/// Scans up to `max_depth` directory levels deep to pick the highest-scoring playable `.exe`.
+pub(crate) fn find_best_game_exe_with_max_depth(
+    folder: &Path,
+    expected_game_title: &str,
+    max_depth: usize,
+) -> Option<PathBuf> {
     if !folder.exists() {
         return None;
     }
-
-    let ignored_dirs = [
-        "_commonredist",
-        "redist",
-        "directx",
-        "vcredist",
-        "dotnet",
-        "easyanticheat",
-        "battleye",
-        "support",
-        "installers",
-        "mono",
-        "crashreporter",
-    ];
-
-    let blacklisted_exe_patterns = [
-        "unitycrashhandler32",
-        "unitycrashhandler64",
-        "unitycrashhandler",
-        "unrealcefsubprocess",
-        "ueprereqsetup_x64",
-        "ueprereqsetup",
-        "ue4prereqsetup",
-        "crashreportclient",
-        "crashreport",
-        "crashhandler",
-        "vc_redist",
-        "vcredist",
-        "dxsetup",
-        "dxwebsetup",
-        "unins0",
-        "unins",
-        "uninstall",
-        "setup",
-        "dotnet",
-        "easyanticheat",
-        "battleye",
-        "steamclient_loader",
-        "benchmark",
-        "dedicatedserver",
-        "crs-handler",
-    ];
 
     let title_words: Vec<String> = clean_game_title(expected_game_title)
         .to_lowercase()
@@ -1135,10 +1320,10 @@ pub(crate) fn find_best_game_exe_in_folder(folder: &Path, expected_game_title: &
         .map(|w| w.to_string())
         .collect();
 
-    let mut best_candidate: Option<(PathBuf, u64)> = None;
+    let mut best_candidate: Option<(PathBuf, i64)> = None;
 
     for entry in WalkDir::new(folder)
-        .max_depth(6)
+        .max_depth(max_depth.max(1))
         .follow_links(false)
         .into_iter()
         .flatten()
@@ -1157,61 +1342,14 @@ pub(crate) fn find_best_game_exe_in_folder(folder: &Path, expected_game_title: &
             continue;
         }
 
-        let path_lower = path.to_string_lossy().to_lowercase();
-        if ignored_dirs.iter().any(|d| path_lower.contains(d)) {
-            continue;
-        }
-
-        let file_name_lower = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        let stem_lower = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-
-        if blacklisted_exe_patterns
-            .iter()
-            .any(|bad| stem_lower.contains(bad) || file_name_lower.starts_with(bad))
-        {
-            continue;
-        }
-
         let file_size = entry.metadata().map(|m| m.len()).unwrap_or(0);
         if file_size < 150 * 1024 {
             continue;
         }
 
-        let mut score = file_size;
-
-        // Title match bonus (+500 MB)
-        if title_words.iter().any(|w| stem_lower.contains(w)) {
-            score += 500 * 1024 * 1024;
-        }
-
-        // Unreal Engine Shipping binary bonus (`-Win64-Shipping.exe` / `-Win32-Shipping.exe`)
-        if file_name_lower.ends_with("-win64-shipping.exe")
-            || file_name_lower.ends_with("-win32-shipping.exe")
-            || stem_lower.contains("shipping")
-        {
-            score += 450 * 1024 * 1024;
-        }
-
-        // Check sibling files for Unity (`UnityPlayer.dll` / `<Stem>_Data`) and Godot (`<Stem>.pck`)
-        if let Some(parent) = path.parent() {
-            if parent.join("UnityPlayer.dll").exists()
-                || parent.join(format!("{}_Data", stem_lower)).exists()
-            {
-                score += 400 * 1024 * 1024;
-            }
-            if parent.join(format!("{}.pck", stem_lower)).exists()
-                || parent.join("data.pck").exists()
-            {
-                score += 380 * 1024 * 1024;
-            }
+        let score = score_exe_candidate(path, file_size, expected_game_title, &title_words);
+        if score < 0 {
+            continue;
         }
 
         match &best_candidate {
@@ -1223,6 +1361,13 @@ pub(crate) fn find_best_game_exe_in_folder(folder: &Path, expected_game_title: &
     }
 
     best_candidate.map(|(p, _)| p)
+}
+
+/// Scans up to 6 levels deep to find the best playable `.exe`, scoring by file size, title match,
+/// Unreal (`-Win64-Shipping.exe`), Unity (`UnityPlayer.dll` sibling), and Godot (`.pck` sibling) bonuses,
+/// while strictly blacklisting crash handlers, CEF subprocesses, installers, and redistributables.
+pub(crate) fn find_best_game_exe_in_folder(folder: &Path, expected_game_title: &str) -> Option<PathBuf> {
+    find_best_game_exe_with_max_depth(folder, expected_game_title, 6)
 }
 
 async fn auto_install_downloaded_file(
@@ -2206,8 +2351,8 @@ fn update_job_in_memory_and_disk(app: &AppHandle, updated: &DownloadJob, write_d
     }
 }
 
-fn get_http_client() -> &'static Client {
-    duke_core::net_doh::get_http_client()
+fn get_http_client() -> Client {
+    duke_core::net_doh::get_configured_http_client()
 }
 
 /// Rotates cached DoH edge IPs for a URL's host so workers can fail over across CDN edge nodes when throttled.
@@ -3665,7 +3810,8 @@ async fn open_directory_browser(
     custom_save_dir: Option<String>,
     max_speed_mbps: Option<f64>,
 ) -> Result<(), String> {
-    let parsed_url = validate_external_http_url(&url)?;
+    let unwrapped_url = parse_duke_protocol_download_url(&url).unwrap_or(url);
+    let parsed_url = validate_external_http_url(&unwrapped_url)?;
     let display_title = title
         .as_deref()
         .map(str::trim)
@@ -5305,13 +5451,15 @@ pub(crate) async fn enqueue_download_internal(
     mark_pre_resolved: bool,
     reset_speed_limit_when_none: bool,
 ) -> Result<Vec<DownloadJob>, String> {
-    let parsed_url = validate_external_http_url(&url)?;
+    let unwrapped_url = parse_duke_protocol_download_url(&url).unwrap_or(url);
+    let parsed_url = validate_external_http_url(&unwrapped_url)?;
     let trimmed = parsed_url.to_string();
 
     if let Some(speed) = max_speed_mbps {
         GLOBAL_SPEED_LIMIT_KBPS.store((speed * 1024.0) as u64, Ordering::Relaxed);
     } else if reset_speed_limit_when_none {
-        GLOBAL_SPEED_LIMIT_KBPS.store(0, Ordering::Relaxed);
+        let current_settings = load_settings_from_disk(&app);
+        GLOBAL_SPEED_LIMIT_KBPS.store(effective_speed_limit_kbps(&current_settings), Ordering::Relaxed);
     }
 
     let download_dir = match custom_save_dir.filter(|d| !d.trim().is_empty()) {
@@ -5486,8 +5634,28 @@ async fn update_launcher_settings(
     clear_xbox_api_key: Option<bool>,
     psn_npsso: Option<String>,
     clear_psn_npsso: Option<bool>,
+    default_save_dir: Option<String>,
+    download_speed_preset: Option<String>,
+    compact_library_cards: Option<bool>,
+    performance_boost_enabled: Option<bool>,
+    auto_backup_saves_on_exit: Option<bool>,
+    cpu_priority_mode: Option<String>,
+    ram_trim_mode: Option<String>,
+    auto_freeze_minimized: Option<bool>,
+    nvme_cache_budget_pct: Option<u8>,
+    doh_enabled: Option<bool>,
+    custom_proxy_url: Option<String>,
+    custom_speed_cap_mbps: Option<f64>,
+    auto_unblock_motw: Option<bool>,
+    portable_sandbox_default: Option<bool>,
+    max_restore_points: Option<u32>,
+    block_game_telemetry: Option<bool>,
+    global_launch_args: Option<String>,
+    swarm_auto_sync_saves: Option<bool>,
+    start_minimized_with_windows: Option<bool>,
 ) -> Result<LauncherSettings, String> {
     let app_for_save = app.clone();
+    let autostart_change = start_minimized_with_windows;
     let updated = tokio::task::spawn_blocking(move || -> Result<LauncherSettings, String> {
         let mut current = load_settings_from_disk(&app_for_save);
         if let Some(flag) = auto_clean_completed {
@@ -5561,10 +5729,100 @@ async fn update_launcher_settings(
                 current.psn_npsso = Some(trimmed);
             }
         }
-        save_settings_to_disk(&app_for_save, &current)?;
-        if let Ok(mut guard) = get_active_hotkey_cell().lock() {
-            *guard = current.suspend_hotkey.clone();
+        if let Some(dir) = default_save_dir {
+            let trimmed = dir.trim().to_string();
+            current.default_save_dir = if trimmed.is_empty() {
+                None
+            } else {
+                let path = PathBuf::from(&trimmed);
+                if !path.exists() {
+                    fs::create_dir_all(&path)
+                        .map_err(|e| format!("Could not create save folder '{}': {}", trimmed, e))?;
+                }
+                Some(trimmed)
+            };
         }
+        if let Some(preset) = download_speed_preset {
+            let norm = preset.trim().to_ascii_lowercase();
+            current.download_speed_preset = match norm.as_str() {
+                "balanced" | "background" | "max" => norm,
+                _ => "max".to_string(),
+            };
+        }
+        if let Some(compact) = compact_library_cards {
+            current.compact_library_cards = compact;
+        }
+        if let Some(boost) = performance_boost_enabled {
+            current.performance_boost_enabled = boost;
+            current.nvme_prefetch_enabled = boost && current.nvme_cache_budget_pct > 0;
+        }
+        if let Some(auto_bak) = auto_backup_saves_on_exit {
+            current.auto_backup_saves_on_exit = auto_bak;
+        }
+        if let Some(cpu_mode) = cpu_priority_mode {
+            let norm = cpu_mode.trim().to_ascii_lowercase();
+            current.cpu_priority_mode = match norm.as_str() {
+                "max_performance" | "quiet" | "auto" => norm,
+                _ => "auto".to_string(),
+            };
+        }
+        if let Some(trim_mode) = ram_trim_mode {
+            let norm = trim_mode.trim().to_ascii_lowercase();
+            current.ram_trim_mode = match norm.as_str() {
+                "off" | "aggressive" | "standard" => norm,
+                _ => "standard".to_string(),
+            };
+        }
+        if let Some(freeze) = auto_freeze_minimized {
+            current.auto_freeze_minimized = freeze;
+        }
+        if let Some(pct) = nvme_cache_budget_pct {
+            current.nvme_cache_budget_pct = pct.min(40);
+            current.nvme_prefetch_enabled = current.nvme_cache_budget_pct > 0;
+        }
+        if let Some(doh) = doh_enabled {
+            current.doh_enabled = doh;
+        }
+        if let Some(proxy) = custom_proxy_url {
+            current.custom_proxy_url = duke_core::net_doh::validate_proxy_url(Some(&proxy))?;
+        }
+        if let Some(cap) = custom_speed_cap_mbps {
+            current.custom_speed_cap_mbps = if cap.is_finite() && cap > 0.0 {
+                cap.min(10_000.0)
+            } else {
+                0.0
+            };
+        }
+        if let Some(motw) = auto_unblock_motw {
+            current.auto_unblock_motw = motw;
+        }
+        if let Some(sandbox) = portable_sandbox_default {
+            current.portable_sandbox_default = sandbox;
+        }
+        if let Some(max_pts) = max_restore_points {
+            current.max_restore_points = max_pts.clamp(1, 50);
+        }
+        if let Some(block_tel) = block_game_telemetry {
+            current.block_game_telemetry = block_tel;
+        }
+        if let Some(args) = global_launch_args {
+            let trimmed = args.trim().to_string();
+            current.global_launch_args = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            };
+        }
+        if let Some(auto_sync) = swarm_auto_sync_saves {
+            current.swarm_auto_sync_saves = auto_sync;
+        }
+        if let Some(start_min) = autostart_change {
+            win32_clipboard_protocol::set_windows_autostart_minimized(start_min)?;
+            current.start_minimized_with_windows = start_min;
+        }
+
+        save_settings_to_disk(&app_for_save, &current)?;
+        apply_runtime_settings(&current);
         Ok(current.to_ipc_safe())
     })
     .await
@@ -5765,6 +6023,7 @@ mod win32_clipboard_protocol {
             lpData: *const u8,
             cbData: u32,
         ) -> i32;
+        fn RegDeleteValueW(hKey: isize, lpValueName: *const u16) -> i32;
         fn RegCloseKey(hKey: isize) -> i32;
     }
 
@@ -5921,6 +6180,43 @@ mod win32_clipboard_protocol {
         let _ = reg_write_hkcu_sz(r"Software\Classes\duke\shell\open\command", None, &command_line);
     }
 
+    pub fn set_windows_autostart_minimized(enable: bool) -> Result<(), String> {
+        let subkey = r"Software\Microsoft\Windows\CurrentVersion\Run";
+        let value_name = "DukeLauncher";
+        if enable {
+            let exe_path = std::env::current_exe()
+                .map_err(|e| format!("Failed resolving executable path: {}", e))?;
+            let cmd = format!("\"{}\" --minimized", exe_path.to_string_lossy());
+            return reg_write_hkcu_sz(subkey, Some(value_name), &cmd);
+        }
+
+        let subkey_w = to_wide_null(subkey);
+        let mut hkey: isize = 0;
+        let status = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                subkey_w.as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                KEY_WRITE,
+                std::ptr::null(),
+                &mut hkey,
+                std::ptr::null_mut(),
+            )
+        };
+        if status != 0 || hkey == 0 {
+            return Ok(());
+        }
+        let _key_guard = RegKeyGuard(hkey);
+        let name_w = to_wide_null(value_name);
+        let del_status = unsafe { RegDeleteValueW(hkey, name_w.as_ptr()) };
+        if del_status != 0 && del_status != 2 {
+            return Err(format!("RegDeleteValueW({}) failed: {}", value_name, del_status));
+        }
+        Ok(())
+    }
+
     pub fn acquire_single_instance_or_forward(raw_args: &[String]) -> bool {
         let mutex_name = to_wide_null(DUKE_SINGLE_INSTANCE_MUTEX);
         let mutex = unsafe { CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr()) };
@@ -6054,6 +6350,10 @@ mod win32_clipboard_protocol {
     }
 
     pub fn register_duke_uri_protocol() {}
+
+    pub fn set_windows_autostart_minimized(_enable: bool) -> Result<(), String> {
+        Ok(())
+    }
 
     pub fn acquire_single_instance_or_forward(_raw_args: &[String]) -> bool {
         true
@@ -7493,18 +7793,28 @@ async fn launch_game_internal(
         .to_string();
 
     let exe_file_for_start = exe_file.clone();
-    let (resolved_cli_args, game_title, sandbox_enabled, prefetch_enabled, game_root_dir): (
+    let (
+        resolved_cli_args,
+        game_title,
+        sandbox_enabled,
+        prefetch_enabled,
+        game_root_dir,
+        launch_settings,
+    ): (
         Option<String>,
         String,
         bool,
         bool,
         PathBuf,
+        LauncherSettings,
     ) = tokio::task::spawn_blocking(move || {
         let mut saved_args = explicit_args_clone.clone();
         let mut resolved_title = fallback_game_title;
         let global_settings = load_settings_from_disk(&app_for_start);
-        let mut sb_enabled = false;
-        let mut pf_enabled = global_settings.nvme_prefetch_enabled;
+        let mut sb_enabled = global_settings.portable_sandbox_default;
+        let mut pf_enabled = global_settings.performance_boost_enabled
+            && global_settings.nvme_prefetch_enabled
+            && global_settings.nvme_cache_budget_pct > 0;
         let mut g_root = resolve_game_root_dir(&exe_file_for_start);
         if let Ok(mut library) = load_library_from_disk(&app_for_start) {
             if let Some(item) = library.iter_mut().find(|g| {
@@ -7517,8 +7827,13 @@ async fn launch_game_internal(
                 if !item.title.trim().is_empty() {
                     resolved_title = item.title.trim().to_string();
                 }
-                sb_enabled = item.sandbox_enabled;
-                pf_enabled = item.nvme_prefetch_enabled.unwrap_or(global_settings.nvme_prefetch_enabled);
+                sb_enabled = item.sandbox_enabled || global_settings.portable_sandbox_default;
+                let item_pf = item
+                    .nvme_prefetch_enabled
+                    .unwrap_or(global_settings.nvme_prefetch_enabled);
+                pf_enabled = global_settings.performance_boost_enabled
+                    && item_pf
+                    && global_settings.nvme_cache_budget_pct > 0;
                 if !item.install_dir.trim().is_empty() {
                     let cand = PathBuf::from(item.install_dir.trim());
                     if cand.is_dir() {
@@ -7536,33 +7851,50 @@ async fn launch_game_internal(
                 let _ = app_for_start.emit("library-updated", &library);
             }
         }
-        (saved_args, resolved_title, sb_enabled, pf_enabled, g_root)
+        (
+            saved_args,
+            resolved_title,
+            sb_enabled,
+            pf_enabled,
+            g_root,
+            global_settings,
+        )
     })
     .await
     .unwrap_or_else(|_| {
+        let fallback = load_settings_standalone();
         (
             None,
             String::from("Game"),
-            false,
-            load_settings_standalone().nvme_prefetch_enabled,
+            fallback.portable_sandbox_default,
+            fallback.performance_boost_enabled
+                && fallback.nvme_prefetch_enabled
+                && fallback.nvme_cache_budget_pct > 0,
             working_dir.clone(),
+            fallback,
         )
     });
 
-    let parsed_args = resolved_cli_args
+    let mut parsed_args = launch_settings
+        .global_launch_args
         .as_deref()
         .map(parse_cli_launch_args)
         .unwrap_or_default();
+    if let Some(per_game_args) = resolved_cli_args.as_deref() {
+        parsed_args.extend(parse_cli_launch_args(per_game_args));
+    }
 
-    // Anti-Telemetry Game Launch Scrubbing (Section 5) + Per-Game CLI Launch Arguments (Section 6)
+    // Anti-Telemetry Game Launch Scrubbing (when enabled) + Global/Per-Game CLI Launch Arguments
     let mut cmd = tokio::process::Command::new(&exe_file);
     cmd.current_dir(&working_dir)
         .args(&parsed_args)
-        .env("DO_NOT_TRACK", "1")
-        .env("SENTRY_DSN", "")
-        .env("UNITY_DISABLE_ANALYTICS", "1")
-        .env("UE_DISABLE_CRASH_REPORTER", "1")
         .env("STEAM_FRAME_FORCE_CLOSE", "1");
+    if launch_settings.block_game_telemetry {
+        cmd.env("DO_NOT_TRACK", "1")
+            .env("SENTRY_DSN", "")
+            .env("UNITY_DISABLE_ANALYTICS", "1")
+            .env("UE_DISABLE_CRASH_REPORTER", "1");
+    }
 
     if sandbox_enabled {
         if let Ok(env_overrides) = pe_inspect::prepare_game_sandbox_env(&game_root_dir) {
@@ -7599,6 +7931,8 @@ async fn launch_game_internal(
         None
     };
 
+    let cpu_mode_for_tree = launch_settings.cpu_priority_mode.clone();
+    let should_boost_tree = launch_settings.performance_boost_enabled || cpu_mode_for_tree != "auto";
     if game_pid > 0 {
         let mut guard = get_active_sessions().lock().unwrap();
         guard.insert(
@@ -7616,13 +7950,15 @@ async fn launch_game_internal(
                 jguard.insert(session_key.clone(), Arc::clone(job_arc));
             }
             let pids = job_arc.active_pids();
-            if pids.is_empty() {
-                duke_core::win32_ffi::boost_process_tree(&[game_pid]);
-            } else {
-                duke_core::win32_ffi::boost_process_tree(&pids);
+            if should_boost_tree {
+                if pids.is_empty() {
+                    duke_core::win32_ffi::apply_cpu_priority_mode(&[game_pid], &cpu_mode_for_tree);
+                } else {
+                    duke_core::win32_ffi::apply_cpu_priority_mode(&pids, &cpu_mode_for_tree);
+                }
             }
-        } else {
-            duke_core::win32_ffi::boost_process_tree(&[game_pid]);
+        } else if should_boost_tree {
+            duke_core::win32_ffi::apply_cpu_priority_mode(&[game_pid], &cpu_mode_for_tree);
         }
     }
     spawn_hotkey_watcher_if_needed(app.clone());
@@ -7660,9 +7996,10 @@ async fn launch_game_internal(
         let warm_dir = game_root_dir.clone();
         let warm_gid = session_key.clone();
         let warm_title = game_title.clone();
+        let warm_budget_pct = launch_settings.nvme_cache_budget_pct.clamp(1, 40);
         tokio::spawn(async move {
             if let Ok(Ok(report)) = tokio::task::spawn_blocking(move || {
-                duke_core::nvme_prefetch::warm_game_assets(&warm_dir)
+                duke_core::nvme_prefetch::warm_game_assets_with_budget_pct(&warm_dir, warm_budget_pct)
             })
             .await
             {
@@ -7682,9 +8019,6 @@ async fn launch_game_internal(
         });
     }
 
-    // Windows 11 EcoQoS & Hybrid Core Pinning:
-    // Elevate active game tree to ABOVE_NORMAL_PRIORITY_CLASS while pinning Duke Launcher to
-    // BELOW_NORMAL_PRIORITY_CLASS + EcoQoS execution throttling + trimmed working set.
     let _ = app.emit(
         "game-running-state",
         serde_json::json!({
@@ -7693,7 +8027,7 @@ async fn launch_game_internal(
             "pid": game_pid,
             "isSuspended": false,
             "exePath": trimmed,
-            "gameBoost": true
+            "gameBoost": launch_settings.performance_boost_enabled
         }),
     );
     let _ = app.emit(
@@ -7704,18 +8038,20 @@ async fn launch_game_internal(
             "pid": game_pid,
             "isSuspended": false,
             "exePath": trimmed,
-            "gameBoost": true
+            "gameBoost": launch_settings.performance_boost_enabled
         }),
     );
     let _ = window.minimize();
     let _ = window.hide();
-    enable_ecoqos_game_boost_mode();
+    if launch_settings.performance_boost_enabled {
+        enable_ecoqos_game_boost_mode();
+    }
     let _ = app.emit(
         "memory-telemetry",
         serde_json::json!({
             "workingSetMb": get_process_working_set_mb(),
             "dohShield": "ACTIVE",
-            "status": "GAME BOOST"
+            "status": if launch_settings.performance_boost_enabled { "GAME BOOST" } else { "GAME RUNNING" }
         }),
     );
 
@@ -7725,17 +8061,22 @@ async fn launch_game_internal(
     let session_key_after = session_key;
     let game_title_after = game_title;
     let exe_name_after = exe_name_for_bus;
+    let cpu_mode_loop = launch_settings.cpu_priority_mode.clone();
+    let swarm_auto_sync = launch_settings.swarm_enabled && launch_settings.swarm_auto_sync_saves;
+    let auto_backup_saves = launch_settings.auto_backup_saves_on_exit;
+    let install_dir_for_exit = game_root_dir.to_string_lossy().to_string();
     let session_instant = Instant::now();
 
     tokio::spawn(async move {
         if let Some(ref job_arc) = job_handle_opt {
             let job_boost = Arc::clone(job_arc);
+            let mode_handoff = cpu_mode_loop.clone();
             tokio::spawn(async move {
                 // After bootstrapper handoff (~1.5s), promote any spawned game child PIDs too.
                 tokio::time::sleep(Duration::from_millis(1500)).await;
                 let tree_pids = job_boost.active_pids();
-                if !tree_pids.is_empty() {
-                    duke_core::win32_ffi::boost_process_tree(&tree_pids);
+                if !tree_pids.is_empty() && should_boost_tree {
+                    duke_core::win32_ffi::apply_cpu_priority_mode(&tree_pids, &mode_handoff);
                 }
             });
         }
@@ -7750,7 +8091,9 @@ async fn launch_game_internal(
                 if remaining_pids.is_empty() {
                     break;
                 }
-                duke_core::win32_ffi::boost_process_tree(&remaining_pids);
+                if should_boost_tree {
+                    duke_core::win32_ffi::apply_cpu_priority_mode(&remaining_pids, &cpu_mode_loop);
+                }
                 tokio::time::sleep(Duration::from_millis(450)).await;
             }
         }
@@ -7778,7 +8121,7 @@ async fn launch_game_internal(
         };
         if let Some(bus) = DUKE_BUS.get() {
             bus.publish(DukeEvent::GameStopped {
-                title: game_title_after,
+                title: game_title_after.clone(),
                 exe_name: exe_name_after,
                 pid: game_pid,
             });
@@ -7792,7 +8135,18 @@ async fn launch_game_internal(
         );
         if let Some(ref gid) = gid_after {
             achievements::stop_achievement_watcher(gid);
-            swarm::spawn_game_stopped_mesh_sync(gid.clone());
+            if swarm_auto_sync {
+                swarm::spawn_game_stopped_mesh_sync(gid.clone());
+            }
+        }
+        if auto_backup_saves {
+            let b_gid = gid_after.clone();
+            let b_title = Some(game_title_after.clone());
+            let b_dir = Some(install_dir_for_exit.clone());
+            let b_exe = Some(path_after.clone());
+            tokio::spawn(async move {
+                let _ = ludusavi::backup_game_saves_core(b_gid, b_title, b_dir, b_exe).await;
+            });
         }
 
         let app_disk = app_after.clone();
@@ -7855,15 +8209,18 @@ fn spawn_hotkey_watcher_if_needed(app: AppHandle) {
     tokio::spawn(async move {
         let mut was_pressed = false;
         let mut pause_was_pressed = false;
+        let mut ticks_elapsed: u64 = 0;
+        let mut auto_frozen_sessions: HashSet<String> = HashSet::new();
         loop {
             tokio::time::sleep(Duration::from_millis(120)).await;
-            let has_active = {
+            ticks_elapsed = ticks_elapsed.saturating_add(1);
+            let sessions_snapshot: Vec<ActiveGameSession> = {
                 get_active_sessions()
                     .lock()
-                    .map(|g| !g.is_empty())
-                    .unwrap_or(false)
+                    .map(|g| g.values().cloned().collect())
+                    .unwrap_or_default()
             };
-            if !has_active {
+            if sessions_snapshot.is_empty() {
                 break;
             }
 
@@ -7889,15 +8246,34 @@ fn spawn_hotkey_watcher_if_needed(app: AppHandle) {
             pause_was_pressed = pause_pressed;
 
             if edge_configured || edge_pause {
-                let first_id = {
-                    get_active_sessions()
+                if let Some(first) = sessions_snapshot.first() {
+                    auto_frozen_sessions.remove(&first.game_id);
+                    let _ = suspend_or_resume_game(app.clone(), Some(first.game_id.clone()), None).await;
+                }
+            }
+
+            // Poll minimized window state ~every 1.2s after a 15s startup grace period
+            if AUTO_FREEZE_MINIMIZED.load(Ordering::Relaxed) && ticks_elapsed > 125 && ticks_elapsed % 10 == 0 {
+                for sess in &sessions_snapshot {
+                    let mut pids = get_active_jobs_map()
                         .lock()
                         .ok()
-                        .and_then(|g| g.values().next().map(|s| s.game_id.clone()))
-                };
-                if let Some(gid) = first_id {
-                    let _ = suspend_or_resume_game(app.clone(), Some(gid), None).await;
+                        .and_then(|map| map.get(&sess.game_id).map(|job| job.active_pids()))
+                        .unwrap_or_default();
+                    if pids.is_empty() && sess.pid > 0 {
+                        pids.push(sess.pid);
+                    }
+                    let minimized = duke_core::win32_ffi::is_process_tree_minimized(&pids);
+                    if minimized && !sess.is_suspended && !auto_frozen_sessions.contains(&sess.game_id) {
+                        if suspend_or_resume_game(app.clone(), Some(sess.game_id.clone()), Some("suspend".to_string())).await.is_ok() {
+                            auto_frozen_sessions.insert(sess.game_id.clone());
+                        }
+                    } else if !minimized && sess.is_suspended && auto_frozen_sessions.remove(&sess.game_id) {
+                        let _ = suspend_or_resume_game(app.clone(), Some(sess.game_id.clone()), Some("resume".to_string())).await;
+                    }
                 }
+            } else if !AUTO_FREEZE_MINIMIZED.load(Ordering::Relaxed) && !auto_frozen_sessions.is_empty() {
+                auto_frozen_sessions.clear();
             }
         }
         HOTKEY_WATCHER_ACTIVE.store(false, Ordering::SeqCst);
@@ -8033,39 +8409,66 @@ pub(crate) async fn launch_game_detached_headless(
 
     let gid_lookup = game_id.map(str::to_string);
     let exe_lookup = trimmed.to_string();
-    let (sandbox_enabled, prefetch_enabled, game_root_dir) = tokio::task::spawn_blocking(move || {
-        let global_settings = load_settings_standalone();
-        let mut sb = false;
-        let mut pf = global_settings.nvme_prefetch_enabled;
-        let mut g_root = resolve_game_root_dir(Path::new(&exe_lookup));
-        if let Ok(library) = load_library_standalone() {
-            if let Some(item) = library.iter().find(|g| {
-                gid_lookup.as_ref().map(|id| g.id == *id).unwrap_or(false)
-                    || g.exe_path.eq_ignore_ascii_case(&exe_lookup)
-            }) {
-                sb = item.sandbox_enabled;
-                pf = item.nvme_prefetch_enabled.unwrap_or(global_settings.nvme_prefetch_enabled);
-                if !item.install_dir.trim().is_empty() {
-                    let cand = PathBuf::from(item.install_dir.trim());
-                    if cand.is_dir() {
-                        g_root = cand;
+    let (sandbox_enabled, prefetch_enabled, game_root_dir, launch_settings) =
+        tokio::task::spawn_blocking(move || {
+            let global_settings = load_settings_standalone();
+            let mut sb = global_settings.portable_sandbox_default;
+            let mut pf = global_settings.performance_boost_enabled
+                && global_settings.nvme_prefetch_enabled
+                && global_settings.nvme_cache_budget_pct > 0;
+            let mut g_root = resolve_game_root_dir(Path::new(&exe_lookup));
+            if let Ok(library) = load_library_standalone() {
+                if let Some(item) = library.iter().find(|g| {
+                    gid_lookup.as_ref().map(|id| g.id == *id).unwrap_or(false)
+                        || g.exe_path.eq_ignore_ascii_case(&exe_lookup)
+                }) {
+                    sb = item.sandbox_enabled || global_settings.portable_sandbox_default;
+                    let item_pf = item
+                        .nvme_prefetch_enabled
+                        .unwrap_or(global_settings.nvme_prefetch_enabled);
+                    pf = global_settings.performance_boost_enabled
+                        && item_pf
+                        && global_settings.nvme_cache_budget_pct > 0;
+                    if !item.install_dir.trim().is_empty() {
+                        let cand = PathBuf::from(item.install_dir.trim());
+                        if cand.is_dir() {
+                            g_root = cand;
+                        }
                     }
                 }
             }
-        }
-        (sb, pf, g_root)
-    })
-    .await
-    .unwrap_or_else(|_| (false, load_settings_standalone().nvme_prefetch_enabled, working_dir.clone()));
+            (sb, pf, g_root, global_settings)
+        })
+        .await
+        .unwrap_or_else(|_| {
+            let fallback = load_settings_standalone();
+            (
+                fallback.portable_sandbox_default,
+                fallback.performance_boost_enabled
+                    && fallback.nvme_prefetch_enabled
+                    && fallback.nvme_cache_budget_pct > 0,
+                working_dir.clone(),
+                fallback,
+            )
+        });
+
+    let mut combined_args = launch_settings
+        .global_launch_args
+        .as_deref()
+        .map(parse_cli_launch_args)
+        .unwrap_or_default();
+    combined_args.extend(parsed_args);
 
     let mut cmd = Command::new(&exe_file);
     cmd.current_dir(&working_dir)
-        .args(&parsed_args)
-        .env("DO_NOT_TRACK", "1")
-        .env("SENTRY_DSN", "")
-        .env("UNITY_DISABLE_ANALYTICS", "1")
-        .env("UE_DISABLE_CRASH_REPORTER", "1")
+        .args(&combined_args)
         .env("STEAM_FRAME_FORCE_CLOSE", "1");
+    if launch_settings.block_game_telemetry {
+        cmd.env("DO_NOT_TRACK", "1")
+            .env("SENTRY_DSN", "")
+            .env("UNITY_DISABLE_ANALYTICS", "1")
+            .env("UE_DISABLE_CRASH_REPORTER", "1");
+    }
 
     if sandbox_enabled {
         if let Ok(env_overrides) = pe_inspect::prepare_game_sandbox_env(&game_root_dir) {
@@ -8079,6 +8482,9 @@ pub(crate) async fn launch_game_detached_headless(
         .spawn()
         .map_err(|e| format!("Failed spawning '{}': {}", trimmed, e))?;
     let pid = child.id();
+    if launch_settings.performance_boost_enabled || launch_settings.cpu_priority_mode != "auto" {
+        duke_core::win32_ffi::apply_cpu_priority_mode(&[pid], &launch_settings.cpu_priority_mode);
+    }
     let exe_tag = exe_file
         .file_name()
         .and_then(|s| s.to_str())
@@ -8093,8 +8499,9 @@ pub(crate) async fn launch_game_detached_headless(
 
     if prefetch_enabled && game_root_dir.is_dir() {
         let warm_dir = game_root_dir.clone();
+        let budget_pct = launch_settings.nvme_cache_budget_pct.clamp(1, 40);
         tokio::task::spawn_blocking(move || {
-            let _ = duke_core::nvme_prefetch::warm_game_assets(&warm_dir);
+            let _ = duke_core::nvme_prefetch::warm_game_assets_with_budget_pct(&warm_dir, budget_pct);
         });
     }
 
@@ -10217,6 +10624,926 @@ async fn get_system_telemetry() -> Result<Value, String> {
     }))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedShortcut {
+    pub target_exe: String,
+    pub arguments: Option<String>,
+    pub working_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestPathsReport {
+    pub added_count: usize,
+    pub skipped_count: usize,
+    pub added_titles: Vec<String>,
+    pub skipped_reasons: Vec<String>,
+    pub library: Vec<GameEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopCleanupReport {
+    pub scanned_shortcuts: usize,
+    pub imported_count: usize,
+    pub moved_to_backup: usize,
+    pub already_in_library: usize,
+    pub skipped_non_game: usize,
+    pub backup_dir: String,
+    pub imported_titles: Vec<String>,
+    pub library: Vec<GameEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoFixReport {
+    pub game_id: String,
+    pub title: String,
+    pub unblocked_files: usize,
+    pub missing_dlls_found: usize,
+    pub healed_dlls: Vec<String>,
+    pub unresolved_dlls: Vec<String>,
+    pub sandbox_path: String,
+    pub sandbox_enabled: bool,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskSpaceInfo {
+    pub path: String,
+    pub root_drive: String,
+    pub free_bytes: u64,
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub free_pct: f64,
+    pub used_pct: f64,
+    pub free_formatted: String,
+    pub total_formatted: String,
+}
+
+fn expand_windows_env_placeholders(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '%' {
+            if let Some(rel_end) = chars[i + 1..].iter().position(|&c| c == '%') {
+                if rel_end > 0 {
+                    let var_name: String = chars[i + 1..i + 1 + rel_end].iter().collect();
+                    if let Ok(val) = std::env::var(&var_name) {
+                        out.push_str(&val);
+                        i += rel_end + 2;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn wide_buf_to_trimmed_string(buf: &[u16]) -> String {
+    let end = buf.iter().position(|&ch| ch == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end]).trim().to_string()
+}
+
+/// Resolves a Windows `.lnk` shortcut's target executable, arguments, and working directory
+/// using Win32 COM `IShellLinkW` + `IPersistFile`.
+#[cfg(target_os = "windows")]
+pub(crate) fn resolve_lnk_shortcut(lnk_path: &Path) -> Result<ResolvedShortcut, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{Interface, PCWSTR};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED, STGM,
+    };
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink, SLGP_RAWPATH};
+
+    if !lnk_path.is_file() {
+        return Err(format!("Shortcut file does not exist: {}", lnk_path.display()));
+    }
+
+    struct ComInitGuard(bool);
+    impl Drop for ComInitGuard {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
+    let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let _com_guard = ComInitGuard(hr.is_ok());
+
+    let shell_link: IShellLinkW = unsafe {
+        CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
+            .map_err(|e| format!("Failed creating IShellLinkW COM instance: {}", e))?
+    };
+    let persist_file: IPersistFile = shell_link
+        .cast()
+        .map_err(|e| format!("Failed querying IPersistFile interface: {}", e))?;
+
+    let wide_lnk: Vec<u16> = lnk_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        persist_file
+            .Load(PCWSTR(wide_lnk.as_ptr()), STGM(0))
+            .map_err(|e| format!("Failed loading shortcut '{}': {}", lnk_path.display(), e))?;
+    }
+
+    let mut target_buf = vec![0u16; 1024];
+    let _ = unsafe { shell_link.GetPath(&mut target_buf, std::ptr::null_mut(), 0) };
+    let mut target_str = wide_buf_to_trimmed_string(&target_buf);
+    if target_str.is_empty() {
+        let mut raw_buf = vec![0u16; 1024];
+        let _ = unsafe { shell_link.GetPath(&mut raw_buf, std::ptr::null_mut(), SLGP_RAWPATH.0 as u32) };
+        target_str = wide_buf_to_trimmed_string(&raw_buf);
+    }
+    let expanded_target = expand_windows_env_placeholders(&target_str)
+        .trim_matches('"')
+        .to_string();
+
+    let mut args_buf = vec![0u16; 1024];
+    let _ = unsafe { shell_link.GetArguments(&mut args_buf) };
+    let args_str = wide_buf_to_trimmed_string(&args_buf);
+
+    let mut work_buf = vec![0u16; 1024];
+    let _ = unsafe { shell_link.GetWorkingDirectory(&mut work_buf) };
+    let work_str = expand_windows_env_placeholders(&wide_buf_to_trimmed_string(&work_buf));
+
+    if expanded_target.is_empty() {
+        return Err(format!("Shortcut '{}' has no executable target path.", lnk_path.display()));
+    }
+
+    Ok(ResolvedShortcut {
+        target_exe: expanded_target,
+        arguments: (!args_str.is_empty()).then_some(args_str),
+        working_dir: (!work_str.is_empty()).then_some(work_str),
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn resolve_lnk_shortcut(_lnk_path: &Path) -> Result<ResolvedShortcut, String> {
+    Err("Windows .lnk shortcut resolution is only supported on Windows.".to_string())
+}
+
+fn read_steam_appid_from_folder(folder: &Path) -> Option<u32> {
+    for candidate in [
+        folder.join("steam_appid.txt"),
+        folder.join("Engine").join("Binaries").join("Win64").join("steam_appid.txt"),
+    ] {
+        if let Ok(raw) = fs::read_to_string(&candidate) {
+            if let Ok(id) = raw.trim().parse::<u32>() {
+                if id > 0 {
+                    return Some(id);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn match_catalog_appid_for_title(title: &str) -> Option<u32> {
+    let cleaned = clean_game_title(title);
+    if cleaned.len() < 3 || cleaned.eq_ignore_ascii_case("Unknown Game") {
+        return None;
+    }
+    let matches = catalog_mmap::search_catalog_via_mmap(&cleaned, 3).unwrap_or_default();
+    let cleaned_lower = cleaned.to_lowercase();
+    matches
+        .into_iter()
+        .find(|entry| {
+            let entry_clean = clean_game_title(&entry.name).to_lowercase();
+            entry_clean == cleaned_lower || entry_clean.contains(&cleaned_lower)
+        })
+        .map(|entry| entry.app_id)
+}
+
+async fn apply_shortcut_launch_args_if_empty(
+    app: &AppHandle,
+    game_id: &str,
+    shortcut_args: Option<String>,
+) {
+    let Some(args) = shortcut_args.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let app_clone = app.clone();
+    let gid_owned = game_id.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Ok(mut library) = load_library_from_disk(&app_clone) {
+            if let Some(item) = library.iter_mut().find(|g| g.id == gid_owned) {
+                if item.launch_args.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                    item.launch_args = Some(args);
+                    let _ = save_library_to_disk(&app_clone, &library);
+                }
+            }
+        }
+    })
+    .await;
+}
+
+/// Automatically ingests any dropped folders, `.exe` files, or `.lnk` shortcuts in zero extra clicks.
+#[tauri::command]
+async fn ingest_dropped_paths(
+    app: AppHandle,
+    paths: Vec<String>,
+) -> Result<IngestPathsReport, String> {
+    let mut seen = HashSet::new();
+    let mut added_titles = Vec::new();
+    let mut skipped_reasons = Vec::new();
+
+    for raw in paths {
+        let trimmed = raw.trim().trim_matches('"').to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let norm_key = trimmed.to_lowercase();
+        if !seen.insert(norm_key) {
+            continue;
+        }
+
+        let path = PathBuf::from(&trimmed);
+        if !path.exists() {
+            skipped_reasons.push(format!("Skipped '{}': path no longer exists.", trimmed));
+            continue;
+        }
+
+        if path.is_dir() {
+            unblock_ntfs_zone_identifier(&path);
+            let folder_title = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(clean_game_title)
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| "Dropped Game".to_string());
+            let dir_scan = path.clone();
+            let title_scan = folder_title.clone();
+            let best_exe = tokio::task::spawn_blocking(move || {
+                find_best_game_exe_with_max_depth(&dir_scan, &title_scan, 3)
+            })
+            .await
+            .map_err(|e| format!("Folder scan worker failed: {}", e))?;
+
+            let Some(exe_path) = best_exe else {
+                skipped_reasons.push(format!(
+                    "No playable game executable found inside '{}'.",
+                    folder_title
+                ));
+                continue;
+            };
+            let app_id = read_steam_appid_from_folder(&path)
+                .or_else(|| match_catalog_appid_for_title(&folder_title));
+            match add_local_game_with_origin(
+                app.clone(),
+                exe_path.to_string_lossy().to_string(),
+                Some(folder_title),
+                None,
+                None,
+                app_id,
+                Some("dropped_folder"),
+            )
+            .await
+            {
+                Ok(entry) => {
+                    let _ = sidebar_icons::get_sidebar_icons(
+                        app.clone(),
+                        vec![entry.id.clone()],
+                    )
+                    .await;
+                    added_titles.push(entry.title);
+                }
+                Err(err) => skipped_reasons.push(err),
+            }
+            continue;
+        }
+
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        if ext == "lnk" {
+            let lnk_clone = path.clone();
+            let resolved = tokio::task::spawn_blocking(move || resolve_lnk_shortcut(&lnk_clone))
+                .await
+                .map_err(|e| format!("Shortcut resolver failed: {}", e))?;
+            let resolved = match resolved {
+                Ok(r) => r,
+                Err(err) => {
+                    skipped_reasons.push(err);
+                    continue;
+                }
+            };
+            let target_path = PathBuf::from(&resolved.target_exe);
+            if !target_path.is_file()
+                || target_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| !e.eq_ignore_ascii_case("exe"))
+                    .unwrap_or(true)
+            {
+                skipped_reasons.push(format!(
+                    "Shortcut '{}' does not point to a valid .exe file.",
+                    path.file_name().and_then(|s| s.to_str()).unwrap_or("shortcut")
+                ));
+                continue;
+            }
+            let game_root = resolve_game_root_dir(&target_path);
+            unblock_ntfs_zone_identifier(&game_root);
+            let lnk_title = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(clean_game_title)
+                .filter(|t| !t.is_empty() && t != "Unknown Game");
+            let app_id = read_steam_appid_from_folder(&game_root)
+                .or_else(|| lnk_title.as_deref().and_then(match_catalog_appid_for_title));
+
+            match add_local_game_with_origin(
+                app.clone(),
+                resolved.target_exe,
+                lnk_title,
+                None,
+                None,
+                app_id,
+                Some("dropped_shortcut"),
+            )
+            .await
+            {
+                Ok(entry) => {
+                    apply_shortcut_launch_args_if_empty(&app, &entry.id, resolved.arguments).await;
+                    let _ = sidebar_icons::get_sidebar_icons(
+                        app.clone(),
+                        vec![entry.id.clone()],
+                    )
+                    .await;
+                    added_titles.push(entry.title);
+                }
+                Err(err) => skipped_reasons.push(err),
+            }
+            continue;
+        }
+
+        if ext == "exe" {
+            let game_root = resolve_game_root_dir(&path);
+            unblock_ntfs_zone_identifier(&game_root);
+            let fallback_name = game_root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(clean_game_title)
+                .filter(|t| !t.is_empty() && t != "Unknown Game");
+            let app_id = read_steam_appid_from_folder(&game_root)
+                .or_else(|| fallback_name.as_deref().and_then(match_catalog_appid_for_title));
+
+            match add_local_game_with_origin(
+                app.clone(),
+                path.to_string_lossy().to_string(),
+                fallback_name,
+                None,
+                None,
+                app_id,
+                Some("dropped_exe"),
+            )
+            .await
+            {
+                Ok(entry) => {
+                    let _ = sidebar_icons::get_sidebar_icons(
+                        app.clone(),
+                        vec![entry.id.clone()],
+                    )
+                    .await;
+                    added_titles.push(entry.title);
+                }
+                Err(err) => skipped_reasons.push(err),
+            }
+            continue;
+        }
+
+        skipped_reasons.push(format!(
+            "Unsupported drop '{}': drop a game folder, .exe, or Windows .lnk shortcut.",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or(&trimmed)
+        ));
+    }
+
+    let library = tokio::task::spawn_blocking({
+        let app_clone = app.clone();
+        move || load_library_from_disk(&app_clone)
+    })
+    .await
+    .map_err(|e| format!("Library reload failed: {}", e))??;
+    let _ = app.emit("library-updated", &library);
+
+    Ok(IngestPathsReport {
+        added_count: added_titles.len(),
+        skipped_count: skipped_reasons.len(),
+        added_titles,
+        skipped_reasons,
+        library,
+    })
+}
+
+fn is_likely_non_game_shortcut(lnk_path: &Path, target_exe: &Path) -> bool {
+    let lnk_stem = lnk_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if lnk_stem.contains("duke launcher")
+        || lnk_stem.contains("duke systems")
+        || lnk_stem.contains("uninstall")
+    {
+        return true;
+    }
+
+    let target_lower = target_exe.to_string_lossy().to_ascii_lowercase();
+    if target_lower.contains("\\windows\\")
+        || target_lower.contains("\\system32\\")
+        || target_lower.contains("\\syswow64\\")
+        || target_lower.contains("\\programdata\\microsoft\\")
+    {
+        return true;
+    }
+
+    let exe_name = target_exe
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    const NON_GAME_EXES: &[&str] = &[
+        "duke-launcher.exe",
+        "duke-systems.exe",
+        "duke-monitor.exe",
+        "duke-capture.exe",
+        "duke-input.exe",
+        "steam.exe",
+        "epicgameslauncher.exe",
+        "galaxyclient.exe",
+        "upc.exe",
+        "eadesktop.exe",
+        "battle.net.exe",
+        "chrome.exe",
+        "msedge.exe",
+        "firefox.exe",
+        "brave.exe",
+        "opera.exe",
+        "discord.exe",
+        "slack.exe",
+        "spotify.exe",
+        "code.exe",
+        "devenv.exe",
+        "obs64.exe",
+        "obs32.exe",
+        "vlc.exe",
+        "7zfm.exe",
+        "winrar.exe",
+        "explorer.exe",
+        "cmd.exe",
+        "powershell.exe",
+        "pwsh.exe",
+        "wt.exe",
+        "notepad.exe",
+        "unins000.exe",
+        "uninstall.exe",
+        "setup.exe",
+        "dxsetup.exe",
+    ];
+    if NON_GAME_EXES.contains(&exe_name.as_str()) {
+        return true;
+    }
+    false
+}
+
+#[derive(Debug, Clone)]
+struct DesktopShortcutCandidate {
+    lnk_path: PathBuf,
+    title: String,
+    resolved: ResolvedShortcut,
+}
+
+fn move_file_with_unique_name(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+    fs::create_dir_all(dest_dir)
+        .map_err(|e| format!("Failed creating shortcut backup folder: {}", e))?;
+    let stem = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Shortcut");
+    let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("lnk");
+    let mut candidate = dest_dir.join(format!("{}.{}", stem, ext));
+    let mut suffix = 1usize;
+    while candidate.exists() {
+        candidate = dest_dir.join(format!("{}_{}.{}", stem, suffix, ext));
+        suffix += 1;
+    }
+    if fs::rename(src, &candidate).is_err() {
+        fs::copy(src, &candidate)
+            .map_err(|e| format!("Failed copying shortcut '{}': {}", src.display(), e))?;
+        let _ = fs::remove_file(src);
+    }
+    Ok(candidate)
+}
+
+fn collect_desktop_game_shortcuts_sync(
+    desktop_dirs: &[PathBuf],
+) -> (usize, usize, Vec<DesktopShortcutCandidate>) {
+    let mut scanned = 0usize;
+    let mut skipped_non_game = 0usize;
+    let mut candidates = Vec::new();
+
+    for dir in desktop_dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let is_lnk = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("lnk"))
+                .unwrap_or(false);
+            if !is_lnk {
+                continue;
+            }
+            scanned += 1;
+            let Ok(resolved) = resolve_lnk_shortcut(&path) else {
+                skipped_non_game += 1;
+                continue;
+            };
+            let target_path = PathBuf::from(&resolved.target_exe);
+            let is_exe = target_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("exe"))
+                .unwrap_or(false);
+            if !target_path.is_file()
+                || !is_exe
+                || is_likely_non_game_shortcut(&path, &target_path)
+            {
+                skipped_non_game += 1;
+                continue;
+            }
+
+            let title = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(clean_game_title)
+                .filter(|t| !t.is_empty() && t != "Unknown Game")
+                .unwrap_or_else(|| {
+                    target_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(clean_game_title)
+                        .unwrap_or_else(|| "Game".to_string())
+                });
+
+            candidates.push(DesktopShortcutCandidate {
+                lnk_path: path,
+                title,
+                resolved,
+            });
+        }
+    }
+
+    (scanned, skipped_non_game, candidates)
+}
+
+fn resolve_user_and_public_desktop_dirs() -> Result<(PathBuf, Vec<PathBuf>), String> {
+    let mut dirs = Vec::new();
+    let user_desktop = std::env::var("USERPROFILE")
+        .ok()
+        .map(|p| PathBuf::from(p).join("Desktop"))
+        .filter(|p| !p.as_os_str().is_empty());
+
+    let primary_desktop = user_desktop
+        .clone()
+        .ok_or_else(|| "Could not resolve USERPROFILE Desktop directory.".to_string())?;
+    if primary_desktop.is_dir() {
+        dirs.push(primary_desktop.clone());
+    }
+
+    if let Ok(public_root) = std::env::var("PUBLIC") {
+        let public_desktop = PathBuf::from(public_root).join("Desktop");
+        if public_desktop.is_dir()
+            && !dirs
+                .iter()
+                .any(|d| d.to_string_lossy().eq_ignore_ascii_case(&public_desktop.to_string_lossy()))
+        {
+            dirs.push(public_desktop);
+        }
+    }
+
+    Ok((primary_desktop.join("Duke Shortcut Backup"), dirs))
+}
+
+/// Scans `%USERPROFILE%\Desktop` and Public Desktop for `.lnk` game shortcuts using Win32
+/// `IShellLinkW`, imports them into `library.json`, and moves processed `.lnk` files into
+/// `%USERPROFILE%\Desktop\Duke Shortcut Backup\`.
+#[tauri::command]
+async fn scan_and_clean_desktop_shortcuts(app: AppHandle) -> Result<DesktopCleanupReport, String> {
+    let (backup_dir, desktop_dirs) = resolve_user_and_public_desktop_dirs()?;
+    let dirs_for_scan = desktop_dirs.clone();
+    let (scanned_shortcuts, skipped_non_game, candidates) =
+        tokio::task::spawn_blocking(move || collect_desktop_game_shortcuts_sync(&dirs_for_scan))
+            .await
+            .map_err(|e| format!("Desktop shortcut scanner failed: {}", e))?;
+
+    let existing_library = tokio::task::spawn_blocking({
+        let app_clone = app.clone();
+        move || load_library_from_disk(&app_clone)
+    })
+    .await
+    .map_err(|e| format!("Library read failed: {}", e))??;
+
+    let existing_paths: HashSet<String> = existing_library
+        .iter()
+        .map(|g| g.exe_path.trim().to_ascii_lowercase())
+        .collect();
+
+    let mut imported_count = 0usize;
+    let mut moved_to_backup = 0usize;
+    let mut already_in_library = 0usize;
+    let mut imported_titles = Vec::new();
+
+    for cand in candidates {
+        let exe_key = cand.resolved.target_exe.trim().to_ascii_lowercase();
+        if existing_paths.contains(&exe_key) {
+            already_in_library += 1;
+            if move_file_with_unique_name(&cand.lnk_path, &backup_dir).is_ok() {
+                moved_to_backup += 1;
+            }
+            continue;
+        }
+
+        let target_exe = PathBuf::from(&cand.resolved.target_exe);
+        let game_root = resolve_game_root_dir(&target_exe);
+        let app_id = read_steam_appid_from_folder(&game_root)
+            .or_else(|| match_catalog_appid_for_title(&cand.title));
+
+        if let Ok(entry) = add_local_game_with_origin(
+            app.clone(),
+            cand.resolved.target_exe.clone(),
+            Some(cand.title.clone()),
+            None,
+            None,
+            app_id,
+            Some("desktop_shortcut"),
+        )
+        .await
+        {
+            apply_shortcut_launch_args_if_empty(&app, &entry.id, cand.resolved.arguments.clone())
+                .await;
+            let _ = sidebar_icons::get_sidebar_icons(app.clone(), vec![entry.id.clone()]).await;
+            imported_count += 1;
+            imported_titles.push(entry.title);
+            if move_file_with_unique_name(&cand.lnk_path, &backup_dir).is_ok() {
+                moved_to_backup += 1;
+            }
+        }
+    }
+
+    let library = tokio::task::spawn_blocking({
+        let app_clone = app.clone();
+        move || load_library_from_disk(&app_clone)
+    })
+    .await
+    .map_err(|e| format!("Library reload failed: {}", e))??;
+    let _ = app.emit("library-updated", &library);
+
+    Ok(DesktopCleanupReport {
+        scanned_shortcuts,
+        imported_count,
+        moved_to_backup,
+        already_in_library,
+        skipped_non_game,
+        backup_dir: backup_dir.to_string_lossy().to_string(),
+        imported_titles,
+        library,
+    })
+}
+
+/// Runs 1-click Auto-Fix on a game: unblocks NTFS `:Zone.Identifier`, runs PE32/PE32+ DLL
+/// inspection & redistributable healing, and initializes an isolated `.duke-profile/` sandbox.
+#[tauri::command]
+async fn auto_fix_game(app: AppHandle, game_id: String) -> Result<AutoFixReport, String> {
+    let app_for_fix = app.clone();
+    let gid = game_id.clone();
+
+    let (report, updated_library) = tokio::task::spawn_blocking(move || -> Result<(AutoFixReport, Vec<GameEntry>), String> {
+        let mut library = load_library_from_disk(&app_for_fix)?;
+        let Some(game_idx) = library.iter().position(|g| g.id == gid) else {
+            return Err("Game not found in library.".to_string());
+        };
+
+        let exe_path = PathBuf::from(library[game_idx].exe_path.trim());
+        if !exe_path.is_file() {
+            return Err(format!("Game executable not found: {}", exe_path.display()));
+        }
+        let game_dir = if !library[game_idx].install_dir.trim().is_empty()
+            && Path::new(library[game_idx].install_dir.trim()).is_dir()
+        {
+            PathBuf::from(library[game_idx].install_dir.trim())
+        } else {
+            resolve_game_root_dir(&exe_path)
+        };
+
+        let mut unblocked_files = unblock_ntfs_zone_identifier_raw(&game_dir);
+        if !exe_path.starts_with(&game_dir) {
+            unblocked_files += unblock_ntfs_zone_identifier_raw(&exe_path);
+        }
+
+        let preflight = pe_inspect::inspect_exe_with_dirs(&exe_path, None, &[])?;
+        let missing_names: Vec<String> = preflight.missing_dlls.iter().map(|d| d.name.clone()).collect();
+        let missing_dlls_found = missing_names.len();
+        let mut healed_dlls = Vec::new();
+        let mut unresolved_dlls = missing_names.clone();
+
+        if !missing_names.is_empty() {
+            let heal = pe_inspect::heal_missing_dlls_into_game_dir(
+                &exe_path,
+                Some(&missing_names),
+                None,
+                &[],
+            )?;
+            healed_dlls = heal.copied_dlls;
+            unresolved_dlls = heal.skipped_dlls;
+        }
+
+        let env_map = pe_inspect::prepare_game_sandbox_env(&game_dir)?;
+        let sandbox_path = env_map
+            .iter()
+            .find(|(k, _)| k == "APPDATA")
+            .and_then(|(_, p)| Path::new(p).parent())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| game_dir.join(".duke-profile").to_string_lossy().to_string());
+
+        library[game_idx].sandbox_enabled = true;
+        let title = library[game_idx].title.clone();
+        save_library_to_disk(&app_for_fix, &library)?;
+
+        let mut parts = Vec::new();
+        if unblocked_files > 0 {
+            parts.push(format!("Unblocked {} Windows-tagged files", unblocked_files));
+        } else {
+            parts.push("Checked file safety tags (all clear)".to_string());
+        }
+        if !healed_dlls.is_empty() {
+            parts.push(format!(
+                "repaired {} missing Windows runtime file(s) ({})",
+                healed_dlls.len(),
+                healed_dlls.join(", ")
+            ));
+        } else if unresolved_dlls.is_empty() {
+            parts.push("verified all Windows runtime files are present".to_string());
+        } else {
+            parts.push(format!(
+                "{} file(s) still missing ({})",
+                unresolved_dlls.len(),
+                unresolved_dlls.join(", ")
+            ));
+        }
+        parts.push("enabled isolated game save folder (.duke-profile)".to_string());
+        let summary = format!("{}.", parts.join(", "));
+
+        let report = AutoFixReport {
+            game_id: gid,
+            title,
+            unblocked_files,
+            missing_dlls_found,
+            healed_dlls,
+            unresolved_dlls,
+            sandbox_path,
+            sandbox_enabled: true,
+            summary,
+        };
+        Ok((report, library))
+    })
+    .await
+    .map_err(|e| format!("Auto-Fix worker failed: {}", e))??;
+
+    let _ = app.emit("library-updated", &updated_library);
+    Ok(report)
+}
+
+#[cfg(target_os = "windows")]
+fn query_disk_free_space_sync(target_dir: &Path) -> Result<(u64, u64), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let mut check_dir = target_dir.to_path_buf();
+    while !check_dir.exists() {
+        let Some(parent) = check_dir.parent() else {
+            break;
+        };
+        check_dir = parent.to_path_buf();
+    }
+    let query_path = if check_dir.exists() {
+        check_dir
+    } else {
+        PathBuf::from("C:\\")
+    };
+    let wide: Vec<u16> = query_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut free_avail = 0u64;
+    let mut total_bytes = 0u64;
+    unsafe {
+        GetDiskFreeSpaceExW(
+            PCWSTR(wide.as_ptr()),
+            Some(&mut free_avail),
+            Some(&mut total_bytes),
+            None,
+        )
+        .map_err(|e| format!("GetDiskFreeSpaceExW failed: {}", e))?;
+    }
+    Ok((free_avail, total_bytes))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn query_disk_free_space_sync(_target_dir: &Path) -> Result<(u64, u64), String> {
+    Ok((0, 0))
+}
+
+/// Returns live drive space telemetry for the configured game save folder.
+#[tauri::command]
+async fn get_disk_free_space(
+    app: AppHandle,
+    path: Option<String>,
+) -> Result<DiskSpaceInfo, String> {
+    let target = match path.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        Some(custom) => PathBuf::from(custom),
+        None => resolve_default_downloads_dir(&app),
+    };
+    let path_display = target.to_string_lossy().to_string();
+    let root_drive = target
+        .components()
+        .next()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .unwrap_or_else(|| "Drive".to_string());
+
+    let target_clone = target.clone();
+    let (free_bytes, total_bytes) = tokio::task::spawn_blocking(move || query_disk_free_space_sync(&target_clone))
+        .await
+        .map_err(|e| format!("Disk space worker failed: {}", e))??;
+
+    let used_bytes = total_bytes.saturating_sub(free_bytes);
+    let free_pct = if total_bytes > 0 {
+        ((free_bytes as f64 / total_bytes as f64) * 1000.0).round() / 10.0
+    } else {
+        0.0
+    };
+    let used_pct = (100.0 - free_pct).clamp(0.0, 100.0);
+
+    Ok(DiskSpaceInfo {
+        path: path_display,
+        root_drive,
+        free_bytes,
+        total_bytes,
+        used_bytes,
+        free_pct,
+        used_pct,
+        free_formatted: format_bytes(free_bytes),
+        total_formatted: format_bytes(total_bytes),
+    })
+}
+
+/// Registers `duke://` browser download protocol handler in `HKCU\Software\Classes\duke`.
+#[tauri::command]
+fn register_duke_protocol() -> Result<String, String> {
+    win32_clipboard_protocol::register_duke_uri_protocol();
+    Ok("Registered duke:// one-click browser download links with Windows.".to_string())
+}
+
+/// Runs the Duke Suite hardware subsystem microbenchmark suite inline for Advanced Engine settings.
+#[tauri::command]
+async fn run_subsystem_benchmark() -> Result<Value, String> {
+    tokio::task::spawn_blocking(|| {
+        let report = bench::run_benchmarks()?;
+        let table = bench::render_benchmark_table(&report);
+        Ok(serde_json::json!({
+            "report": report,
+            "table": table,
+        }))
+    })
+    .await
+    .map_err(|e| format!("Benchmark worker failed: {}", e))?
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct UpdateFeedMetadata {
@@ -11105,8 +12432,18 @@ fn main() {
             // Map `catalog.dkcat` via zero-copy mmap on startup (`0 ms` parse, `0 KB` heap).
             let _ = catalog_mmap::ensure_catalog_mapped_standalone();
 
+            let initial_settings = load_settings_from_disk(app.handle());
+            apply_runtime_settings(&initial_settings);
+
+            if std::env::args().any(|a| a == "--minimized") {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.minimize();
+                    let _ = win.hide();
+                }
+            }
+
             // Start Duke Swarm LAN/Tailscale discovery only if enabled by user settings.
-            if load_settings_standalone().swarm_enabled {
+            if initial_settings.swarm_enabled {
                 swarm::start_swarm_background_services();
             }
 
@@ -11131,13 +12468,18 @@ fn main() {
                 })
             });
 
-            // Trim working-set immediately after startup initialization
-            trim_process_working_set();
+            // Trim working-set immediately after startup initialization (unless RAM trim is set to Off)
+            if RAM_TRIM_MODE.load(Ordering::Relaxed) != 0 {
+                trim_process_working_set();
+            }
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(60));
+                let mut tick_count: u64 = 0;
+                let mut interval = tokio::time::interval(Duration::from_secs(15));
                 loop {
                     interval.tick().await;
+                    tick_count = tick_count.saturating_add(1);
+                    let ram_mode = RAM_TRIM_MODE.load(Ordering::Relaxed);
                     let any_downloading = {
                         let guard = get_queue_store().lock().unwrap();
                         guard.iter().any(|j| {
@@ -11151,8 +12493,19 @@ fn main() {
                         .map(|w| w.is_minimized().unwrap_or(false))
                         .unwrap_or(true);
 
-                    if !any_downloading || is_headless_or_minimized {
+                    let should_trim = match ram_mode {
+                        0 => false,                                       // Off
+                        2 => !any_downloading || is_headless_or_minimized, // Aggressive: every 15s
+                        _ => (tick_count % 4 == 0) && (!any_downloading || is_headless_or_minimized), // Standard: every 60s
+                    };
+                    if should_trim {
+                        if ram_mode == 2 && is_headless_or_minimized {
+                            duke_core::win32_ffi::enable_idle_eco_qos_mode();
+                        }
                         trim_process_working_set();
+                    }
+                    if !(ram_mode == 2 || tick_count % 4 == 0) {
+                        continue;
                     }
 
                     let ram_mb = get_process_working_set_mb();
@@ -11167,10 +12520,16 @@ fn main() {
                         "memory-telemetry",
                         serde_json::json!({
                             "workingSetMb": ram_mb,
-                            "dohShield": "ACTIVE",
+                            "dohShield": if duke_core::net_doh::is_doh_enabled() { "ACTIVE" } else { "SYSTEM DNS" },
                             "dohCachedHosts": doh_hosts,
                             "portableMode": resolve_portable_data_dir().is_some(),
-                            "status": if is_headless_or_minimized { "TRAY DAEMON IDLE" } else { "IDLE TRIMMED" }
+                            "status": if ram_mode == 0 {
+                                "TRIM PAUSED"
+                            } else if is_headless_or_minimized {
+                                "TRAY DAEMON IDLE"
+                            } else {
+                                "IDLE TRIMMED"
+                            }
                         }),
                     );
                 }
@@ -11247,6 +12606,13 @@ fn main() {
             snapshots::list_game_snapshots,
             snapshots::restore_game_snapshot,
             snapshots::delete_game_snapshot,
+            snapshots::reclaim_snapshot_space,
+            ingest_dropped_paths,
+            scan_and_clean_desktop_shortcuts,
+            auto_fix_game,
+            get_disk_free_space,
+            register_duke_protocol,
+            run_subsystem_benchmark,
             catalog_mmap::get_catalog_mmap_stats,
             catalog_mmap::search_catalog_mmap,
             catalog_mmap::query_catalog_mmap,
@@ -11396,6 +12762,37 @@ mod tests {
     fn test_atomic_write_and_default_serde_resilience() {
         let defaults: LauncherSettings = serde_json::from_str("{}").unwrap();
         assert!(defaults.auto_clean_completed);
+        assert_eq!(defaults.download_speed_preset, "max");
+        assert!(!defaults.compact_library_cards);
+        assert!(defaults.performance_boost_enabled);
+        assert!(!defaults.auto_backup_saves_on_exit);
+        assert_eq!(defaults.cpu_priority_mode, "auto");
+        assert_eq!(defaults.ram_trim_mode, "standard");
+        assert!(!defaults.auto_freeze_minimized);
+        assert_eq!(defaults.nvme_cache_budget_pct, 25);
+        assert!(defaults.doh_enabled);
+        assert!(defaults.custom_proxy_url.is_none());
+        assert_eq!(defaults.custom_speed_cap_mbps, 0.0);
+        assert!(defaults.auto_unblock_motw);
+        assert!(!defaults.portable_sandbox_default);
+        assert_eq!(defaults.max_restore_points, 5);
+        assert!(defaults.block_game_telemetry);
+        assert!(defaults.global_launch_args.is_none());
+        assert!(!defaults.swarm_auto_sync_saves);
+        assert!(!defaults.start_minimized_with_windows);
+
+        let partial_settings: LauncherSettings = serde_json::from_str(
+            r#"{"downloadSpeedPreset":"balanced","nvmeCacheBudgetPct":40,"customProxyUrl":"socks5://127.0.0.1:1080","maxRestorePoints":10}"#,
+        )
+        .unwrap();
+        assert_eq!(partial_settings.download_speed_preset, "balanced");
+        assert_eq!(partial_settings.nvme_cache_budget_pct, 40);
+        assert_eq!(
+            partial_settings.custom_proxy_url.as_deref(),
+            Some("socks5://127.0.0.1:1080")
+        );
+        assert_eq!(partial_settings.max_restore_points, 10);
+        assert!(partial_settings.performance_boost_enabled);
 
         let partial_job: DownloadJob =
             serde_json::from_str(r#"{"downloadId":"dl_1","status":"PAUSED"}"#).unwrap();
@@ -11759,5 +13156,140 @@ mod tests {
         assert!(is_newer_version("", "0.1.0"));
         assert!(!is_newer_version("v2.1.0", "2.1.0"));
         assert!(!is_newer_version("2.1.0", "2.0.9"));
+    }
+
+    #[test]
+    fn test_folder_exe_scoring_penalizes_helpers_and_honors_depth_limit() {
+        let root = std::env::temp_dir().join(format!(
+            "duke_exe_score_test_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let game_dir = root.join("Elden Ring");
+        let bin_dir = game_dir.join("Game");
+        let deep_dir = game_dir.join("a").join("b").join("c"); // depth 4 relative to game_dir
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::create_dir_all(&deep_dir).unwrap();
+
+        let helper_names = [
+            "unins000.exe",
+            "UnityCrashHandler64.exe",
+            "CrashReportClient.exe",
+            "vc_redist.x64.exe",
+            "dxsetup.exe",
+            "dotnetfx48.exe",
+        ];
+        for name in helper_names {
+            let helper_path = game_dir.join(name);
+            fs::write(&helper_path, vec![0u8; 512 * 1024]).unwrap();
+            let s = score_exe_candidate(&helper_path, 512 * 1024, "Elden Ring", &["elden".into(), "ring".into()]);
+            assert!(s < 0, "expected negative score for helper {}", name);
+        }
+
+        let launcher_exe = bin_dir.join("start_protected_game.exe");
+        let main_exe = bin_dir.join("eldenring.exe");
+        let too_deep_exe = deep_dir.join("elden_ring_deep_archive_loader.exe");
+        fs::write(&launcher_exe, vec![0u8; 220 * 1024]).unwrap();
+        fs::write(&main_exe, vec![0u8; 400 * 1024]).unwrap();
+        fs::write(&too_deep_exe, vec![0u8; 900 * 1024]).unwrap();
+
+        let picked = find_best_game_exe_with_max_depth(&game_dir, "Elden Ring", 3)
+            .expect("should pick main executable within 3 levels");
+        assert_eq!(picked, main_exe);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_win32_lnk_resolution_and_desktop_cleanup() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::{Interface, PCWSTR};
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
+            COINIT_APARTMENTTHREADED,
+        };
+        use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+
+        fn create_test_lnk(
+            lnk_path: &Path,
+            target: &Path,
+            args: &str,
+            workdir: &Path,
+        ) {
+            let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            let shell_link: IShellLinkW =
+                unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER) }.unwrap();
+            let t_w: Vec<u16> = target
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let a_w: Vec<u16> = args.encode_utf16().chain(std::iter::once(0)).collect();
+            let w_w: Vec<u16> = workdir
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let l_w: Vec<u16> = lnk_path
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            unsafe {
+                shell_link.SetPath(PCWSTR(t_w.as_ptr())).unwrap();
+                shell_link.SetArguments(PCWSTR(a_w.as_ptr())).unwrap();
+                shell_link.SetWorkingDirectory(PCWSTR(w_w.as_ptr())).unwrap();
+                let pf: IPersistFile = shell_link.cast().unwrap();
+                pf.Save(PCWSTR(l_w.as_ptr()), true).unwrap();
+                if hr.is_ok() {
+                    CoUninitialize();
+                }
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "duke_lnk_desktop_test_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let fake_desktop = root.join("Desktop");
+        let backup_dir = fake_desktop.join("Duke Shortcut Backup");
+        let game_dir = root.join("Games").join("SpaceQuest");
+        fs::create_dir_all(&fake_desktop).unwrap();
+        fs::create_dir_all(&game_dir).unwrap();
+
+        let game_exe = game_dir.join("SpaceQuest.exe");
+        fs::write(&game_exe, vec![0u8; 256 * 1024]).unwrap();
+
+        let game_lnk = fake_desktop.join("Space Quest.lnk");
+        create_test_lnk(&game_lnk, &game_exe, "-novid -windowed", &game_dir);
+
+        let browser_exe = game_dir.join("chrome.exe");
+        fs::write(&browser_exe, vec![0u8; 256 * 1024]).unwrap();
+        let browser_lnk = fake_desktop.join("Google Chrome.lnk");
+        create_test_lnk(&browser_lnk, &browser_exe, "", &game_dir);
+
+        let resolved = resolve_lnk_shortcut(&game_lnk).expect("IShellLinkW should resolve .lnk");
+        assert!(resolved.target_exe.eq_ignore_ascii_case(&game_exe.to_string_lossy()));
+        assert_eq!(resolved.arguments.as_deref(), Some("-novid -windowed"));
+        assert_eq!(
+            resolved.working_dir.as_deref(),
+            Some(game_dir.to_string_lossy().as_ref())
+        );
+
+        let (scanned, skipped_non_game, candidates) =
+            collect_desktop_game_shortcuts_sync(std::slice::from_ref(&fake_desktop));
+        assert_eq!(scanned, 2);
+        assert_eq!(skipped_non_game, 1);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].title, "Space Quest");
+
+        let moved = move_file_with_unique_name(&candidates[0].lnk_path, &backup_dir).unwrap();
+        assert!(moved.is_file());
+        assert!(!game_lnk.exists());
+        assert!(browser_lnk.exists());
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

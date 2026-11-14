@@ -175,7 +175,7 @@
           </div>
           <div class="stat-divider"></div>
           <div class="stat-row">
-            <span class="stat-label">DoH Shield</span>
+            <span class="stat-label">Privacy Shield</span>
             <span class="stat-val mono-num emerald" id="sidebar-doh-badge">Active</span>
           </div>
           <div class="stat-row">
@@ -245,18 +245,61 @@
         <div class="workspace-scroll">
           <!-- TAB 1: MY GAMES -->
           <section id="library-view" class="tab-view active">
-            <div id="library-empty" class="empty-card hidden">
-              <h3>No games in your library yet</h3>
-              <p>Import installed Steam, Epic, GOG, or Xbox games in one click, or add any local executable.</p>
-              <div class="empty-actions">
-                <button type="button" class="btn btn-primary" id="btn-empty-import-libraries">
-                  <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
-                  <span>Import Libraries</span>
-                </button>
-                <button type="button" class="btn btn-secondary" id="btn-empty-add-game">
-                  <svg class="icon" aria-hidden="true"><use href="#icon-plus"/></svg>
-                  <span>Add Local Game</span>
-                </button>
+            <div id="library-empty" class="empty-onboarding hidden">
+              <div class="empty-onboarding-head">
+                <h2>Welcome to Duke Launcher</h2>
+                <p>Pick an option below to add your first game, or drop any game folder or shortcut anywhere on this window.</p>
+              </div>
+              <div class="empty-onboarding-grid">
+                <div class="empty-action-card" id="card-empty-find-game">
+                  <div class="empty-card-icon">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-compass"/></svg>
+                  </div>
+                  <h3>Find &amp; Download a Game</h3>
+                  <p>Browse 30,000+ games or paste a download link.</p>
+                  <div class="empty-card-actions">
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-empty-find-game">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg>
+                      <span>Browse 30,000+ Games</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-empty-paste-link">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-link"/></svg>
+                      <span>Paste Link</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="empty-action-card" id="card-empty-import-libraries">
+                  <div class="empty-card-icon">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                  </div>
+                  <h3>Import Your Installed Games</h3>
+                  <p>1-click scan for Steam, Epic, GOG &amp; Xbox games.</p>
+                  <div class="empty-card-actions">
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-empty-import-libraries">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                      <span>Scan Installed Games</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="empty-action-card" id="card-empty-add-game">
+                  <div class="empty-card-icon">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg>
+                  </div>
+                  <h3>Add a Game Folder or .exe</h3>
+                  <p>Drag any game from your Desktop here to clean up clutter.</p>
+                  <div class="empty-card-actions">
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-empty-add-folder">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg>
+                      <span>Pick Folder</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-empty-add-game">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-plus"/></svg>
+                      <span>Pick .exe / Shortcut</span>
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
             <div class="library-grid" id="library-grid"></div>
@@ -326,42 +369,64 @@
               </div>
             </div>
 
+            <!-- One-Click Game Care & Restore Points -->
+            <div class="detail-care-strip">
+              <div class="detail-care-item">
+                <button type="button" class="btn btn-primary btn-sm" id="btn-detail-autofix">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-wrench"/></svg>
+                  <span>Auto-Fix Game</span>
+                </button>
+                <span class="detail-micro-caption">Repairs missing Windows files, unblocks downloaded files, and isolates saves.</span>
+              </div>
+              <div class="detail-care-item">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-save-restore-point">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-camera"/></svg>
+                  <span>Save Restore Point</span>
+                </button>
+                <span class="detail-micro-caption">Instant 1-second backup — uses 0 GB extra space.</span>
+              </div>
+              <div class="detail-care-item">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-snapshots">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                  <span>Restore Backup</span>
+                </button>
+                <span class="detail-micro-caption">Roll game files back to an earlier restore point in 1 click.</span>
+              </div>
+            </div>
+            <div id="detail-autofix-summary" class="detail-autofix-summary hidden" role="status"></div>
+
             <!-- Utility Subnav Links -->
             <div class="detail-tools-bar">
               <div class="detail-tools-group">
-                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-compress">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-compress" title="Shrinks game files on disk without losing quality">
                   <svg class="icon" aria-hidden="true"><use href="#icon-layers"/></svg>
-                  <span>Compress Disk</span>
+                  <span>Shrink Disk Size</span>
                 </button>
-                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-backup-saves">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-backup-saves" title="Saves a ZIP copy of your current game saves">
                   <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
-                  <span>Backup Saves</span>
+                  <span>Back Up Saves</span>
                 </button>
-                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-restore-saves">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-restore-saves" title="Bring back an older save-file backup">
                   <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
-                  <span>Restore Save</span>
+                  <span>Restore Saves</span>
                 </button>
-                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-change-exe">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-change-exe" title="Choose a different game launcher .exe file">
                   <svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>
-                  <span>Switch Exe</span>
+                  <span>Switch .exe</span>
                 </button>
-                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-cover">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-cover" title="Pick or refresh cover artwork and icon">
                   <svg class="icon" aria-hidden="true"><use href="#icon-sparkles"/></svg>
-                  <span>Fix Cover</span>
+                  <span>Change Cover</span>
                 </button>
-                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-snapshots">
-                  <svg class="icon" aria-hidden="true"><use href="#icon-camera"/></svg>
-                  <span>Snapshots</span>
-                </button>
-                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-preflight">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-preflight" title="Inspect Windows runtime libraries used by this game">
                   <svg class="icon" aria-hidden="true"><use href="#icon-box"/></svg>
-                  <span>DLL Check</span>
+                  <span>Check Missing Files</span>
                 </button>
-                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-scan">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-scan" title="Scan the game executable for safety">
                   <svg class="icon" aria-hidden="true"><use href="#icon-shield-check"/></svg>
-                  <span>Security Scan</span>
+                  <span>Safety Scan</span>
                 </button>
-                <button type="button" class="btn btn-danger-ghost btn-sm" id="btn-detail-remove">
+                <button type="button" class="btn btn-danger-ghost btn-sm" id="btn-detail-remove" title="Remove this game from Duke Launcher (keeps your files)">
                   <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
                   <span>Remove</span>
                 </button>
@@ -414,17 +479,20 @@
                 <div class="detail-field-block detail-runtime-profile">
                   <label class="detail-toggle-row" for="detail-toggle-sandbox">
                     <div class="setting-toggle-copy">
-                      <div class="setting-toggle-title">Portable Profile Sandbox (.duke-profile)</div>
-                      <div class="setting-toggle-desc">Isolate APPDATA, LOCALAPPDATA &amp; USERPROFILE inside the game folder.</div>
+                      <div class="setting-toggle-title">Keep Game Saves Private (.duke-profile)</div>
+                      <div class="setting-toggle-desc">Stores this game's saves and settings inside its own folder so Windows profiles stay clean.</div>
                     </div>
                     <input type="checkbox" id="detail-toggle-sandbox" class="setting-checkbox" />
                   </label>
                   <div class="detail-field-head detail-prefetch-row">
-                    <label for="detail-prefetch-mode">NVMe Pre-Launch Cache Warmer</label>
+                    <div>
+                      <label for="detail-prefetch-mode">Fast Startup Pre-Loader</label>
+                      <div class="setting-toggle-desc">Warms large game data into memory when you click Play for shorter loading screens.</div>
+                    </div>
                     <select id="detail-prefetch-mode" class="select-control select-compact">
                       <option value="inherit">Use Global Setting</option>
-                      <option value="enabled">Always Warm Standby RAM</option>
-                      <option value="disabled">Skip Pre-Launch Warm</option>
+                      <option value="enabled">Always Pre-Load</option>
+                      <option value="disabled">Skip Pre-Load</option>
                     </select>
                   </div>
                 </div>
@@ -555,7 +623,8 @@
                   <input type="text" id="detail-version-tag" class="input-control mono-num" placeholder="e.g. 1.0.4 or v2.1" />
                 </div>
                 <div class="detail-field-block">
-                  <span class="field-label">Update Feed JSON URL (Manifest / FastCDC / Release)</span>
+                  <span class="field-label">Update Feed Link (Optional)</span>
+                  <span class="detail-micro-caption">Paste a game update link to automatically spot newer versions.</span>
                   <input type="url" id="detail-update-feed-url" class="input-control mono-num" placeholder="https://example.com/release-feed.json" />
                 </div>
                 <div class="detail-save-actions">
@@ -577,35 +646,38 @@
 
               <div class="panel-card" id="detail-compat-card">
                 <div class="panel-head">
-                  <h3>Legacy Compatibility &amp; Wrappers</h3>
-                  <span class="pill mono-num" id="detail-compat-arch-pill">PE32</span>
+                  <h3>Older Game Fixes &amp; Graphics</h3>
+                  <span class="pill mono-num" id="detail-compat-arch-pill">Windows App</span>
                 </div>
-                <p class="panel-sub" id="detail-compat-status">Inspecting executable PE header &amp; DirectX imports...</p>
+                <p class="panel-sub" id="detail-compat-status">Checking if this game benefits from extra memory or graphics fixes...</p>
                 <div class="compat-badge-strip" id="detail-compat-dx-list"></div>
                 <div class="detail-save-actions">
-                  <button type="button" class="btn btn-secondary btn-xs" id="btn-toggle-laa">
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-toggle-laa" title="Helps 32-bit games use more than 2 GB RAM without crashing">
                     <svg class="icon" aria-hidden="true"><use href="#icon-wrench"/></svg>
-                    <span>Patch 4GB LAA</span>
+                    <span>Unlock 4 GB Memory</span>
                   </button>
-                  <button type="button" class="btn btn-secondary btn-xs" id="btn-toggle-dxvk">
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-toggle-dxvk" title="Translates DirectX to Vulkan for smoother frame rates on older games">
                     <svg class="icon" aria-hidden="true"><use href="#icon-layers"/></svg>
-                    <span>Deploy DXVK</span>
+                    <span>Graphics Fix (DXVK)</span>
                   </button>
                 </div>
               </div>
 
               <div class="panel-card detail-card-span2" id="detail-wof-card">
                 <div class="panel-head">
-                  <h3>Storage &amp; Windows 11 WOF Compression</h3>
+                  <div>
+                    <h3>Save Drive Space (Lossless Compression)</h3>
+                    <p class="detail-micro-caption">Shrinks game files transparently on Windows without touching graphics or audio quality.</p>
+                  </div>
                   <span class="pill mono-num" id="detail-wof-status-pill">Uncompressed</span>
                 </div>
                 <div class="hltb-metrics-grid">
                   <div class="hltb-stat-tile">
-                    <span class="detail-metric-label">Logical Size</span>
+                    <span class="detail-metric-label">Normal Size</span>
                     <strong class="detail-metric-val mono-num" id="detail-wof-logical">--</strong>
                   </div>
                   <div class="hltb-stat-tile">
-                    <span class="detail-metric-label">Actual SSD Footprint</span>
+                    <span class="detail-metric-label">Actual Drive Space Used</span>
                     <strong class="detail-metric-val mono-num" id="detail-wof-compressed">--</strong>
                   </div>
                   <div class="hltb-stat-tile">
@@ -615,17 +687,17 @@
                 </div>
                 <div class="wof-controls-row">
                   <select id="select-wof-algorithm" class="select-control select-compact">
-                    <option value="LZX">LZX (Maximum Ratio)</option>
-                    <option value="XPRESS16K">XPRESS 16K (Balanced)</option>
-                    <option value="XPRESS8K" selected>XPRESS 8K (Fast Gaming Default)</option>
-                    <option value="XPRESS4K">XPRESS 4K (Ultra Low CPU)</option>
+                    <option value="LZX">Maximum Savings (Smaller Files)</option>
+                    <option value="XPRESS16K">Balanced</option>
+                    <option value="XPRESS8K" selected>Fast Gaming Default</option>
+                    <option value="XPRESS4K">Fastest Reading (Lowest CPU)</option>
                   </select>
                   <button type="button" class="btn btn-primary btn-xs" id="btn-compress-wof">
                     <svg class="icon" aria-hidden="true"><use href="#icon-hard-drive"/></svg>
-                    <span>Compress Game (WOF)</span>
+                    <span>Compress Game</span>
                   </button>
                   <button type="button" class="btn btn-secondary btn-xs" id="btn-decompress-wof">
-                    <span>Decompress</span>
+                    <span>Restore Full Size</span>
                   </button>
                 </div>
                 <p class="panel-sub mono-num hidden" id="detail-wof-progress"></p>
@@ -638,8 +710,8 @@
             <div class="panel-card catalog-toolbar-card">
               <div class="panel-head">
                 <div>
-                  <h2>Steam Catalog Discovery</h2>
-                  <p class="panel-sub" id="catalog-cache-status">Local encrypted DoH cache · Ready</p>
+                  <h2>Browse Games Catalog</h2>
+                  <p class="panel-sub" id="catalog-cache-status">Offline catalog cache · Ready</p>
                 </div>
                 <div class="catalog-head-actions">
                   <button type="button" class="btn btn-secondary btn-sm" id="btn-catalog-reset-filters">
@@ -836,8 +908,8 @@
             </div>
 
             <div id="catalog-loading" class="empty-card hidden">
-              <h3>Fetching Steam Catalog over Encrypted DoH...</h3>
-              <p>Indexing SteamSpy top pages, Single-player &amp; Co-op tags, and live Steam Store pricing.</p>
+              <h3>Updating Game Catalog...</h3>
+              <p>Loading game genres, player ratings, Single-player &amp; Co-op tags, and live pricing.</p>
             </div>
             <div id="catalog-error" class="empty-card hidden">
               <h3>Catalog Unavailable</h3>
@@ -861,8 +933,8 @@
             <div class="panel-card">
               <div class="panel-head">
                 <div>
-                  <h2>Multi-Hoster Turbo Downloader</h2>
-                  <p class="panel-sub">8-worker adaptive HTTP byte-range matrix with DoH resolution and crack-aware scanner.</p>
+                  <h2>Fast Game Downloader</h2>
+                  <p class="panel-sub">Downloads files up to 8x faster across multiple streams and scans downloads automatically for safety.</p>
                 </div>
                 <div class="dl-head-actions">
                   <button type="button" class="btn btn-secondary btn-sm" id="btn-open-host-browser">
@@ -996,8 +1068,8 @@
             <div class="panel-card">
               <div class="panel-head">
                 <div>
-                  <h2>Game Directories &amp; Custom Search Hub</h2>
-                  <p class="panel-sub">Type a game title and click any directory card to launch an ad-blocked, popup-shielded Safe Browser window with 8-worker download auto-grab.</p>
+                  <h2>Game Directories &amp; Search Hub</h2>
+                  <p class="panel-sub">Type any game name and pick a site to open it in an ad-blocked Safe Browser that catches download links automatically.</p>
                 </div>
                 <div class="sources-head-actions">
                   <div id="sources-game-banner" class="sources-game-banner hidden">
@@ -1103,238 +1175,612 @@
 
           <!-- TAB 5: SETTINGS & THEMES -->
           <section id="settings-view" class="tab-view hidden">
-            <div class="panel-card">
-              <div class="panel-head">
-                <div>
-                  <h2>Library Importer &amp; Save Discovery</h2>
-                  <p class="panel-sub">Import Steam VDF/ACF, Epic Games, GOG Galaxy, and Xbox Game Pass libraries or sync Ludusavi save paths.</p>
-                </div>
-                <div class="settings-btn-group">
-                  <button type="button" class="btn btn-primary btn-sm" id="btn-settings-import-libraries">
-                    <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
-                    <span>Import Libraries</span>
-                  </button>
-                  <button type="button" class="btn btn-secondary btn-sm" id="btn-settings-sync-ludusavi">
-                    <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
-                    <span>Sync Ludusavi Manifest</span>
-                  </button>
-                </div>
+            <div class="settings-top-header panel-card">
+              <div>
+                <h2>Settings</h2>
+                <p class="panel-sub">Simple everyday controls by default, with full engine tuning in Advanced Engine.</p>
               </div>
-
-              <div class="settings-input-row">
-                <div class="setting-toggle-copy">
-                  <div class="setting-toggle-title">SteamGridDB API Key</div>
-                  <div class="setting-toggle-desc">Optional free v2 bearer key for 600x900 grids, hero banners, and Windows `.ico` icons in Fix Cover.</div>
-                </div>
-                <div class="settings-inline-form">
-                  <input type="password" id="setting-steamgriddb-key" class="input-control mono-num" placeholder="Paste SteamGridDB API key..." autocomplete="off" />
-                  <button type="button" class="btn btn-secondary btn-sm" id="btn-save-sgdb-key">Save Key</button>
-                </div>
+              <div class="settings-segmented" role="tablist" aria-label="Settings Mode">
+                <button
+                  type="button"
+                  id="btn-settings-tab-essentials"
+                  class="settings-seg-btn active"
+                  role="tab"
+                  aria-selected="true"
+                  data-settings-tab="essentials"
+                >
+                  <svg class="icon" aria-hidden="true"><use href="#icon-sparkles"/></svg>
+                  <span>Essentials</span>
+                </button>
+                <button
+                  type="button"
+                  id="btn-settings-tab-advanced"
+                  class="settings-seg-btn"
+                  role="tab"
+                  aria-selected="false"
+                  data-settings-tab="advanced"
+                >
+                  <svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>
+                  <span>Advanced Engine</span>
+                </button>
               </div>
+            </div>
 
-              <div class="settings-input-row">
-                <div class="setting-toggle-copy">
-                  <div class="setting-toggle-title">Game Suspend / Resume Hotkey</div>
-                  <div class="setting-toggle-desc">Freeze unpausable single-player games via NtSuspendProcess and trim RAM (default Ctrl+Alt+P or Pause).</div>
-                </div>
-                <div class="settings-inline-form">
-                  <input type="text" id="setting-suspend-hotkey" class="input-control mono-num" placeholder="Ctrl+Alt+P" />
-                  <button type="button" class="btn btn-secondary btn-sm" id="btn-save-suspend-hotkey">Save Hotkey</button>
-                </div>
-              </div>
-
-              <label class="setting-toggle-row" for="setting-couch-mode">
-                <div class="setting-toggle-copy">
-                  <div class="setting-toggle-title">Controller Couch / Handheld Mode (60 Hz XInput)</div>
-                  <div class="setting-toggle-desc">Enlarge 10-foot UI typography and enter fullscreen navigation. Toggle anytime with XInput button X.</div>
-                </div>
-                <input type="checkbox" id="setting-couch-mode" class="setting-checkbox" />
-              </label>
-
-              <label class="setting-toggle-row" for="setting-auto-clean-completed">
-                <div class="setting-toggle-copy">
-                  <div class="setting-toggle-title">Auto-Clean Completed Downloads</div>
-                  <div class="setting-toggle-desc">Automatically clear completed jobs from the active queue and downloads.json 2.5 seconds after registering in My Games.</div>
-                </div>
-                <input type="checkbox" id="setting-auto-clean-completed" class="setting-checkbox" checked />
-              </label>
-
-              <label class="setting-toggle-row" for="setting-nvme-prefetch">
-                <div class="setting-toggle-copy">
-                  <div class="setting-toggle-title">NVMe Pre-Launch Standby RAM Warmer (Global Default)</div>
-                  <div class="setting-toggle-desc">Pre-warm largest game archives (.pak, .vpk, .bsa, .forge, .rpf &gt; 32 MB) via Win32 PrefetchVirtualMemory up to 25% free RAM on Play.</div>
-                </div>
-                <input type="checkbox" id="setting-nvme-prefetch" class="setting-checkbox" checked />
-              </label>
-
-              <label class="setting-toggle-row" for="setting-auto-detect-clipboard">
-                <div class="setting-toggle-copy">
-                  <div class="setting-toggle-title">Auto-detect download links on clipboard</div>
-                  <div class="setting-toggle-desc">Watch window focus for copied archive URLs (.zip, .rar, .7z, .exe, .msi, .iso) or supported hosts and show a 1-click download banner.</div>
-                </div>
-                <input type="checkbox" id="setting-auto-detect-clipboard" class="setting-checkbox" checked />
-              </label>
-
-              <div class="setting-integration-group">
-                <div class="setting-toggle-row">
-                  <div class="setting-toggle-copy">
-                    <div class="setting-toggle-title">Steam Web API Key &amp; Local SteamID64</div>
-                    <div class="setting-toggle-desc">Enables Steam Friends, Lobby Join &amp; Achievement Sync. Detected ID: <code class="mono-num" id="setting-detected-steam-id">Scanning...</code></div>
+            <!-- TAB 1: ESSENTIALS (6 Clean, Everyday Controls) -->
+            <div id="settings-panel-essentials" class="settings-tab-panel" role="tabpanel">
+              <!-- 1. Where Games Save -->
+              <div class="panel-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>1. Where Games Save</h3>
+                    <p class="panel-sub">Pick the main folder where downloaded games are saved and unpacked.</p>
                   </div>
-                  <div class="setting-inline-controls">
-                    <span class="pill mono-num" id="setting-steam-key-status">Not Set</span>
-                    <input type="password" id="setting-steam-api-key" class="input-control mono-num" placeholder="Paste Steam Web API key..." autocomplete="off" />
-                    <button type="button" class="btn btn-secondary btn-sm" id="btn-save-steam-api-key">Save Key</button>
-                    <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-clear-steam-api-key">Clear</button>
-                  </div>
-                </div>
-
-                <div class="setting-toggle-row">
-                  <div class="setting-toggle-copy">
-                    <div class="setting-toggle-title">Manual 64-bit SteamID Override (Optional)</div>
-                    <div class="setting-toggle-desc">Overrides the SteamID64 auto-detected from local <code>Steam\config\loginusers.vdf</code>.</div>
-                  </div>
-                  <div class="setting-inline-controls">
-                    <input type="text" id="setting-steam-id-override" class="input-control mono-num" placeholder="7656119xxxxxxxxxx" autocomplete="off" />
-                    <button type="button" class="btn btn-secondary btn-sm" id="btn-save-steam-id-override">Save ID</button>
-                  </div>
-                </div>
-
-                <div class="setting-toggle-row">
-                  <div class="setting-toggle-copy">
-                    <div class="setting-toggle-title">Xbox Live API Key (xbl.io)</div>
-                    <div class="setting-toggle-desc">Enables Xbox Friends Rich Presence, Xbox Achievements &amp; TitleHub Playtime Sync.</div>
-                  </div>
-                  <div class="setting-inline-controls">
-                    <span class="pill mono-num" id="setting-xbox-key-status">Not Set</span>
-                    <input type="password" id="setting-xbox-api-key" class="input-control mono-num" placeholder="Paste xbl.io API key..." autocomplete="off" />
-                    <button type="button" class="btn btn-secondary btn-sm" id="btn-save-xbox-api-key">Save Key</button>
-                    <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-clear-xbox-api-key">Clear</button>
-                  </div>
-                </div>
-
-                <div class="setting-toggle-row">
-                  <div class="setting-toggle-copy">
-                    <div class="setting-toggle-title">PlayStation Network Token (64-char NPSSO)</div>
-                    <div class="setting-toggle-desc">Exchanged securely over DoH for PSN Friends Presence (PS4/PS5 badges) &amp; Trophy Sync.</div>
-                  </div>
-                  <div class="setting-inline-controls">
-                    <span class="pill mono-num" id="setting-psn-npsso-status">Not Set</span>
-                    <input type="password" id="setting-psn-npsso" class="input-control mono-num" placeholder="Paste 64-char NPSSO token..." autocomplete="off" />
-                    <button type="button" class="btn btn-secondary btn-sm" id="btn-save-psn-npsso">Save Token</button>
-                    <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-clear-psn-npsso">Clear</button>
-                  </div>
-                </div>
-
-                <div class="setting-toggle-row">
-                  <div class="setting-toggle-copy">
-                    <div class="setting-toggle-title">Multi-Launcher Playtime Sync</div>
-                    <div class="setting-toggle-desc">Read Steam <code>localconfig.vdf</code>, GOG <code>galaxy-2.0.db</code>, Epic metadata &amp; Xbox TitleHub hours non-destructively.</div>
-                  </div>
-                  <div class="setting-inline-controls">
-                    <button type="button" class="btn btn-primary btn-sm" id="btn-settings-sync-playtime">
-                      <svg class="icon" aria-hidden="true"><use href="#icon-clock"/></svg>
-                      <span>Sync Storefront Hours</span>
+                  <div class="settings-btn-group">
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-settings-browse-save-dir">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg>
+                      <span>Choose Folder</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-settings-open-save-dir">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-external-link"/></svg>
+                      <span>Open Folder</span>
                     </button>
                   </div>
                 </div>
-              </div>
-
-              <div class="bookmarklet-card bookmarklet-card-settings">
-                <div class="bookmarklet-copy">
-                  <div class="bookmarklet-title">
-                    <svg class="icon" aria-hidden="true"><use href="#icon-bookmark"/></svg>
-                    <span>Browser Bookmarklet (<code>duke://download</code> Protocol Handler)</span>
+                <input type="text" id="setting-default-save-dir" class="input-control mono-num" placeholder="Resolving default Downloads folder..." readonly />
+                <div class="drive-space-widget">
+                  <div class="drive-space-row">
+                    <span class="mono-num" id="settings-drive-space-label">Checking drive space...</span>
+                    <span class="mono-num panel-sub" id="settings-drive-space-pct">--% used</span>
                   </div>
-                  <p class="bookmarklet-tip">Drag this button to your browser bookmarks bar — click it on any download page to send the link straight here.</p>
+                  <div class="progress-track">
+                    <div class="progress-fill" id="settings-drive-space-fill" style="width:0%"></div>
+                  </div>
                 </div>
-                <div class="bookmarklet-actions">
-                  <a
-                    id="bookmarklet-link-settings"
-                    class="btn btn-secondary btn-sm bookmarklet-drag-btn"
-                    draggable="true"
-                    href="javascript:location.href='duke://download?url='+encodeURIComponent(location.href)"
-                    title="Drag to your browser bookmarks bar"
-                  >
-                    <svg class="icon" aria-hidden="true"><use href="#icon-bookmark"/></svg>
-                    <span>Send to Duke Launcher</span>
-                  </a>
-                  <button type="button" class="btn btn-secondary btn-sm" id="btn-copy-bookmarklet-settings">
+              </div>
+
+              <!-- 2. Download Speed -->
+              <div class="panel-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>2. Download Speed</h3>
+                    <p class="panel-sub">Choose how fast downloads run versus leaving extra bandwidth for browsing or videos.</p>
+                  </div>
+                </div>
+                <div class="speed-preset-grid" id="setting-speed-preset-group" role="radiogroup" aria-label="Download Speed Preset">
+                  <button type="button" class="speed-preset-btn active" data-speed-preset="max">
+                    <div class="speed-preset-title">Max Speed</div>
+                    <div class="speed-preset-desc">Fastest downloads — uses full internet speed</div>
+                  </button>
+                  <button type="button" class="speed-preset-btn" data-speed-preset="balanced">
+                    <div class="speed-preset-title">Balanced</div>
+                    <div class="speed-preset-desc">Fast downloads while keeping web browsing smooth</div>
+                  </button>
+                  <button type="button" class="speed-preset-btn" data-speed-preset="background">
+                    <div class="speed-preset-title">Background</div>
+                    <div class="speed-preset-desc">Gentle speed while you play or watch videos</div>
+                  </button>
+                </div>
+              </div>
+
+              <!-- 3. App Look & Theme -->
+              <div class="panel-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>3. App Look &amp; Theme</h3>
+                    <p class="panel-sub">11 instant visual styles including Obsidian Frosted Glass — zero extra memory usage.</p>
+                  </div>
+                </div>
+                <div class="theme-grid" id="theme-grid"></div>
+                <label class="setting-toggle-row" for="setting-compact-cards">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Compact Library Cards</div>
+                    <div class="setting-toggle-desc">Show smaller game cards so more games fit on screen without scrolling.</div>
+                  </div>
+                  <input type="checkbox" id="setting-compact-cards" class="setting-checkbox" />
+                </label>
+              </div>
+
+              <!-- 4. Game Performance Boost -->
+              <div class="panel-card">
+                <label class="setting-toggle-row setting-toggle-hero" for="setting-performance-boost">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">4. Game Performance Boost</div>
+                    <div class="setting-toggle-desc">Automatically speed up games and free RAM when you click Play.</div>
+                  </div>
+                  <input type="checkbox" id="setting-performance-boost" class="setting-checkbox" checked />
+                </label>
+              </div>
+
+              <!-- 5. Keep Saves Safe -->
+              <div class="panel-card">
+                <label class="setting-toggle-row setting-toggle-hero" for="setting-auto-backup-saves-exit">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">5. Keep Saves Safe</div>
+                    <div class="setting-toggle-desc">Automatically back up game saves when you quit.</div>
+                  </div>
+                  <input type="checkbox" id="setting-auto-backup-saves-exit" class="setting-checkbox" checked />
+                </label>
+              </div>
+
+              <!-- 6. Clean Up Desktop -->
+              <div class="panel-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>6. Clean Up Desktop</h3>
+                    <p class="panel-sub">Finds game shortcuts on your Desktop, adds them to Duke Launcher, and moves clutter into a backup folder.</p>
+                  </div>
+                  <button type="button" class="btn btn-primary btn-sm" id="btn-clean-desktop-shortcuts">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-sparkles"/></svg>
+                    <span>Clean Up Desktop</span>
+                  </button>
+                </div>
+                <div id="desktop-cleanup-summary" class="detail-autofix-summary hidden" role="status"></div>
+              </div>
+            </div>
+
+            <!-- TAB 2: ADVANCED ENGINE (8 Power-User & Developer Cards) -->
+            <div id="settings-panel-advanced" class="settings-tab-panel hidden" role="tabpanel">
+              <!-- Card 1: CPU & Memory Scheduling -->
+              <div class="panel-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>1. CPU &amp; Memory Scheduling</h3>
+                    <p class="panel-sub">Tune thread core affinity, EcoQoS idle throttling, working-set RAM limits, and process freeze hotkeys.</p>
+                  </div>
+                </div>
+
+                <div class="settings-input-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">CPU Priority Mode</div>
+                    <div class="setting-toggle-desc">Controls P-Core boosting for active games and Windows EcoQoS efficiency mode for launcher background tasks.</div>
+                  </div>
+                  <select id="setting-cpu-priority-mode" class="select-control select-setting">
+                    <option value="auto">Auto EcoQoS + P-Core Boost</option>
+                    <option value="max_performance">Max Performance — Lock P-Cores</option>
+                    <option value="quiet">Quiet / Battery Saver</option>
+                  </select>
+                </div>
+
+                <div class="settings-input-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Working-Set RAM Trim Mode</div>
+                    <div class="setting-toggle-desc">Controls how aggressively Duke Launcher trims standby pages while minimized or running games.</div>
+                  </div>
+                  <select id="setting-ram-trim-mode" class="select-control select-setting">
+                    <option value="standard">Standard (~22 MB Idle)</option>
+                    <option value="aggressive">Aggressive Tray Daemon (&lt;10 MB)</option>
+                    <option value="off">Off</option>
+                  </select>
+                </div>
+
+                <label class="setting-toggle-row" for="setting-auto-freeze-minimized">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Auto-Freeze Minimized Single-Player Games</div>
+                    <div class="setting-toggle-desc">Uses <code>NtSuspendProcess</code> and working-set trimming when a launched game window stays minimized.</div>
+                  </div>
+                  <input type="checkbox" id="setting-auto-freeze-minimized" class="setting-checkbox" />
+                </label>
+
+                <div class="settings-input-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Game Suspend / Resume Hotkey</div>
+                    <div class="setting-toggle-desc">Freeze or resume unpausable single-player games anytime (default <code>Ctrl+Alt+P</code> or <code>Pause</code>).</div>
+                  </div>
+                  <div class="settings-inline-form">
+                    <input type="text" id="setting-suspend-hotkey" class="input-control mono-num" placeholder="Ctrl+Alt+P" />
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-save-suspend-hotkey">Save Hotkey</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Card 2: NVMe Pre-Launch Cache Warmer -->
+              <div class="panel-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>2. NVMe Pre-Launch Cache Warmer</h3>
+                    <p class="panel-sub">Streams large <code>.pak</code>, <code>.vpk</code>, <code>.forge</code>, and <code>.bsa</code> assets via <code>PrefetchVirtualMemory</code> before game startup.</p>
+                  </div>
+                </div>
+
+                <label class="setting-toggle-row" for="setting-nvme-prefetch">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Enable NVMe Pre-Launch Cache Warmer</div>
+                    <div class="setting-toggle-desc">Eliminates initial shader/texture traversal hitching on compatible SSDs.</div>
+                  </div>
+                  <input type="checkbox" id="setting-nvme-prefetch" class="setting-checkbox" checked />
+                </label>
+
+                <div class="settings-slider-block">
+                  <div class="detail-field-head">
+                    <div>
+                      <div class="setting-toggle-title">Standby RAM Cache Budget</div>
+                      <div class="setting-toggle-desc">Maximum share of free physical RAM used for pre-launch archive read-ahead.</div>
+                    </div>
+                    <span class="pill accent mono-num" id="setting-nvme-cache-budget-val">25% Recommended</span>
+                  </div>
+                  <input type="range" id="setting-nvme-cache-budget" class="range-control" min="0" max="40" step="5" value="25" />
+                  <div class="slider-preset-row" id="nvme-budget-presets">
+                    <button type="button" class="filter-pill" data-nvme-pct="0">0% Off</button>
+                    <button type="button" class="filter-pill" data-nvme-pct="10">10%</button>
+                    <button type="button" class="filter-pill active" data-nvme-pct="25">25% Recommended</button>
+                    <button type="button" class="filter-pill" data-nvme-pct="40">40% Max</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Card 3: Network, Privacy DNS & Proxy Routing -->
+              <div class="panel-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>3. Network, Privacy DNS &amp; Proxy Routing</h3>
+                    <p class="panel-sub">Encrypted DNS-over-HTTPS resolution, custom HTTP/SOCKS5 proxies, bandwidth caps, and automated MOTW unblocking.</p>
+                  </div>
+                </div>
+
+                <label class="setting-toggle-row" for="setting-doh-enabled">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Encrypted DNS-over-HTTPS (<code>1.1.1.1</code> / <code>9.9.9.9</code>)</div>
+                    <div class="setting-toggle-desc">Routes catalog, artwork, and downloader host resolution over encrypted HTTPS DNS queries.</div>
+                  </div>
+                  <input type="checkbox" id="setting-doh-enabled" class="setting-checkbox" checked />
+                </label>
+
+                <div class="settings-input-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Custom HTTP / SOCKS5 Proxy URL</div>
+                    <div class="setting-toggle-desc">Optional proxy routed through the shared HTTP client builder (leave blank for direct connection).</div>
+                  </div>
+                  <div class="settings-inline-form">
+                    <input type="text" id="setting-custom-proxy-url" class="input-control mono-num" placeholder="socks5://127.0.0.1:1080 or http://..." autocomplete="off" />
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-save-custom-proxy">Apply Proxy</button>
+                  </div>
+                </div>
+
+                <div class="settings-input-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Custom Download Speed Cap (MB/s)</div>
+                    <div class="setting-toggle-desc">Set exact speed limit in MB/s (<code>0</code> overrides preset to unlimited bandwidth).</div>
+                  </div>
+                  <div class="settings-inline-form">
+                    <input type="number" id="setting-custom-speed-cap" class="input-control mono-num input-compact-num" min="0" step="1" placeholder="0 = Unlimited" />
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-save-custom-speed-cap">Set Cap</button>
+                  </div>
+                </div>
+
+                <label class="setting-toggle-row" for="setting-auto-unblock-motw">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Auto-Unblock Downloaded Files (Remove Windows MOTW)</div>
+                    <div class="setting-toggle-desc">Automatically strips NTFS <code>:Zone.Identifier</code> streams from downloaded or dropped executables.</div>
+                  </div>
+                  <input type="checkbox" id="setting-auto-unblock-motw" class="setting-checkbox" checked />
+                </label>
+
+                <label class="setting-toggle-row" for="setting-auto-clean-completed">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Auto-Clean Completed Downloads</div>
+                    <div class="setting-toggle-desc">Removes completed jobs from the active queue and <code>downloads.json</code> 2.5 seconds after library install.</div>
+                  </div>
+                  <input type="checkbox" id="setting-auto-clean-completed" class="setting-checkbox" checked />
+                </label>
+
+                <label class="setting-toggle-row" for="setting-auto-detect-clipboard">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Auto-Detect Download Links on Clipboard</div>
+                    <div class="setting-toggle-desc">Shows a 1-click download banner on window focus when an archive or host URL is copied.</div>
+                  </div>
+                  <input type="checkbox" id="setting-auto-detect-clipboard" class="setting-checkbox" checked />
+                </label>
+              </div>
+
+              <!-- Card 4: Save Sandboxing & Restore Point Storage -->
+              <div class="panel-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>4. Save Sandboxing &amp; Restore Point Storage</h3>
+                    <p class="panel-sub">Per-game isolated profiles, rolling snapshot retention, Ludusavi save schemas, and BLAKE3 CAS garbage collection.</p>
+                  </div>
+                  <div class="settings-btn-group">
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-settings-sync-ludusavi">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
+                      <span>Sync Save DB</span>
+                    </button>
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-reclaim-snapshot-space">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
+                      <span>Reclaim Unused Backup Space</span>
+                    </button>
+                  </div>
+                </div>
+
+                <label class="setting-toggle-row" for="setting-portable-sandbox-default">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Portable <code>.duke-profile/</code> Save Sandbox Default</div>
+                    <div class="setting-toggle-desc">Isolates <code>APPDATA</code>, <code>LOCALAPPDATA</code>, and <code>USERPROFILE</code> per game for new additions.</div>
+                  </div>
+                  <input type="checkbox" id="setting-portable-sandbox-default" class="setting-checkbox" />
+                </label>
+
+                <div class="settings-input-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Max Restore Points per Game</div>
+                    <div class="setting-toggle-desc">Oldest restore points and rolling save ZIP backups beyond this limit are automatically pruned.</div>
+                  </div>
+                  <select id="setting-max-restore-points" class="select-control select-compact">
+                    <option value="3">3 Restore Points</option>
+                    <option value="5" selected>5 Restore Points</option>
+                    <option value="10">10 Restore Points</option>
+                    <option value="20">20 Restore Points</option>
+                  </select>
+                </div>
+
+                <p class="panel-sub hidden mono-num" id="reclaim-space-result"></p>
+              </div>
+
+              <!-- Card 5: Launch Environment & Anti-Telemetry -->
+              <div class="panel-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>5. Launch Environment &amp; Anti-Telemetry</h3>
+                    <p class="panel-sub">Inject clean privacy environment variables and default command-line switches for every launched game.</p>
+                  </div>
+                </div>
+
+                <label class="setting-toggle-row" for="setting-block-game-telemetry">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Block Game Telemetry &amp; Crash Reporters</div>
+                    <div class="setting-toggle-desc">Injects <code>DO_NOT_TRACK=1</code>, empty <code>SENTRY_DSN</code>, <code>UNITY_DISABLE_ANALYTICS=1</code>, and <code>UE_DISABLE_CRASH_REPORTER=1</code>.</div>
+                  </div>
+                  <input type="checkbox" id="setting-block-game-telemetry" class="setting-checkbox" checked />
+                </label>
+
+                <div class="settings-input-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Global Launch Arguments</div>
+                    <div class="setting-toggle-desc">Appended cleanly alongside per-game launch options when starting games.</div>
+                  </div>
+                  <div class="settings-inline-form">
+                    <input type="text" id="setting-global-launch-args" class="input-control mono-num" placeholder="-novid -high" />
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-save-global-launch-args">Save Args</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Card 6: Duke Swarm (LAN & Tailscale P2P Sync) -->
+              <div class="panel-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>6. Duke Swarm (LAN &amp; Tailscale P2P Sync)</h3>
+                    <p class="panel-sub">Zero-config UDP multicast (<code>239.255.77.88:47880</code>) and direct Tailscale FastCDC game-beam + vector-clock save sync.</p>
+                  </div>
+                  <div class="settings-btn-group">
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-swarm-probe">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-share-2"/></svg>
+                      <span>Probe Peers</span>
+                    </button>
+                  </div>
+                </div>
+
+                <label class="setting-toggle-row" for="setting-swarm-enabled">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Enable Duke Swarm Peer Discovery</div>
+                    <div class="setting-toggle-desc">Discover Duke Launcher nodes on your local network or Tailnet for P2P transfer.</div>
+                  </div>
+                  <input type="checkbox" id="setting-swarm-enabled" class="setting-checkbox" />
+                </label>
+
+                <div class="settings-input-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Swarm Node Name</div>
+                    <div class="setting-toggle-desc">Friendly hostname shown to peers on your local network or Tailnet.</div>
+                  </div>
+                  <div class="settings-inline-form">
+                    <input type="text" id="setting-swarm-node-name" class="input-control mono-num" placeholder="Duke-Node" />
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-save-swarm-node">Save Name</button>
+                  </div>
+                </div>
+
+                <div class="settings-input-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Custom Static / Tailscale Peer IPs</div>
+                    <div class="setting-toggle-desc">Comma-separated IPv4 or Tailscale host:port entries (default TCP port <code>47881</code>) synced directly across VPNs.</div>
+                  </div>
+                  <div class="settings-inline-form">
+                    <input type="text" id="setting-swarm-peers" class="input-control mono-num" placeholder="e.g. my-handheld:47881, peer-pc:47881" />
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-save-swarm-peers">Save Peers</button>
+                  </div>
+                </div>
+
+                <label class="setting-toggle-row" for="setting-swarm-auto-sync-saves">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Auto-Sync Saves Over Swarm on Game Exit</div>
+                    <div class="setting-toggle-desc">Automatically pushes changed save blocks to online Swarm peers after closing a game.</div>
+                  </div>
+                  <input type="checkbox" id="setting-swarm-auto-sync-saves" class="setting-checkbox" checked />
+                </label>
+
+                <div id="swarm-peers-list" class="swarm-peers-list">
+                  <div class="panel-sub">Click Probe Peers or enable Swarm discovery to inspect online nodes.</div>
+                </div>
+              </div>
+
+              <!-- Card 7: Catalog, Custom Search Sites & Manifest Feeds -->
+              <div class="panel-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>7. Catalog, Custom Search Sites &amp; Manifest Feeds</h3>
+                    <p class="panel-sub">Sync the local 30,000+ game index, manage custom search directories (<code>search_sites.json</code>), and connect storefront APIs.</p>
+                  </div>
+                  <div class="settings-btn-group">
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-settings-sync-catalog">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                      <span>Sync 30,000+ Game Catalog Now</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-settings-import-libraries">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg>
+                      <span>Import Libraries</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="panel-sub mono-num engine-telemetry-line" id="settings-dkcat-stats">Catalog mmap engine (.dkcat): Checking...</div>
+
+                <div class="settings-quick-launch-row">
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-settings-open-search-sites">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-globe"/></svg>
+                    <span>Custom Search Sites (<code>search_sites.json</code>)</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-settings-open-json-feeds">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-sparkles"/></svg>
+                    <span>External JSON Feeds</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-settings-sync-playtime">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-clock"/></svg>
+                    <span>Sync Storefront Hours</span>
+                  </button>
+                </div>
+
+                <div id="settings-sources-list" class="settings-sources-list"></div>
+
+                <div class="setting-integration-group">
+                  <div class="settings-input-row">
+                    <div class="setting-toggle-copy">
+                      <div class="setting-toggle-title">SteamGridDB API Key</div>
+                      <div class="setting-toggle-desc">Optional free v2 bearer key for 600x900 grids, hero banners, and Windows <code>.ico</code> icons.</div>
+                    </div>
+                    <div class="settings-inline-form">
+                      <input type="password" id="setting-steamgriddb-key" class="input-control mono-num" placeholder="Paste SteamGridDB API key..." autocomplete="off" />
+                      <button type="button" class="btn btn-secondary btn-sm" id="btn-save-sgdb-key">Save Key</button>
+                    </div>
+                  </div>
+
+                  <div class="setting-toggle-row">
+                    <div class="setting-toggle-copy">
+                      <div class="setting-toggle-title">Steam Web API Key &amp; Local SteamID64</div>
+                      <div class="setting-toggle-desc">Enables Steam Friends, Lobby Join &amp; Achievement Sync. Detected ID: <code class="mono-num" id="setting-detected-steam-id">Scanning...</code></div>
+                    </div>
+                    <div class="setting-inline-controls">
+                      <span class="pill mono-num" id="setting-steam-key-status">Not Set</span>
+                      <input type="password" id="setting-steam-api-key" class="input-control mono-num" placeholder="Paste Steam Web API key..." autocomplete="off" />
+                      <button type="button" class="btn btn-secondary btn-sm" id="btn-save-steam-api-key">Save Key</button>
+                      <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-clear-steam-api-key">Clear</button>
+                    </div>
+                  </div>
+
+                  <div class="setting-toggle-row">
+                    <div class="setting-toggle-copy">
+                      <div class="setting-toggle-title">Manual 64-bit SteamID Override (Optional)</div>
+                      <div class="setting-toggle-desc">Overrides the SteamID64 auto-detected from local <code>Steam\config\loginusers.vdf</code>.</div>
+                    </div>
+                    <div class="setting-inline-controls">
+                      <input type="text" id="setting-steam-id-override" class="input-control mono-num" placeholder="7656119xxxxxxxxxx" autocomplete="off" />
+                      <button type="button" class="btn btn-secondary btn-sm" id="btn-save-steam-id-override">Save ID</button>
+                    </div>
+                  </div>
+
+                  <div class="setting-toggle-row">
+                    <div class="setting-toggle-copy">
+                      <div class="setting-toggle-title">Xbox Live API Key (xbl.io)</div>
+                      <div class="setting-toggle-desc">Enables Xbox Friends Rich Presence, Xbox Achievements &amp; TitleHub Playtime Sync.</div>
+                    </div>
+                    <div class="setting-inline-controls">
+                      <span class="pill mono-num" id="setting-xbox-key-status">Not Set</span>
+                      <input type="password" id="setting-xbox-api-key" class="input-control mono-num" placeholder="Paste xbl.io API key..." autocomplete="off" />
+                      <button type="button" class="btn btn-secondary btn-sm" id="btn-save-xbox-api-key">Save Key</button>
+                      <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-clear-xbox-api-key">Clear</button>
+                    </div>
+                  </div>
+
+                  <div class="setting-toggle-row">
+                    <div class="setting-toggle-copy">
+                      <div class="setting-toggle-title">PlayStation Network Token (64-char NPSSO)</div>
+                      <div class="setting-toggle-desc">Used for PSN Friends Presence (PS4/PS5 badges) &amp; Trophy Sync.</div>
+                    </div>
+                    <div class="setting-inline-controls">
+                      <span class="pill mono-num" id="setting-psn-npsso-status">Not Set</span>
+                      <input type="password" id="setting-psn-npsso" class="input-control mono-num" placeholder="Paste 64-char NPSSO token..." autocomplete="off" />
+                      <button type="button" class="btn btn-secondary btn-sm" id="btn-save-psn-npsso">Save Token</button>
+                      <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-clear-psn-npsso">Clear</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Card 8: Windows Integration & Developer Tools -->
+              <div class="panel-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>8. Windows Integration &amp; Developer Tools</h3>
+                    <p class="panel-sub">Browser URI protocol handler, Windows startup tray mode, MCP AI agent configuration, and subsystem latency benchmarks.</p>
+                  </div>
+                </div>
+
+                <div class="settings-input-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Register <code>duke://</code> Browser Download Links</div>
+                    <div class="setting-toggle-desc">Writes Windows <code>HKCU\Software\Classes\duke</code> so clicking <code>duke://download?...</code> links opens Duke Launcher.</div>
+                  </div>
+                  <div class="settings-btn-group">
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-register-duke-protocol">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-link"/></svg>
+                      <span>Register duke:// Handler</span>
+                    </button>
+                  </div>
+                </div>
+
+                <label class="setting-toggle-row" for="setting-start-minimized-windows">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Start Minimized with Windows</div>
+                    <div class="setting-toggle-desc">Registers a silent startup entry in <code>HKCU\...\Run</code> launching directly into the sub-10 MB tray daemon.</div>
+                  </div>
+                  <input type="checkbox" id="setting-start-minimized-windows" class="setting-checkbox" />
+                </label>
+
+                <label class="setting-toggle-row" for="setting-couch-mode">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Controller Couch / Handheld Mode (60 Hz XInput)</div>
+                    <div class="setting-toggle-desc">Enlarges 10-foot UI typography and enables full controller D-pad navigation.</div>
+                  </div>
+                  <input type="checkbox" id="setting-couch-mode" class="setting-checkbox" />
+                </label>
+
+                <div class="bookmarklet-card bookmarklet-card-settings">
+                  <div class="bookmarklet-copy">
+                    <div class="bookmarklet-title">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-bookmark"/></svg>
+                      <span>Browser Bookmarklet (<code>duke://download</code>)</span>
+                    </div>
+                    <p class="bookmarklet-tip">Drag this button to your browser bookmarks bar to send download links straight to Duke Launcher.</p>
+                  </div>
+                  <div class="bookmarklet-actions">
+                    <a
+                      id="bookmarklet-link-settings"
+                      class="btn btn-secondary btn-sm bookmarklet-drag-btn"
+                      draggable="true"
+                      href="javascript:location.href='duke://download?url='+encodeURIComponent(location.href)"
+                      title="Drag to your browser bookmarks bar"
+                    >
+                      <svg class="icon" aria-hidden="true"><use href="#icon-bookmark"/></svg>
+                      <span>Send to Duke Launcher</span>
+                    </a>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-copy-bookmarklet-settings">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-copy"/></svg>
+                      <span>Copy Bookmarklet</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="settings-dev-actions">
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-copy-mcp-config">
                     <svg class="icon" aria-hidden="true"><use href="#icon-copy"/></svg>
-                    <span>Copy Bookmarklet</span>
+                    <span>Copy --mcp AI Agent Config JSON</span>
+                  </button>
+                  <button type="button" class="btn btn-primary btn-sm" id="btn-run-subsystem-bench">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-cpu"/></svg>
+                    <span>Run Hardware Subsystem Benchmark (--bench)</span>
                   </button>
                 </div>
-              </div>
-            </div>
 
-            <div class="panel-card">
-              <div class="panel-head">
-                <div>
-                  <h2>Duke Swarm (LAN / Tailscale Game-Beam &amp; Mesh Save Sync)</h2>
-                  <p class="panel-sub">Zero-config UDP multicast (239.255.77.88:47880) + Tailscale peer FastCDC transfer &amp; vector-clock save sync.</p>
-                </div>
-                <div class="settings-btn-group">
-                  <button type="button" class="btn btn-secondary btn-sm" id="btn-swarm-probe">
-                    <svg class="icon" aria-hidden="true"><use href="#icon-share-2"/></svg>
-                    <span>Probe Peers</span>
-                  </button>
-                </div>
+                <pre id="settings-bench-output" class="bench-output hidden mono-num"></pre>
               </div>
-
-              <label class="setting-toggle-row" for="setting-swarm-enabled">
-                <div class="setting-toggle-copy">
-                  <div class="setting-toggle-title">Enable Duke Swarm LAN &amp; Mesh Discovery</div>
-                  <div class="setting-toggle-desc">Advertise installed AppIDs over local LAN multicast and automatically sync changed save bytes on game exit.</div>
-                </div>
-                <input type="checkbox" id="setting-swarm-enabled" class="setting-checkbox" />
-              </label>
-
-              <div class="settings-input-row">
-                <div class="setting-toggle-copy">
-                  <div class="setting-toggle-title">Swarm Node Name</div>
-                  <div class="setting-toggle-desc">Friendly hostname shown to peers on your local network or Tailnet.</div>
-                </div>
-                <div class="settings-inline-form">
-                  <input type="text" id="setting-swarm-node-name" class="input-control mono-num" placeholder="Duke-Node" />
-                  <button type="button" class="btn btn-secondary btn-sm" id="btn-save-swarm-node">Save Name</button>
-                </div>
-              </div>
-
-              <div class="settings-input-row">
-                <div class="setting-toggle-copy">
-                  <div class="setting-toggle-title">Direct / Tailscale Peer Addresses</div>
-                  <div class="setting-toggle-desc">Comma-separated IPv4 or Tailscale host:port entries (default TCP port 47881) probed outside LAN multicast.</div>
-                </div>
-                <div class="settings-inline-form">
-                  <input type="text" id="setting-swarm-peers" class="input-control mono-num" placeholder="e.g. 100.64.0.12:47881, my-handheld:47881" />
-                  <button type="button" class="btn btn-secondary btn-sm" id="btn-save-swarm-peers">Save Peers</button>
-                </div>
-              </div>
-
-              <div id="swarm-peers-list" class="swarm-peers-list">
-                <div class="panel-sub">Click Probe Peers or enable Swarm discovery to inspect online nodes and beam games at LAN speed.</div>
-              </div>
-              <div class="panel-sub mono-num engine-telemetry-line" id="settings-dkcat-stats">Catalog mmap engine (.dkcat): Checking...</div>
-            </div>
-
-            <div class="panel-card">
-              <div class="panel-head">
-                <div>
-                  <h2>Imported Community JSON Sources</h2>
-                  <p class="panel-sub">Enable or disable individual Hydra JSON feeds indexed by Find Games and MCP catalog search.</p>
-                </div>
-              </div>
-              <div id="settings-sources-list" class="settings-sources-list"></div>
-            </div>
-
-            <div class="panel-card">
-              <div class="panel-head">
-                <div>
-                  <h2>Appearance &amp; Vector Themes</h2>
-                  <p class="panel-sub">11 zero-RAM themes including Obsidian Frosted Glass acrylic translucency, Obsidian Dark, Clean Daylight, and layered art presets.</p>
-                </div>
-              </div>
-              <div class="theme-grid" id="theme-grid"></div>
             </div>
           </section>
         </div>
@@ -1421,8 +1867,8 @@
     <div class="modal-card">
       <div class="modal-head">
         <div>
-          <h3 id="restore-save-title">Restore Save Snapshot</h3>
-          <p class="panel-sub" id="restore-save-subtitle">Select one of your rolling 5 save ZIP snapshots to restore.</p>
+          <h3 id="restore-save-title">Restore Saved Game Files</h3>
+          <p class="panel-sub" id="restore-save-subtitle">Select one of your automatic save-file backups to restore.</p>
         </div>
         <button type="button" class="win-btn modal-close" id="btn-close-restore-modal" aria-label="Close">
           <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
@@ -1430,13 +1876,13 @@
       </div>
       <div class="modal-body">
         <div class="detail-field-block">
-          <label for="restore-snapshot-select">Snapshot Archive</label>
+          <label for="restore-snapshot-select">Saved Backup File</label>
           <select id="restore-snapshot-select" class="select-control mono-num"></select>
         </div>
         <div id="restore-snapshot-list" class="save-paths-list"></div>
       </div>
       <div class="modal-foot">
-        <button type="button" class="btn btn-primary btn-sm" id="btn-confirm-restore-save">Restore Selected Snapshot</button>
+        <button type="button" class="btn btn-primary btn-sm" id="btn-confirm-restore-save">Restore Selected Backup</button>
         <button type="button" class="btn btn-secondary btn-sm" id="btn-cancel-restore-save">Cancel</button>
       </div>
     </div>
@@ -1550,13 +1996,13 @@
     </div>
   </div>
 
-  <!-- MODAL: COPY-ON-WRITE GAME SNAPSHOTS (BLAKE3 + CreateHardLinkW) -->
+  <!-- MODAL: GAME RESTORE POINTS (0 GB Extra Space Backups) -->
   <div id="snapshots-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="snapshots-modal-title">
     <div class="modal-card modal-card-wide">
       <div class="modal-head">
         <div>
-          <h3 id="snapshots-modal-title">Copy-on-Write Game Snapshots</h3>
-          <p class="panel-sub" id="snapshots-modal-subtitle">Content-addressed BLAKE3 store + Win32 CreateHardLinkW instant rollback with zero duplicated bytes.</p>
+          <h3 id="snapshots-modal-title">Game Restore Points</h3>
+          <p class="panel-sub" id="snapshots-modal-subtitle">Instant 1-second backups that share unchanged game files — uses 0 GB extra space.</p>
         </div>
         <button type="button" class="win-btn modal-close" id="btn-close-snapshots-modal" aria-label="Close">
           <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
@@ -1564,14 +2010,14 @@
       </div>
       <div class="modal-body">
         <div class="settings-inline-form snapshots-create-row">
-          <input type="text" id="input-snapshot-label" class="input-control" placeholder="Optional snapshot label (e.g. Pre-Mod Load Order)" />
+          <input type="text" id="input-snapshot-label" class="input-control" placeholder="Optional label (e.g. Before Installing Mods)" />
           <button type="button" class="btn btn-primary btn-sm" id="btn-create-snapshot">
             <svg class="icon" aria-hidden="true"><use href="#icon-camera"/></svg>
-            <span>Create Snapshot</span>
+            <span>Save Restore Point</span>
           </button>
         </div>
         <div id="snapshots-list" class="restore-snapshot-list">
-          <div class="panel-sub">Scanning local .duke-cas store...</div>
+          <div class="panel-sub">Loading saved restore points...</div>
         </div>
       </div>
       <div class="modal-foot">
@@ -1580,13 +2026,13 @@
     </div>
   </div>
 
-  <!-- MODAL: PRE-FLIGHT PE32 / PE32+ IMPORT & DLL AUTO-HEALER -->
+  <!-- MODAL: MISSING WINDOWS RUNTIME FILES CHECKER -->
   <div id="preflight-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="preflight-modal-title">
     <div class="modal-card modal-card-narrow">
       <div class="modal-head">
         <div>
-          <h3 id="preflight-modal-title">Pre-Flight DLL Dependency Report</h3>
-          <p class="panel-sub mono-num" id="preflight-modal-subtitle">Scanning PE32 / PE32+ import directory table...</p>
+          <h3 id="preflight-modal-title">Missing Windows Files Check</h3>
+          <p class="panel-sub mono-num" id="preflight-modal-subtitle">Checking if all required Windows files are available...</p>
         </div>
         <button type="button" class="win-btn modal-close" id="btn-close-preflight-modal" aria-label="Close">
           <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
@@ -1598,11 +2044,11 @@
       <div class="modal-foot">
         <button type="button" class="btn btn-primary btn-sm hidden" id="btn-preflight-heal">
           <svg class="icon" aria-hidden="true"><use href="#icon-shield-check"/></svg>
-          <span>Auto-Heal Missing DLLs</span>
+          <span>Repair Missing Files</span>
         </button>
         <button type="button" class="btn btn-steam-green btn-sm hidden" id="btn-preflight-launch-anyway">
           <svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>
-          <span>Launch Anyway</span>
+          <span>Play Anyway</span>
         </button>
         <button type="button" class="btn btn-secondary btn-sm" id="btn-cancel-preflight-modal">Close</button>
       </div>
@@ -1649,6 +2095,17 @@
     </div>
     <div class="overlay-status-line mono-num" id="overlay-status-line">Ready (Alt+G or Guide button)</div>
   </section>
+
+  <!-- Full-Window Drag & Drop Ingestion Overlay -->
+  <div id="drop-ingest-overlay" class="drop-ingest-overlay hidden" role="region" aria-live="polite" aria-label="Drop Game Files">
+    <div class="drop-ingest-card">
+      <div class="drop-ingest-icon-wrap">
+        <svg class="icon drop-ingest-icon" aria-hidden="true"><use href="#icon-folder-open"/></svg>
+      </div>
+      <h2 class="drop-ingest-title">Drop &amp; Play</h2>
+      <p class="drop-ingest-sub">Drop any game folder, .exe, or Desktop shortcut here to add &amp; play</p>
+    </div>
+  </div>
 
   <div id="toast-container" class="toast-container"></div>
   <script type="module" src="main.js"></script>

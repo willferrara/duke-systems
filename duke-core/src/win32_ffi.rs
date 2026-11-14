@@ -70,6 +70,8 @@ mod imp {
     #[cfg(feature = "eco-qos")]
     const IDLE_PRIORITY_CLASS: u32 = 0x0000_0040;
     #[cfg(feature = "eco-qos")]
+    const HIGH_PRIORITY_CLASS: u32 = 0x0000_0080;
+    #[cfg(feature = "eco-qos")]
     const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
     #[cfg(feature = "eco-qos")]
     const ABOVE_NORMAL_PRIORITY_CLASS: u32 = 0x0000_8000;
@@ -431,25 +433,44 @@ mod imp {
     }
 
     #[cfg(feature = "eco-qos")]
-    pub fn boost_external_pid(pid: u32) -> Result<(), String> {
+    fn set_external_pid_profile(
+        pid: u32,
+        priority_class: u32,
+        enable_eco_throttling: bool,
+    ) -> Result<(), String> {
         if pid <= 4 {
-            return Err("Cannot boost kernel/system idle PID.".to_string());
+            return Err("Cannot alter kernel/system idle PID priority.".to_string());
         }
         let handle = open_process_raw(
             PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION,
             pid,
         )
-        .ok_or_else(|| format!("Access denied opening PID {} for P-core boost.", pid))?;
+        .ok_or_else(|| format!("Access denied opening PID {} for scheduling update.", pid))?;
 
-        let pri_ok = set_handle_priority(handle, ABOVE_NORMAL_PRIORITY_CLASS);
-        let _ = apply_power_throttling(handle, false);
+        let pri_ok = set_handle_priority(handle, priority_class);
+        let _ = apply_power_throttling(handle, enable_eco_throttling);
         close_handle_raw(handle);
 
         if pri_ok {
             Ok(())
         } else {
-            Err(format!("Failed elevating priority on PID {}.", pid))
+            Err(format!("Failed updating priority on PID {}.", pid))
         }
+    }
+
+    #[cfg(feature = "eco-qos")]
+    pub fn boost_external_pid(pid: u32) -> Result<(), String> {
+        set_external_pid_profile(pid, ABOVE_NORMAL_PRIORITY_CLASS, false)
+    }
+
+    #[cfg(feature = "eco-qos")]
+    pub fn boost_external_pid_high(pid: u32) -> Result<(), String> {
+        set_external_pid_profile(pid, HIGH_PRIORITY_CLASS, false)
+    }
+
+    #[cfg(feature = "eco-qos")]
+    pub fn set_external_pid_quiet(pid: u32) -> Result<(), String> {
+        set_external_pid_profile(pid, NORMAL_PRIORITY_CLASS, true)
     }
 
     #[cfg(feature = "eco-qos")]
@@ -548,6 +569,16 @@ mod imp {
     }
 
     #[cfg(feature = "eco-qos")]
+    pub fn boost_external_pid_high(_pid: u32) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[cfg(feature = "eco-qos")]
+    pub fn set_external_pid_quiet(_pid: u32) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[cfg(feature = "eco-qos")]
     pub fn jail_external_pid_eco_qos(_pid: u32) -> Result<f64, String> {
         Ok(0.0)
     }
@@ -590,6 +621,11 @@ mod ext_ffi {
     type RegCloseKeyFn = unsafe extern "system" fn(*mut c_void) -> i32;
     type CreateHardLinkWFn =
         unsafe extern "system" fn(*const u16, *const u16, *const c_void) -> i32;
+    type EnumWindowsCallback = unsafe extern "system" fn(*mut c_void, isize) -> i32;
+    type EnumWindowsFn = unsafe extern "system" fn(EnumWindowsCallback, isize) -> i32;
+    type GetWindowThreadProcessIdFn = unsafe extern "system" fn(*mut c_void, *mut u32) -> u32;
+    type IsWindowVisibleFn = unsafe extern "system" fn(*mut c_void) -> i32;
+    type IsIconicFn = unsafe extern "system" fn(*mut c_void) -> i32;
 
     static NT_SUSPEND_PROCESS: OnceLock<Option<NtProcessFn>> = OnceLock::new();
     static NT_RESUME_PROCESS: OnceLock<Option<NtProcessFn>> = OnceLock::new();
@@ -597,6 +633,15 @@ mod ext_ffi {
     static GET_ASYNC_KEY_STATE: OnceLock<Option<GetAsyncKeyStateFn>> = OnceLock::new();
     static ADVAPI_REG: OnceLock<Option<AdvapiRegProcs>> = OnceLock::new();
     static CREATE_HARD_LINK_W: OnceLock<Option<CreateHardLinkWFn>> = OnceLock::new();
+    static USER32_WINDOW_PROCS: OnceLock<Option<User32WindowProcs>> = OnceLock::new();
+
+    #[derive(Clone, Copy)]
+    struct User32WindowProcs {
+        enum_windows: EnumWindowsFn,
+        get_window_pid: GetWindowThreadProcessIdFn,
+        is_visible: IsWindowVisibleFn,
+        is_iconic: IsIconicFn,
+    }
 
     #[derive(Clone, Copy)]
     struct AdvapiRegProcs {
@@ -1310,6 +1355,70 @@ mod ext_ffi {
             Err(last_err.unwrap_or_else(|| "No valid PIDs in process tree to resume".to_string()))
         }
     }
+
+    struct WindowMinimizeScan<'a> {
+        pids: &'a [u32],
+        is_visible: IsWindowVisibleFn,
+        is_iconic: IsIconicFn,
+        get_window_pid: GetWindowThreadProcessIdFn,
+        has_visible: bool,
+        any_iconic: bool,
+        any_unminimized: bool,
+    }
+
+    unsafe extern "system" fn enum_window_minimize_cb(hwnd: *mut c_void, lparam: isize) -> i32 {
+        let state = unsafe { &mut *(lparam as *mut WindowMinimizeScan<'_>) };
+        let mut pid: u32 = 0;
+        unsafe { (state.get_window_pid)(hwnd, &mut pid) };
+        if pid != 0 && state.pids.contains(&pid) && unsafe { (state.is_visible)(hwnd) } != 0 {
+            state.has_visible = true;
+            if unsafe { (state.is_iconic)(hwnd) } != 0 {
+                state.any_iconic = true;
+            } else {
+                state.any_unminimized = true;
+            }
+        }
+        1
+    }
+
+    /// Returns true if a tracked process tree owns at least one visible window and every visible window is minimized.
+    pub fn is_process_tree_minimized(pids: &[u32]) -> bool {
+        if pids.is_empty() {
+            return false;
+        }
+        let Some(procs) = *USER32_WINDOW_PROCS.get_or_init(|| unsafe {
+            let hmod = LoadLibraryA(PCSTR::from_raw(c"user32.dll".as_ptr().cast())).ok()?;
+            let enum_w = GetProcAddress(hmod, PCSTR::from_raw(c"EnumWindows".as_ptr().cast()))?;
+            let get_pid = GetProcAddress(
+                hmod,
+                PCSTR::from_raw(c"GetWindowThreadProcessId".as_ptr().cast()),
+            )?;
+            let vis = GetProcAddress(hmod, PCSTR::from_raw(c"IsWindowVisible".as_ptr().cast()))?;
+            let iconic = GetProcAddress(hmod, PCSTR::from_raw(c"IsIconic".as_ptr().cast()))?;
+            Some(User32WindowProcs {
+                enum_windows: std::mem::transmute::<unsafe extern "system" fn() -> isize, EnumWindowsFn>(enum_w),
+                get_window_pid: std::mem::transmute::<unsafe extern "system" fn() -> isize, GetWindowThreadProcessIdFn>(get_pid),
+                is_visible: std::mem::transmute::<unsafe extern "system" fn() -> isize, IsWindowVisibleFn>(vis),
+                is_iconic: std::mem::transmute::<unsafe extern "system" fn() -> isize, IsIconicFn>(iconic),
+            })
+        }) else {
+            return false;
+        };
+
+        let mut scan = WindowMinimizeScan {
+            pids,
+            is_visible: procs.is_visible,
+            is_iconic: procs.is_iconic,
+            get_window_pid: procs.get_window_pid,
+            has_visible: false,
+            any_iconic: false,
+            any_unminimized: false,
+        };
+        unsafe {
+            let _ = (procs.enum_windows)(enum_window_minimize_cb, (&mut scan as *mut WindowMinimizeScan<'_>) as isize);
+        }
+        scan.has_visible && scan.any_iconic && !scan.any_unminimized
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1366,6 +1475,9 @@ mod ext_ffi {
         existing_file: &std::path::Path,
     ) -> std::io::Result<()> {
         std::fs::hard_link(existing_file, new_link)
+    }
+    pub fn is_process_tree_minimized(_pids: &[u32]) -> bool {
+        false
     }
 }
 
@@ -1468,9 +1580,9 @@ pub fn is_hotkey_pressed(spec: &HotkeySpec) -> bool {
 }
 
 pub use ext_ffi::{
-    create_hard_link, create_process_tree_job, find_pid_by_exe_name, is_vk_down, poll_xinput_state,
-    reg_enum_subkeys, reg_read_string, resume_external_pid, resume_process_tree,
-    suspend_external_pid, suspend_process_tree, ProcessTreeJob,
+    create_hard_link, create_process_tree_job, find_pid_by_exe_name, is_process_tree_minimized,
+    is_vk_down, poll_xinput_state, reg_enum_subkeys, reg_read_string, resume_external_pid,
+    resume_process_tree, suspend_external_pid, suspend_process_tree, ProcessTreeJob,
 };
 
 /// Promotes every process in a tracked game tree to `ABOVE_NORMAL_PRIORITY_CLASS`.
@@ -1479,6 +1591,29 @@ pub fn boost_process_tree(pids: &[u32]) {
     for &pid in pids {
         if pid != 0 {
             let _ = boost_external_pid(pid);
+        }
+    }
+}
+
+/// Applies the user-selected CPU priority mode (`"auto"`, `"max_performance"`, or `"quiet"`)
+/// across all processes in a tracked game tree.
+#[cfg(feature = "eco-qos")]
+pub fn apply_cpu_priority_mode(pids: &[u32], mode: &str) {
+    let normalized = mode.trim().to_ascii_lowercase();
+    for &pid in pids {
+        if pid == 0 {
+            continue;
+        }
+        match normalized.as_str() {
+            "max_performance" | "max" | "high" | "pcore_lock" => {
+                let _ = imp::boost_external_pid_high(pid);
+            }
+            "quiet" | "battery" | "eco" => {
+                let _ = imp::set_external_pid_quiet(pid);
+            }
+            _ => {
+                let _ = boost_external_pid(pid);
+            }
         }
     }
 }
@@ -1522,9 +1657,10 @@ pub use imp::{
 
 #[cfg(feature = "eco-qos")]
 pub use imp::{
-    boost_external_pid, disable_realtime_input_timer, enable_eco_qos_mode,
-    enable_idle_eco_qos_mode, enable_realtime_input_mode, jail_external_pid_eco_qos,
-    restore_normal_priority_mode, set_current_thread_high_priority,
+    boost_external_pid, boost_external_pid_high, disable_realtime_input_timer,
+    enable_eco_qos_mode, enable_idle_eco_qos_mode, enable_realtime_input_mode,
+    jail_external_pid_eco_qos, restore_normal_priority_mode, set_current_thread_high_priority,
+    set_external_pid_quiet,
 };
 
 #[cfg(test)]
