@@ -25,8 +25,8 @@ pub struct HltbEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
-struct HltbCacheStore {
-    entries: HashMap<String, HltbEntry>,
+pub(crate) struct HltbCacheStore {
+    pub(crate) entries: HashMap<String, HltbEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -76,7 +76,7 @@ fn round_1_decimal(val: f64) -> f64 {
     (val * 10.0).round() / 10.0
 }
 
-fn load_hltb_cache() -> HltbCacheStore {
+pub(crate) fn load_hltb_cache() -> HltbCacheStore {
     let Ok(path) = crate::get_app_data_file_standalone(HLTB_CACHE_FILE) else {
         return HltbCacheStore::default();
     };

@@ -33,6 +33,7 @@ pub enum ShmEventType {
     CoOpInputP2 = 10,
     HighlightPeak = 11,
     VoiceMacro = 12,
+    ControllerGuideAction = 13,
 }
 
 impl ShmEventType {
@@ -50,6 +51,7 @@ impl ShmEventType {
             10 => Self::CoOpInputP2,
             11 => Self::HighlightPeak,
             12 => Self::VoiceMacro,
+            13 => Self::ControllerGuideAction,
             _ => Self::None,
         }
     }

@@ -103,6 +103,12 @@ pub enum DukeEvent {
         confidence: f32,
         backend: String,
     },
+    ControllerGuideAction {
+        action: String,
+        controller_kind: String,
+        radial_slot: Option<u8>,
+        source: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

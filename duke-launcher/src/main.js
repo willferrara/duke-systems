@@ -211,7 +211,25 @@ import {
   getAcousticsState,
   setWasapiSessionVolume,
   saveGameEqAndDenoise,
-  testMicRnnoiseLatency
+  testMicRnnoiseLatency,
+  planDukePilotCommand,
+  executeDukePilotPlan,
+  getPlayTonightRecommendations,
+  getCouchModeStatus,
+  setCouchModeState,
+  triggerCouchRadialAction,
+  exportGameDkpack,
+  inspectDkpackFile,
+  applyDkpackRecipe,
+  pickDkpackFile,
+  exportGameCapsule,
+  inspectGameCapsule,
+  listenCouchStateChanged,
+  listenCouchRadialToggled,
+  listenCouchRadialAction,
+  listenDkpackApplied,
+  listenPilotSemanticSearch,
+  listenPilotPlayTonight
 } from "./api.js";
 
 const BOOKMARKLET_HREF =
@@ -347,6 +365,17 @@ const state = {
   audioCtx: null,
   suspendHotkey: "Ctrl+Alt+P",
   couchMode: false,
+  controllerKind: "xbox",
+  radialOpen: false,
+  radialSelectedSlot: 0,
+  radialSlots: [],
+  playTonightIds: [],
+  playTonightMap: new Map(),
+  pilotPlan: null,
+  pilotDebounceId: null,
+  vkbTargetInput: null,
+  vkbShift: false,
+  gamepadPollingRateFn: null,
   sgdbResults: null,
   sgdbSelection: {
     coverUrl: null,
@@ -801,6 +830,21 @@ function resolveGameSourceLabel(game) {
 
 function getFilteredSortedGames() {
   const q = state.searchQuery.trim().toLowerCase();
+  if (state.filter === "play_tonight" && state.playTonightIds.length > 0) {
+    const byId = new Map(state.library.map((g) => [g.id, g]));
+    const ordered = [];
+    for (const id of state.playTonightIds) {
+      const g = byId.get(id);
+      if (!g) continue;
+      if (q) {
+        const hay = `${g.title} ${g.genre} ${resolveGameSourceLabel(g)} ${g.exePath}`.toLowerCase();
+        if (!hay.includes(q)) continue;
+      }
+      ordered.push(g);
+    }
+    return ordered;
+  }
+
   const list = state.library.filter((g) => {
     const isRetro = Number(g?.platformId || 0) > 0;
     const srcLabel = resolveGameSourceLabel(g).toLowerCase();
@@ -1008,6 +1052,10 @@ function renderLibraryGrid() {
       const updateBadge = game.updateAvailable
         ? `<span class="card-badge card-badge-update" title="Newer version detected on update feed">Update Available</span>`
         : "";
+      const tonightRec = state.filter === "play_tonight" ? state.playTonightMap.get(game.id) : null;
+      const tonightReasonHtml = tonightRec
+        ? `<div class="play-tonight-fit-pill" title="${escapeHtml((tonightRec.reasons || []).join(" · "))}">${escapeHtml(tonightRec.fitLabel || tonightRec.estimatedSessionFit || "Play Tonight Pick")}</div>`
+        : "";
       const mediaContentHtml = cover
         ? `<img src="${escapeHtml(cover)}" alt="${escapeHtml(game.title)}" class="game-card-img" loading="lazy" />`
         : buildProceduralCoverCardHtml(game.title, sourceLabel, game.source || "");
@@ -1046,6 +1094,7 @@ function renderLibraryGrid() {
               <span class="mono-num">${escapeHtml(playtimeStr)}</span>
               <span>${escapeHtml(lastStr)}</span>
             </div>
+            ${tonightReasonHtml}
           </div>
         </article>
       `;
@@ -4520,7 +4569,8 @@ function updateCatalogResultsSummary() {
       const liveTag = c.enrichingLive ? " · Querying live Steam Store..." : "";
       const latencyTag =
         c.lastQueryTimeUs > 0 ? ` · ${(c.lastQueryTimeUs / 1000).toFixed(2)} ms` : "";
-      summary.textContent = `Showing ${shownCount.toLocaleString()} of ${c.totalMatches.toLocaleString()} matching titles across ${indexedDisplay} indexed${latencyTag}${liveTag}`;
+      const semanticTag = c.semanticMode && c.semanticSummary ? ` · DKCAT003: ${c.semanticSummary}` : "";
+      summary.textContent = `Showing ${shownCount.toLocaleString()} of ${c.totalMatches.toLocaleString()} matching titles across ${indexedDisplay} indexed${latencyTag}${semanticTag}${liveTag}`;
     }
   }
 
@@ -4583,6 +4633,8 @@ async function runCatalogQuery(resetBatch = true) {
       c.fetchedAt = Number(page.fetchedAt);
     }
     c.lastQueryTimeUs = Number(page?.queryTimeUs || 0);
+    c.semanticMode = Boolean(page?.semanticMode);
+    c.semanticSummary = String(page?.semanticSummary || "");
 
     if (resetBatch) {
       c.itemsById.clear();
@@ -5576,12 +5628,46 @@ async function refreshAllData() {
   }
 }
 
-function applyCouchMode(enabled, persist = false) {
+function updateControllerGlyphLegend(controllerKind = state.controllerKind) {
+  const kind = String(controllerKind || "xbox").toLowerCase();
+  state.controllerKind = kind;
+  const badge = el("couch-controller-glyph-badge");
+  const radialPill = el("radial-controller-pill");
+  const isPs = kind.includes("dualsense") || kind.includes("dualshock") || kind.includes("ps") || kind.includes("sony");
+  const isSwitch = kind.includes("switch") || kind.includes("nintendo");
+
+  const glyphs = isPs
+    ? { label: "DualSense Glyphs", a: "Cross", b: "Circle", x: "Square", lb: "L1", rb: "R1" }
+    : isSwitch
+      ? { label: "Switch Pro Glyphs", a: "B", b: "A", x: "Y", lb: "L", rb: "R" }
+      : { label: "Xbox Glyphs", a: "A", b: "B", x: "X", lb: "LB", rb: "RB" };
+
+  if (badge) badge.textContent = glyphs.label;
+  if (radialPill) radialPill.textContent = `${glyphs.label.toUpperCase()} · RADIAL`;
+  if (el("glyph-btn-a")) el("glyph-btn-a").textContent = glyphs.a;
+  if (el("glyph-btn-b")) el("glyph-btn-b").textContent = glyphs.b;
+  if (el("glyph-btn-x")) el("glyph-btn-x").textContent = glyphs.x;
+  if (el("glyph-btn-lb")) el("glyph-btn-lb").textContent = glyphs.lb;
+  if (el("glyph-btn-rb")) el("glyph-btn-rb").textContent = glyphs.rb;
+}
+
+function applyCouchMode(enabled, persist = false, controllerKind = null) {
   state.couchMode = Boolean(enabled);
+  if (controllerKind) {
+    state.controllerKind = String(controllerKind);
+  }
   document.body.classList.toggle("couch-mode", state.couchMode);
   if (el("setting-couch-mode")) {
     el("setting-couch-mode").checked = state.couchMode;
   }
+  if (el("duke-deck-hint-bar")) {
+    el("duke-deck-hint-bar").classList.toggle("hidden", !state.couchMode);
+  }
+  if (el("btn-titlebar-couch")) {
+    el("btn-titlebar-couch").classList.toggle("active", state.couchMode);
+  }
+  updateControllerGlyphLegend(state.controllerKind);
+  state.gamepadPollingRateFn?.(state.couchMode || state.radialOpen);
 
   try {
     if (state.couchMode && !document.fullscreenElement) {
@@ -5594,10 +5680,351 @@ function applyCouchMode(enabled, persist = false) {
   }
 
   if (persist) {
+    setCouchModeState(state.couchMode, state.controllerKind, state.radialOpen).catch(() => {});
     updateLauncherSettings({ couchMode: state.couchMode }).catch((err) => {
       showToast(String(err), "error");
     });
   }
+}
+
+const PILOT_EXAMPLES = [
+  "Shrink my biggest games over 50 GB",
+  "Set up Cemu and import my Wii U folder",
+  "Freeze ARC Raiders and launch Balatro",
+  "Back up Elden Ring saves and apply my modpack",
+  "Export portable capsule for Project Zomboid"
+];
+let pilotExampleIdx = 0;
+
+function pilotIconName(raw) {
+  switch (String(raw || "")) {
+    case "icon-shrink":
+      return "icon-layers";
+    case "icon-folder":
+      return "icon-folder-open";
+    case "icon-gamepad":
+      return "icon-gamepad-2";
+    case "icon-settings":
+      return "icon-sliders";
+    case "icon-archive":
+      return "icon-archive";
+    case "icon-download":
+      return "icon-download";
+    case "icon-pause":
+      return "icon-pause";
+    case "icon-search":
+      return "icon-search";
+    default:
+      return "icon-play";
+  }
+}
+
+function closeDukePilotPopover() {
+  el("duke-pilot-popover")?.classList.add("hidden");
+}
+
+function renderDukePilotPlan(plan) {
+  state.pilotPlan = plan || null;
+  const pop = el("duke-pilot-popover");
+  if (!pop || !plan) return;
+  pop.classList.remove("hidden");
+
+  if (el("pilot-mode-badge")) {
+    el("pilot-mode-badge").textContent =
+      plan.mode === "semantic_search"
+        ? "DKCAT003 Semantic"
+        : plan.aiRefined
+          ? "Local ML Refined"
+          : `${(plan.steps || []).length}-Step Plan`;
+  }
+  if (el("pilot-headline")) {
+    el("pilot-headline").textContent = plan.headline || "Duke Pilot";
+  }
+  if (el("pilot-latency-badge")) {
+    const ms = (Number(plan.elapsedUs || 0) / 1000).toFixed(2);
+    el("pilot-latency-badge").textContent = `Parsed in ${ms} ms`;
+  }
+
+  const stepsEl = el("pilot-steps-list");
+  if (stepsEl) {
+    const steps = Array.isArray(plan.steps) ? plan.steps : [];
+    stepsEl.innerHTML = steps
+      .map(
+        (s, idx) => `
+      <div class="pilot-step-row">
+        <span class="pilot-step-num mono-num">${idx + 1}.</span>
+        <svg class="icon" aria-hidden="true"><use href="#${escapeHtml(pilotIconName(s.actionIcon))}"/></svg>
+        <div class="pilot-step-body">
+          <div class="pilot-step-title">${escapeHtml(s.label || "")}</div>
+          <div class="pilot-step-detail">${escapeHtml(s.detail || "")}</div>
+        </div>
+      </div>`
+      )
+      .join("");
+  }
+
+  const semEl = el("pilot-semantic-list");
+  if (semEl) {
+    const matches = Array.isArray(plan.semanticMatches) ? plan.semanticMatches : [];
+    semEl.classList.toggle("hidden", matches.length === 0);
+    semEl.innerHTML = matches
+      .map(
+        (item) => `
+      <div class="pilot-semantic-row" data-catalog-query="${escapeHtml(item.title || "")}">
+        <div class="pilot-step-body">
+          <div class="pilot-step-title">${escapeHtml(item.title || "")}</div>
+          <div class="pilot-step-detail">${escapeHtml((item.genres || []).slice(0, 3).join(", ") || item.platformName || "PC")}</div>
+        </div>
+      </div>`
+      )
+      .join("");
+  }
+}
+
+function scheduleDukePilotPreview(queryText) {
+  if (state.pilotDebounceId) {
+    clearTimeout(state.pilotDebounceId);
+    state.pilotDebounceId = null;
+  }
+  const q = String(queryText || "").trim();
+  if (!q) {
+    closeDukePilotPopover();
+    state.pilotPlan = null;
+    return;
+  }
+  state.pilotDebounceId = setTimeout(async () => {
+    try {
+      const useAi = Boolean(el("chk-pilot-ai")?.checked);
+      const plan = await planDukePilotCommand(q, useAi);
+      renderDukePilotPlan(plan);
+    } catch {
+      // Ignore transient parse errors while typing
+    }
+  }, 85);
+}
+
+async function runActiveDukePilotPlan() {
+  const inpVal = el("search-input")?.value?.trim() || "";
+  if (!state.pilotPlan && inpVal) {
+    state.pilotPlan = await planDukePilotCommand(inpVal, Boolean(el("chk-pilot-ai")?.checked));
+  }
+  if (!state.pilotPlan || !Array.isArray(state.pilotPlan.steps) || state.pilotPlan.steps.length === 0) {
+    return;
+  }
+  let explicitImportPath = null;
+  if (state.pilotPlan.requiresFolderPrompt) {
+    explicitImportPath = await pickGameFolder();
+  }
+  const btn = el("btn-pilot-run");
+  if (btn) btn.disabled = true;
+  try {
+    const report = await executeDukePilotPlan(state.pilotPlan, explicitImportPath);
+    if (report?.needsFolderPrompt && !explicitImportPath) {
+      const picked = await pickGameFolder();
+      if (picked) {
+        const rep2 = await executeDukePilotPlan(state.pilotPlan, picked);
+        showToast(rep2?.summary || "Folder imported.", rep2?.ok ? "success" : "info", 3800);
+      }
+    } else if (report?.followUpAction === "toggle_couch_mode") {
+      applyCouchMode(!state.couchMode, true);
+    } else if (report?.followUpAction === "open_play_tonight") {
+      const mins = Number(report?.followUpQuery || 60);
+      if (el("select-play-tonight-mins")) {
+        el("select-play-tonight-mins").value = String([30, 60, 120, 240].reduce((a, b) => (Math.abs(b - mins) < Math.abs(a - mins) ? b : a)));
+      }
+      await activatePlayTonightFilter();
+    } else if (report?.followUpAction === "open_semantic_catalog") {
+      switchTab("catalog");
+      if (el("input-catalog-search")) {
+        el("input-catalog-search").value = report?.followUpQuery || inpVal;
+        handleCatalogSearchInput();
+      }
+    } else {
+      showToast(report?.summary || "Duke Pilot action completed.", report?.ok ? "success" : "error", 4200);
+      state.library = await invokeCommand("get_local_library").catch(() => state.library);
+      renderLibraryGrid();
+      renderSidebarGameList();
+    }
+    closeDukePilotPopover();
+  } catch (err) {
+    showToast(String(err), "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function refreshPlayTonightFilter() {
+  const mins = Number(el("select-play-tonight-mins")?.value || 60);
+  try {
+    const list = await getPlayTonightRecommendations(mins, 36);
+    const items = Array.isArray(list) ? list : [];
+    state.playTonightIds = items.map((x) => x.gameId);
+    state.playTonightMap = new Map(items.map((x) => [x.gameId, x]));
+    renderLibraryGrid();
+    if (items.length > 0) {
+      showToast(`Play Tonight ranked ${items.length} installed title(s) for ~${mins} min.`, "info", 2400);
+    }
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+async function activatePlayTonightFilter() {
+  switchTab("library", true);
+  state.filter = "play_tonight";
+  document.querySelectorAll("#filter-pills .filter-pill").forEach((p) =>
+    p.classList.toggle("active", p.dataset.filter === "play_tonight")
+  );
+  el("play-tonight-session-wrap")?.classList.remove("hidden");
+  await refreshPlayTonightFilter();
+}
+
+function getActiveRadialSlots() {
+  if (Array.isArray(state.radialSlots) && state.radialSlots.length > 0) {
+    return state.radialSlots;
+  }
+  return [
+    { slotId: 0, label: "Launch / Play", action: "launch_selected" },
+    { slotId: 1, label: "Play Tonight", action: "open_play_tonight" },
+    { slotId: 2, label: "Freeze / Resume", action: "toggle_suspend" },
+    { slotId: 3, label: "Backup Saves", action: "backup_saves" },
+    { slotId: 4, label: "Virtual Keyboard", action: "open_vkb" },
+    { slotId: 5, label: "Shrink Size", action: "compress_selected" },
+    { slotId: 6, label: "Export Capsule", action: "export_capsule" },
+    { slotId: 7, label: "Toggle Deck Mode", action: "toggle_couch" }
+  ];
+}
+
+function renderRadialHotbar(slots = null, selectedSlot = state.radialSelectedSlot) {
+  if (Array.isArray(slots) && slots.length > 0) {
+    state.radialSlots = slots;
+  }
+  const activeSlots = getActiveRadialSlots();
+  state.radialSelectedSlot = Number(selectedSlot || 0) % activeSlots.length;
+  const ring = el("radial-slots-ring");
+  if (!ring) return;
+  ring.innerHTML = activeSlots
+    .map(
+      (s, idx) => `
+    <button type="button" class="radial-slot-btn ${idx === state.radialSelectedSlot ? "active" : ""}" data-radial-slot="${s.slotId}" data-radial-action="${escapeHtml(s.action)}" style="--slot-idx:${idx}">
+      <span class="radial-slot-title">${escapeHtml(s.label)}</span>
+      <span class="radial-slot-key mono-num">Slot ${s.slotId + 1}</span>
+    </button>`
+    )
+    .join("");
+  const active = activeSlots[state.radialSelectedSlot];
+  if (el("radial-center-title") && active) {
+    el("radial-center-title").textContent = active.label;
+  }
+}
+
+function openRadialHotbar(slots = null) {
+  state.radialOpen = true;
+  renderRadialHotbar(slots, state.radialSelectedSlot);
+  el("radial-hotbar-overlay")?.classList.remove("hidden");
+  state.gamepadPollingRateFn?.(true);
+}
+
+function closeRadialHotbar() {
+  state.radialOpen = false;
+  el("radial-hotbar-overlay")?.classList.add("hidden");
+  state.gamepadPollingRateFn?.(state.couchMode);
+}
+
+async function handleRadialActionDispatch(action, slotId = null) {
+  closeRadialHotbar();
+  const activeGame =
+    state.library.find((g) => g.id === state.selectedDetailId) || getFilteredSortedGames()[0] || null;
+  switch (String(action || "")) {
+    case "launch_selected":
+      if (activeGame) {
+        await launchGameDirectly(activeGame);
+      }
+      break;
+    case "open_play_tonight":
+      await activatePlayTonightFilter();
+      break;
+    case "toggle_suspend":
+      if (activeGame) {
+        await suspendOrResumeGame(activeGame.id, "toggle").catch((e) => showToast(String(e), "error"));
+      }
+      break;
+    case "backup_saves":
+      if (activeGame) {
+        const msg = await invokeCommand("backup_game_saves", {
+          gameId: activeGame.id,
+          title: activeGame.title,
+          installDir: activeGame.installDir || null,
+          exePath: activeGame.exePath
+        }).catch((e) => {
+          showToast(String(e), "error");
+          return null;
+        });
+        if (msg) showToast(`Saved rolling backup archive: ${msg}`, "success");
+      }
+      break;
+    case "open_vkb":
+      openVirtualKeyboard(el("search-input"));
+      break;
+    case "compress_selected":
+      if (activeGame) {
+        await compressGameFolder(activeGame.id).catch((e) => showToast(String(e), "error"));
+      }
+      break;
+    case "export_capsule":
+      if (activeGame) {
+        const fmt = el("select-capsule-format")?.value || "folder";
+        const rep = await exportGameCapsule(activeGame.id, null, fmt, true).catch((e) => {
+          showToast(String(e), "error");
+          return null;
+        });
+        if (rep?.summary) showToast(rep.summary, "success", 4200);
+      }
+      break;
+    case "toggle_couch":
+      applyCouchMode(!state.couchMode, true);
+      break;
+    default:
+      if (slotId != null) {
+        await triggerCouchRadialAction(slotId, action).catch(() => {});
+      }
+      break;
+  }
+}
+
+const VKB_ROWS = [
+  ..."1234567890",
+  ..."qwertyuiop",
+  ..."asdfghjkl-",
+  ..."zxcvbnm._/"
+];
+
+function renderVirtualKeyboardGrid() {
+  const grid = el("vkb-grid");
+  if (!grid) return;
+  grid.innerHTML = VKB_ROWS.map((ch) => {
+    const label = state.vkbShift ? ch.toUpperCase() : ch;
+    return `<button type="button" class="vkb-key-btn" data-vkb-char="${escapeHtml(label)}">${escapeHtml(label)}</button>`;
+  }).join("");
+}
+
+function openVirtualKeyboard(targetEl = null) {
+  state.vkbTargetInput = targetEl || el("search-input");
+  if (el("vkb-preview")) {
+    el("vkb-preview").value = state.vkbTargetInput?.value || "";
+  }
+  renderVirtualKeyboardGrid();
+  el("virtual-keyboard-overlay")?.classList.remove("hidden");
+}
+
+function closeVirtualKeyboard(applyText = false) {
+  const preview = el("vkb-preview");
+  if (applyText && state.vkbTargetInput && preview) {
+    state.vkbTargetInput.value = preview.value;
+    state.vkbTargetInput.dispatchEvent(new Event("input", { bubbles: true }));
+    state.vkbTargetInput.focus();
+  }
+  el("virtual-keyboard-overlay")?.classList.add("hidden");
 }
 
 async function readSystemClipboardText() {
@@ -5867,7 +6294,80 @@ function wireEvents() {
     if (!pill) return;
     state.filter = pill.dataset.filter;
     document.querySelectorAll("#filter-pills .filter-pill").forEach((p) => p.classList.toggle("active", p === pill));
-    renderLibraryGrid();
+    const isPlayTonight = state.filter === "play_tonight";
+    el("play-tonight-session-wrap")?.classList.toggle("hidden", !isPlayTonight);
+    if (isPlayTonight) {
+      refreshPlayTonightFilter();
+    } else {
+      renderLibraryGrid();
+    }
+  });
+
+  el("select-play-tonight-mins")?.addEventListener("change", () => {
+    if (state.filter === "play_tonight") {
+      refreshPlayTonightFilter();
+    }
+  });
+
+  el("btn-titlebar-couch")?.addEventListener("click", () => {
+    applyCouchMode(!state.couchMode, true);
+    showToast(state.couchMode ? "Duke Deck 10-Foot Mode activated." : "Returned to Desktop Mode.", "info", 2200);
+  });
+
+  el("btn-couch-radial")?.addEventListener("click", () => openRadialHotbar());
+  el("btn-couch-vkb")?.addEventListener("click", () => openVirtualKeyboard(el("search-input")));
+  el("btn-couch-exit")?.addEventListener("click", () => applyCouchMode(false, true));
+  el("btn-radial-close")?.addEventListener("click", () => closeRadialHotbar());
+  el("radial-slots-ring")?.addEventListener("click", (e) => {
+    const btn = e.target.closest(".radial-slot-btn[data-radial-action]");
+    if (!btn) return;
+    handleRadialActionDispatch(btn.dataset.radialAction, Number(btn.dataset.radialSlot));
+  });
+
+  el("btn-vkb-close")?.addEventListener("click", () => closeVirtualKeyboard(false));
+  el("btn-vkb-done")?.addEventListener("click", () => closeVirtualKeyboard(true));
+  el("btn-vkb-shift")?.addEventListener("click", () => {
+    state.vkbShift = !state.vkbShift;
+    renderVirtualKeyboardGrid();
+  });
+  el("btn-vkb-space")?.addEventListener("click", () => {
+    if (el("vkb-preview")) el("vkb-preview").value += " ";
+  });
+  el("btn-vkb-backspace")?.addEventListener("click", () => {
+    const p = el("vkb-preview");
+    if (p) p.value = p.value.slice(0, -1);
+  });
+  el("vkb-grid")?.addEventListener("click", (e) => {
+    const keyBtn = e.target.closest(".vkb-key-btn[data-vkb-char]");
+    if (!keyBtn || !el("vkb-preview")) return;
+    el("vkb-preview").value += keyBtn.dataset.vkbChar;
+  });
+
+  el("btn-pilot-close")?.addEventListener("click", closeDukePilotPopover);
+  el("btn-pilot-example")?.addEventListener("click", () => {
+    const ex = PILOT_EXAMPLES[pilotExampleIdx % PILOT_EXAMPLES.length];
+    pilotExampleIdx += 1;
+    const inp = el("search-input");
+    if (inp) {
+      inp.value = ex;
+      inp.focus();
+      scheduleDukePilotPreview(ex);
+    }
+  });
+  el("btn-pilot-run")?.addEventListener("click", () => runActiveDukePilotPlan());
+  el("chk-pilot-ai")?.addEventListener("change", () => {
+    const q = el("search-input")?.value || "";
+    if (q.trim()) scheduleDukePilotPreview(q);
+  });
+  el("pilot-semantic-list")?.addEventListener("click", (e) => {
+    const row = e.target.closest(".pilot-semantic-row[data-catalog-query]");
+    if (!row) return;
+    closeDukePilotPopover();
+    switchTab("catalog");
+    if (el("input-catalog-search")) {
+      el("input-catalog-search").value = row.dataset.catalogQuery || "";
+      handleCatalogSearchInput();
+    }
   });
 
   el("sort-select")?.addEventListener("change", (e) => {
@@ -5927,6 +6427,16 @@ function wireEvents() {
     if (state.activeTab === "catalog") {
       if (el("input-catalog-search")) el("input-catalog-search").value = state.searchQuery;
       handleCatalogSearchInput(state.searchQuery);
+    }
+    scheduleDukePilotPreview(state.searchQuery);
+  });
+
+  el("search-input")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && state.searchQuery.trim()) {
+      e.preventDefault();
+      runActiveDukePilotPlan();
+    } else if (e.key === "Escape") {
+      closeDukePilotPopover();
     }
   });
 
@@ -7372,6 +7882,51 @@ function wireEvents() {
       try {
         const res = await syncGameSavesMesh(g.id);
         showToast(res?.summary || "Mesh save sync finished.", "success", 3500);
+      } catch (err) {
+        showToast(String(err), "error");
+      }
+    })
+  );
+  el("btn-detail-export-capsule")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-detail-export-capsule");
+      const fmt = el("select-capsule-format")?.value || "folder";
+      if (btn) btn.disabled = true;
+      showToast(`Packaging Portable Capsule (${fmt}) for ${g.title}...`, "info", 2800);
+      try {
+        const rep = await exportGameCapsule(g.id, null, fmt, true);
+        showToast(rep?.summary || `Capsule exported to ${rep?.outputPath || ""}`, "success", 5200);
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
+  el("btn-detail-export-dkpack")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-detail-export-dkpack");
+      if (btn) btn.disabled = true;
+      try {
+        const rep = await exportGameDkpack(g.id, null);
+        const kb = (Number(rep?.sizeBytes || 0) / 1024).toFixed(1);
+        showToast(`Compiled .dkpack (${kb} KB) -> ${rep?.outputPath || ""}`, "success", 4800);
+      } catch (err) {
+        showToast(String(err), "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
+  el("btn-detail-apply-dkpack")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const filePath = await pickDkpackFile();
+      if (!filePath) return;
+      showToast(`Verifying hashes & applying .dkpack to ${g.title}...`, "info", 2600);
+      try {
+        const rep = await applyDkpackRecipe(filePath, g.id);
+        showToast(rep?.summary || "Modpack recipe applied.", "success", 4600);
+        loadDetailModGraph(g, state.activeDetailRequestId);
       } catch (err) {
         showToast(String(err), "error");
       }
@@ -9603,7 +10158,11 @@ function startGamepadControllerLoop() {
       return;
     }
     if (focusedEl.tagName === "INPUT" && focusedEl.type !== "checkbox") {
-      focusedEl.focus();
+      if (state.couchMode) {
+        openVirtualKeyboard(focusedEl);
+      } else {
+        focusedEl.focus();
+      }
       return;
     }
     focusedEl.click();
@@ -9676,7 +10235,31 @@ function startGamepadControllerLoop() {
       const rb = Boolean(pad.rb || pad.rightShoulder || (buttons & 0x0200));
 
       const now = performance.now();
-      if ((up || down || left || right) && now - lastMoveTs >= MOVE_DEBOUNCE_MS) {
+      if (state.radialOpen) {
+        if (Math.abs(lx) > 12000 || Math.abs(ly) > 12000) {
+          const deg = ((Math.atan2(lx, ly) * 180) / Math.PI + 360) % 360;
+          const slotIdx = Math.round(deg / 45) % 8;
+          if (slotIdx !== state.radialSelectedSlot) {
+            renderRadialHotbar(null, slotIdx);
+          }
+        }
+        if (a && !prev.a) {
+          const activeSlots = getActiveRadialSlots();
+          const chosen = activeSlots[state.radialSelectedSlot];
+          if (chosen) handleRadialActionDispatch(chosen.action, chosen.slotId);
+        }
+        if (b && !prev.b) {
+          closeRadialHotbar();
+        }
+        prev.a = a;
+        prev.b = b;
+        prev.x = x;
+        prev.lb = lb;
+        prev.rb = rb;
+        return;
+      }
+
+      if ((up || down || left || right) && now - lastMoveTs >= (state.couchMode ? 120 : MOVE_DEBOUNCE_MS)) {
         lastMoveTs = now;
         if (right) moveFocus(1, 0);
         else if (left) moveFocus(-1, 0);
@@ -9690,7 +10273,7 @@ function startGamepadControllerLoop() {
       if (rb && !prev.rb) cycleTab(1);
       if (x && !prev.x) {
         applyCouchMode(!state.couchMode, true);
-        showToast(state.couchMode ? "Couch / Handheld Mode enabled." : "Couch Mode disabled.", "info", 2000);
+        showToast(state.couchMode ? "Duke Deck 10-Foot Mode enabled." : "Couch Mode disabled.", "info", 2000);
       }
 
       prev.a = a;
@@ -9705,9 +10288,13 @@ function startGamepadControllerLoop() {
     }
   };
 
+  function getPollIntervalMs() {
+    return state.couchMode || state.radialOpen ? 8 : 16;
+  }
+
   function startPolling() {
     if (timerId !== null || document.visibilityState !== "visible") return;
-    timerId = setInterval(tick, 16);
+    timerId = setInterval(tick, getPollIntervalMs());
   }
 
   function stopPolling() {
@@ -9716,6 +10303,11 @@ function startGamepadControllerLoop() {
       timerId = null;
     }
   }
+
+  state.gamepadPollingRateFn = () => {
+    stopPolling();
+    startPolling();
+  };
 
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") {
@@ -9758,6 +10350,10 @@ async function init() {
         if (inp) {
           inp.focus();
           inp.select();
+          if (inp.id === "search-input") {
+            el("duke-pilot-popover")?.classList.remove("hidden");
+            if (inp.value.trim()) scheduleDukePilotPreview(inp.value);
+          }
         }
       }
     });
@@ -10200,6 +10796,56 @@ async function init() {
     if (evt?.phrase) {
       showToast(`Voice Macro: ${evt.phrase} -> ${evt.actionKind}`, "info", 2400);
     }
+  }).catch(() => {});
+  getCouchModeStatus()
+    .then((cs) => {
+      if (cs?.radialSlots) state.radialSlots = cs.radialSlots;
+      if (cs?.controllerKind) state.controllerKind = cs.controllerKind;
+      if (cs?.cliBooted || cs?.enabled) {
+        applyCouchMode(true, false, cs.controllerKind);
+      } else {
+        updateControllerGlyphLegend(state.controllerKind);
+      }
+    })
+    .catch(() => {});
+  listenCouchStateChanged((cs) => {
+    if (!cs) return;
+    if (Array.isArray(cs.radialSlots)) state.radialSlots = cs.radialSlots;
+    applyCouchMode(Boolean(cs.enabled), false, cs.controllerKind);
+    if (cs.radialOpen) openRadialHotbar(cs.radialSlots);
+    else closeRadialHotbar();
+  }).catch(() => {});
+  listenCouchRadialToggled((cs) => {
+    if (!cs) return;
+    if (Array.isArray(cs.radialSlots)) state.radialSlots = cs.radialSlots;
+    if (cs.controllerKind) updateControllerGlyphLegend(cs.controllerKind);
+    if (cs.radialOpen) openRadialHotbar(cs.radialSlots);
+    else closeRadialHotbar();
+  }).catch(() => {});
+  listenCouchRadialAction((evt) => {
+    if (evt?.slot?.action) {
+      handleRadialActionDispatch(evt.slot.action, evt.slot.slotId);
+    }
+  }).catch(() => {});
+  listenDkpackApplied((rep) => {
+    if (rep?.summary) {
+      showToast(rep.summary, "success", 4400);
+    }
+  }).catch(() => {});
+  listenPilotSemanticSearch((q) => {
+    if (q) {
+      switchTab("catalog");
+      if (el("input-catalog-search")) {
+        el("input-catalog-search").value = String(q);
+        handleCatalogSearchInput();
+      }
+    }
+  }).catch(() => {});
+  listenPilotPlayTonight((mins) => {
+    if (el("select-play-tonight-mins") && mins) {
+      el("select-play-tonight-mins").value = String([30, 60, 120, 240].reduce((a, b) => (Math.abs(b - mins) < Math.abs(a - mins) ? b : a)));
+    }
+    activatePlayTonightFilter();
   }).catch(() => {});
   try {
     await Promise.resolve(loadEmulatorSettingsSection());

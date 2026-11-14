@@ -9,8 +9,9 @@ use std::time::Instant;
 use crate::{get_app_data_file_standalone, CatalogCacheFile, CatalogGameEntry};
 
 pub const DKCAT_MAGIC_V1: [u8; 8] = *b"DKCAT001";
-pub const DKCAT_MAGIC: [u8; 8] = *b"DKCAT002";
-pub const DKCAT_VERSION: u32 = 3;
+pub const DKCAT_MAGIC_V2: [u8; 8] = *b"DKCAT002";
+pub const DKCAT_MAGIC: [u8; 8] = *b"DKCAT003";
+pub const DKCAT_VERSION: u32 = 4;
 const FLAG_IS_FREE: u32 = 1 << 0;
 const FLAG_SINGLEPLAYER: u32 = 1 << 1;
 const FLAG_COOP: u32 = 1 << 2;
@@ -18,6 +19,12 @@ const FLAG_MULTIPLAYER: u32 = 1 << 3;
 const FLAG_ONLINE_ONLY_PVP: u32 = 1 << 4;
 const FLAG_DETAILS_ENRICHED: u32 = 1 << 5;
 const GENRE_MASK_POPULATED: u64 = 1u64 << 63;
+
+pub const SEM_CONTROLLER_SUPPORT: u16 = 1 << 0;
+pub const SEM_COZY_RELAXING: u16 = 1 << 1;
+pub const SEM_SHORT_SESSION: u16 = 1 << 2;
+pub const SEM_PHYSICS_CHAOS: u16 = 1 << 3;
+pub const SEM_HANDHELD_FRIENDLY: u16 = 1 << 4;
 
 pub struct GenreBitDef {
     pub name: &'static str,
@@ -398,7 +405,35 @@ struct CatalogRecordV1 {
     pub meta_len: u32,
 }
 
-/// Packed fixed-stride `#[repr(C)]` catalog entry (112 bytes) stored sequentially in `catalog.dkcat` (`DKCAT002`).
+/// Legacy fixed-stride `#[repr(C)]` catalog entry (112 bytes) preserved for transparent `DKCAT002` -> `DKCAT003` migration.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct CatalogRecordV2 {
+    pub ccu: u64,
+    pub owners_min: u64,
+    pub owners_max: u64,
+    pub positive: u64,
+    pub negative: u64,
+    pub value_score: f64,
+    pub updated_at: u64,
+    pub genre_bits: u64,
+    pub appid: u32,
+    pub price_cents: u32,
+    pub initial_price_cents: u32,
+    pub flags: u32,
+    pub name_off: u32,
+    pub name_len: u32,
+    pub tags_off: u32,
+    pub tags_len: u32,
+    pub meta_off: u32,
+    pub meta_len: u32,
+    pub platform_id: u16,
+    pub console_group: u8,
+    pub _pad: [u8; 5],
+}
+
+/// Packed fixed-stride `#[repr(C)]` catalog entry (152 bytes) stored sequentially in `catalog.dkcat` (`DKCAT003`)
+/// with a quantized 32-dim semantic embedding `[i8; 32]`, estimated disk footprint, HLTB tenths, and capability flags.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct CatalogRecord {
@@ -423,6 +458,10 @@ pub struct CatalogRecord {
     pub platform_id: u16,
     pub console_group: u8,
     pub _pad: [u8; 5],
+    pub est_size_mb: u32,
+    pub hltb_tenths: u16,
+    pub semantic_flags: u16,
+    pub semantic_vec: [i8; 32],
 }
 
 #[repr(C)]
@@ -483,6 +522,580 @@ pub struct CatalogQueryPage {
     pub offset: usize,
     pub limit: usize,
     pub query_time_us: u64,
+    #[serde(default)]
+    pub semantic_mode: bool,
+    #[serde(default)]
+    pub semantic_summary: String,
+}
+
+const SEMANTIC_CONCEPT_AXES: [&[&str]; 32] = [
+    &["action", "combat", "fast-paced", "arcade", "hack", "brawler"],
+    &["rpg", "role-playing", "jrpg", "crpg", "leveling", "character customization"],
+    &["co-op", "coop", "couch co-op", "local co-op", "online co-op", "split screen", "friends"],
+    &["physics", "ragdoll", "destruction", "sandbox physics", "momentum", "gravity"],
+    &["chaos", "mayhem", "party", "funny", "comedy", "slapstick", "hilarious", "silly"],
+    &["controller", "gamepad", "full controller support", "dualsense", "handheld", "console"],
+    &["puzzle", "logic", "brainteaser", "portal", "mystery", "sokoban"],
+    &["roguelike", "roguelite", "deckbuilder", "run-based", "permadeath", "procedural"],
+    &["strategy", "tactical", "turn-based", "rts", "4x", "tower defense", "grand strategy"],
+    &["engineering", "automation", "factory", "building", "crafting", "sandbox", "voxel"],
+    &["survival", "zombies", "base building", "open world survival craft", "scavenging"],
+    &["horror", "scary", "psychological horror", "survival horror", "dark", "creepy"],
+    &["cozy", "relaxing", "wholesome", "farming", "life sim", "chill", "casual"],
+    &["story rich", "narrative", "choices matter", "visual novel", "cinematic"],
+    &["indie", "minimalist", "2d", "compact", "lightweight", "solo dev"],
+    &["open world", "exploration", "immersive", "seamless", "sandbox world"],
+    &["shooter", "fps", "third-person shooter", "bullet hell", "twin stick", "gunplay"],
+    &["platformer", "metroidvania", "precision platformer", "jump", "side scroller"],
+    &["racing", "driving", "motorsport", "kart", "drift", "arcade racer"],
+    &["simulation", "flight", "space", "management", "economy", "city builder"],
+    &["souls-like", "difficult", "boss rush", "parry", "action rpg"],
+    &["anime", "stylized", "cel shaded", "jrpg"],
+    &["retro", "pixel", "pixel graphics", "classic", "90s", "8-bit", "16-bit"],
+    &["short", "quick", "pick up", "bite-sized", "replayable", "arcade loop", "session"],
+    &["epic", "massive", "100 hour", "endless", "mmo"],
+    &["small", "compact", "under 5 gb", "low spec", "portable", "handheld friendly"],
+    &["sci-fi", "cyberpunk", "futuristic", "space sim", "mechs"],
+    &["fantasy", "magic", "medieval", "dungeon", "dragon"],
+    &["nintendo", "switch", "wii u", "wii", "gamecube", "3ds", "n64", "snes", "nes", "gba"],
+    &["playstation", "ps1", "ps2", "ps3", "psp", "sony"],
+    &["local multiplayer", "family friendly", "couch", "shared screen", "4 player"],
+    &["free to play", "free", "high rated", "overwhelmingly positive", "gem"],
+];
+
+#[inline]
+pub fn dot_i8_32(a: &[i8; 32], b: &[i8; 32]) -> i32 {
+    let mut acc = 0i32;
+    let mut i = 0usize;
+    while i < 32 {
+        acc += (a[i] as i32) * (b[i] as i32);
+        i += 1;
+    }
+    acc
+}
+
+fn quantize_float_vec_i8(weights: &[f32; 32]) -> [i8; 32] {
+    let norm_sq: f32 = weights.iter().map(|v| v * v).sum();
+    if norm_sq <= 1e-6 {
+        return [0i8; 32];
+    }
+    let inv_norm = 127.0 / norm_sq.sqrt();
+    let mut out = [0i8; 32];
+    for (idx, &w) in weights.iter().enumerate() {
+        let q = (w * inv_norm).round().clamp(-127.0, 127.0);
+        out[idx] = q as i8;
+    }
+    out
+}
+
+fn parse_explicit_size_mb_hint(hay_lower: &str) -> Option<u32> {
+    let bytes = hay_lower.as_bytes();
+    for (idx, w) in bytes.windows(2).enumerate() {
+        if w == b"gb" || w == b"mb" {
+            let prefix = hay_lower[..idx].trim_end();
+            let num_str: String = prefix
+                .chars()
+                .rev()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            if let Ok(val) = num_str.parse::<f64>() {
+                if val > 0.0 && val < 2000.0 {
+                    let mb = if w == b"gb" { val * 1024.0 } else { val };
+                    return Some(mb.round().clamp(1.0, 500_000.0) as u32);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_explicit_hours_tenths_hint(hay_lower: &str) -> Option<u16> {
+    let tokens: Vec<&str> = hay_lower
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != '-')
+        .filter(|s| !s.is_empty())
+        .collect();
+    for (idx, tok) in tokens.iter().enumerate() {
+        if let Some(prefix) = tok.strip_suffix("-hour").or_else(|| tok.strip_suffix("-hr")) {
+            if let Ok(h) = prefix.parse::<f64>() {
+                if (0.5..=400.0).contains(&h) {
+                    return Some((h * 10.0).round() as u16);
+                }
+            }
+        }
+        if matches!(*tok, "hour" | "hours" | "hr" | "hrs") && idx > 0 {
+            if let Ok(h) = tokens[idx - 1].parse::<f64>() {
+                if (0.5..=400.0).contains(&h) {
+                    return Some((h * 10.0).round() as u16);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn estimate_entry_size_and_hltb(entry: &CatalogGameEntry, hay_lower: &str) -> (u32, u16, u16) {
+    let mut flags = 0u16;
+    if entry.platform_id > 0
+        || entry
+            .categories
+            .iter()
+            .any(|c| c.to_ascii_lowercase().contains("controller"))
+        || hay_lower.contains("controller support")
+        || hay_lower.contains("gamepad")
+        || entry
+            .genres
+            .iter()
+            .chain(entry.tags.iter())
+            .any(|g| {
+                matches!(
+                    g.to_ascii_lowercase().as_str(),
+                    "action" | "platformer" | "racing" | "metroidvania" | "rpg" | "fighting" | "sports" | "physics"
+                )
+            })
+    {
+        flags |= SEM_CONTROLLER_SUPPORT;
+    }
+
+    if hay_lower.contains("cozy")
+        || hay_lower.contains("relaxing")
+        || hay_lower.contains("wholesome")
+        || hay_lower.contains("farming")
+    {
+        flags |= SEM_COZY_RELAXING;
+    }
+    if hay_lower.contains("physics")
+        || hay_lower.contains("chaos")
+        || hay_lower.contains("ragdoll")
+        || hay_lower.contains("destruction")
+    {
+        flags |= SEM_PHYSICS_CHAOS;
+    }
+
+    let est_size_mb = if let Some(explicit_mb) = parse_explicit_size_mb_hint(hay_lower) {
+        explicit_mb
+    } else if entry.platform_id > 0 {
+        match entry.platform_id {
+            p if p == crate::platforms::PLATFORM_SWITCH => 3400,
+            p if p == crate::platforms::PLATFORM_WII_U => 4200,
+            p if p == crate::platforms::PLATFORM_PS3 => 7500,
+            p if p == crate::platforms::PLATFORM_3DS => 1100,
+            p if p == crate::platforms::PLATFORM_PS2 || p == crate::platforms::PLATFORM_WII => 2100,
+            p if p == crate::platforms::PLATFORM_GAMECUBE || p == crate::platforms::PLATFORM_PSP => 1100,
+            _ => 128,
+        }
+    } else if hay_lower.contains("open world") || hay_lower.contains("cinematic") {
+        42_000
+    } else if hay_lower.contains("aaa") || hay_lower.contains("mmorpg") || hay_lower.contains("shooter") {
+        18_000
+    } else if hay_lower.contains("indie")
+        || hay_lower.contains("pixel")
+        || hay_lower.contains("2d")
+        || hay_lower.contains("puzzle")
+        || hay_lower.contains("roguelike")
+        || hay_lower.contains("party")
+        || hay_lower.contains("physics")
+    {
+        1_800
+    } else {
+        8_500
+    };
+
+    if est_size_mb <= 5120 || entry.platform_id > 0 || (flags & SEM_CONTROLLER_SUPPORT) != 0 {
+        flags |= SEM_HANDHELD_FRIENDLY;
+    }
+
+    let hltb_tenths = if let Some(explicit_t) = parse_explicit_hours_tenths_hint(hay_lower) {
+        explicit_t
+    } else if hay_lower.contains("short") || hay_lower.contains("quick") || hay_lower.contains("party") {
+        50
+    } else if hay_lower.contains("roguelike") || hay_lower.contains("arcade") || hay_lower.contains("platformer") {
+        60
+    } else if hay_lower.contains("jrpg") || hay_lower.contains("open world") || hay_lower.contains("4x") {
+        360
+    } else if hay_lower.contains("rpg") {
+        140
+    } else {
+        90
+    };
+
+    if hltb_tenths <= 80 {
+        flags |= SEM_SHORT_SESSION;
+    }
+
+    (est_size_mb, hltb_tenths, flags)
+}
+
+pub fn encode_semantic_embedding_i8(entry: &CatalogGameEntry) -> ([i8; 32], u32, u16, u16) {
+    let plat_spec = crate::platforms::platform_by_id(entry.platform_id);
+    let hay = format!(
+        "{} {} {} {} {} {} {} {}",
+        entry.name,
+        entry.genres.join(" "),
+        entry.tags.join(" "),
+        entry.categories.join(" "),
+        entry.short_description,
+        entry.developers.join(" "),
+        plat_spec.short_name,
+        plat_spec.display_name
+    )
+    .to_ascii_lowercase();
+
+    let (est_size_mb, hltb_tenths, sem_flags) = estimate_entry_size_and_hltb(entry, &hay);
+    let mut weights = [0.0f32; 32];
+
+    for (dim, keywords) in SEMANTIC_CONCEPT_AXES.iter().enumerate() {
+        let mut score = 0.0f32;
+        for &kw in *keywords {
+            if hay.contains(kw) {
+                score += 1.0;
+            }
+        }
+        weights[dim] = score;
+    }
+
+    if entry.is_coop {
+        weights[2] += 2.2;
+    }
+    if (sem_flags & SEM_CONTROLLER_SUPPORT) != 0 {
+        weights[5] += 1.8;
+    }
+    if (sem_flags & SEM_COZY_RELAXING) != 0 {
+        weights[12] += 1.6;
+    }
+    if (sem_flags & SEM_SHORT_SESSION) != 0 || hltb_tenths <= 70 {
+        weights[23] += 1.8;
+    } else if hltb_tenths >= 250 {
+        weights[24] += 1.5;
+    }
+    if est_size_mb <= 5120 {
+        weights[25] += 1.7;
+    }
+    if entry.platform_id > 0 {
+        if (crate::platforms::PLATFORM_NES..=crate::platforms::PLATFORM_VIRTUAL_BOY)
+            .contains(&entry.platform_id)
+        {
+            weights[28] += 2.4;
+        } else if entry.console_group == crate::platforms::GROUP_PLAYSTATION {
+            weights[29] += 2.4;
+        }
+    }
+    if entry.is_free || entry.review_pct >= 90.0 {
+        weights[31] += 1.0;
+    }
+
+    (
+        quantize_float_vec_i8(&weights),
+        est_size_mb,
+        hltb_tenths,
+        sem_flags,
+    )
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ParsedNlSemanticQuery {
+    pub is_nl_semantic: bool,
+    pub max_size_mb: Option<u32>,
+    pub max_hours_tenths: Option<u16>,
+    pub require_controller: bool,
+    pub require_coop: bool,
+    pub inferred_platform: Option<&'static str>,
+    pub query_vec: [i8; 32],
+    pub content_terms: Vec<String>,
+    pub summary: String,
+}
+
+pub fn parse_nl_semantic_query(raw: &str) -> ParsedNlSemanticQuery {
+    let lower = raw.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return ParsedNlSemanticQuery::default();
+    }
+
+    let max_size_mb = if lower.contains("under ")
+        || lower.contains("< ")
+        || lower.contains("<=")
+        || lower.contains("less than ")
+        || lower.contains("max ")
+        || lower.contains("below ")
+    {
+        parse_explicit_size_mb_hint(&lower)
+    } else {
+        None
+    };
+
+    let mut max_hours_tenths = parse_explicit_hours_tenths_hint(&lower);
+    if max_hours_tenths.is_none() && (lower.contains("short ") || lower.starts_with("short")) {
+        max_hours_tenths = Some(80);
+    }
+
+    let require_controller = lower.contains("controller support")
+        || lower.contains("with controller")
+        || lower.contains("gamepad support");
+    let require_coop = lower.contains("co-op") || lower.contains("coop");
+
+    let inferred_platform = if lower.contains("switch") {
+        Some("switch")
+    } else if lower.contains("wii u") || lower.contains("wiiu") {
+        Some("wiiu")
+    } else if lower.contains("3ds") {
+        Some("3ds")
+    } else if lower.contains("ps2") {
+        Some("ps2")
+    } else if lower.contains("nintendo") {
+        Some("nintendo")
+    } else {
+        None
+    };
+
+    let has_intent_syntax = max_size_mb.is_some()
+        || max_hours_tenths.is_some()
+        || require_controller
+        || lower.contains(" games")
+        || lower.contains(" game ")
+        || lower.contains(" with ")
+        || lower.contains(" under ")
+        || lower.contains(" like ");
+
+    let word_count = lower.split_whitespace().count();
+    let is_nl_semantic = has_intent_syntax || (word_count >= 3 && (require_coop || inferred_platform.is_some()));
+
+    let mut weights = [0.0f32; 32];
+    for (dim, keywords) in SEMANTIC_CONCEPT_AXES.iter().enumerate() {
+        let mut s = 0.0f32;
+        for &kw in *keywords {
+            if lower.contains(kw) {
+                s += 1.4;
+            }
+        }
+        weights[dim] = s;
+    }
+    if max_size_mb.is_some_and(|mb| mb <= 5500) {
+        weights[25] += 1.5;
+    }
+    if max_hours_tenths.is_some_and(|t| t <= 100) {
+        weights[23] += 1.5;
+    }
+    if require_coop {
+        weights[2] += 2.0;
+    }
+    if require_controller {
+        weights[5] += 1.8;
+    }
+
+    const STOPWORDS: &[&str] = &[
+        "games", "game", "with", "under", "less", "than", "below", "support", "hour", "hours",
+        "hr", "hrs", "short", "gb", "mb", "for", "and", "or", "a", "an", "the", "that", "have",
+        "good", "best", "play", "tonight", "my", "me", "co-op", "coop", "controller", "gamepad",
+        "switch", "wiiu", "wii", "3ds", "ps2", "nintendo", "pc",
+    ];
+    let mut content_terms = Vec::new();
+    for tok in lower.split(|c: char| !c.is_ascii_alphanumeric() && c != '-') {
+        let t = tok.trim();
+        if t.len() < 2 || t.chars().all(|c| c.is_ascii_digit() || c == '-') {
+            continue;
+        }
+        if t.ends_with("-hour") || t.ends_with("-hr") {
+            continue;
+        }
+        if !STOPWORDS.contains(&t) {
+            content_terms.push(t.to_string());
+        }
+    }
+
+    let mut badges = Vec::new();
+    if let Some(mb) = max_size_mb {
+        if mb >= 1024 {
+            badges.push(format!("<= {:.1} GB", mb as f64 / 1024.0));
+        } else {
+            badges.push(format!("<= {mb} MB"));
+        }
+    }
+    if let Some(t) = max_hours_tenths {
+        badges.push(format!("<= {:.0}h", t as f64 / 10.0));
+    }
+    if require_coop {
+        badges.push("Co-op".to_string());
+    }
+    if require_controller {
+        badges.push("Controller".to_string());
+    }
+    if let Some(p) = inferred_platform {
+        badges.push(p.to_ascii_uppercase());
+    }
+    for term in content_terms.iter().take(3) {
+        badges.push(term.clone());
+    }
+
+    ParsedNlSemanticQuery {
+        is_nl_semantic,
+        max_size_mb,
+        max_hours_tenths,
+        require_controller,
+        require_coop,
+        inferred_platform,
+        query_vec: quantize_float_vec_i8(&weights),
+        content_terms,
+        summary: if badges.is_empty() {
+            "DKCAT003 Quantized Semantic Ranking".to_string()
+        } else {
+            format!("DKCAT003 Semantic: {}", badges.join(" · "))
+        },
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayTonightCandidate {
+    pub game_id: String,
+    pub title: String,
+    pub exe_path: String,
+    pub score: f64,
+    pub fit_label: String,
+    pub estimated_session_fit: String,
+    pub hltb_main_hours: Option<f64>,
+    pub matched_online_friends: Vec<String>,
+    pub gamepad_friendly: bool,
+    pub reasons: Vec<String>,
+}
+
+pub fn rank_play_tonight_library(
+    library: &[crate::GameEntry],
+    session_minutes: u32,
+    has_gamepad: bool,
+    online_friends: &[(String, String)],
+    limit: usize,
+) -> Vec<PlayTonightCandidate> {
+    let target_hrs = (session_minutes.max(15) as f64) / 60.0;
+    let hltb_cache = crate::metadata_ext::load_hltb_cache();
+    let mut ranked = Vec::with_capacity(library.len());
+
+    for game in library {
+        let norm_title = normalize_catalog_lookup_key(&game.title);
+        let genre_lower = game.genre.to_ascii_lowercase();
+        let mut score = 40.0f64;
+        let mut reasons = Vec::new();
+
+        // 1. Check live online friends playing the same title
+        let mut matched_friends = Vec::new();
+        for (friend_name, cur_game) in online_friends {
+            let norm_friend_game = normalize_catalog_lookup_key(cur_game);
+            if !norm_friend_game.is_empty()
+                && !norm_title.is_empty()
+                && (norm_friend_game == norm_title
+                    || norm_friend_game.contains(&norm_title)
+                    || norm_title.contains(&norm_friend_game))
+            {
+                matched_friends.push(friend_name.clone());
+            }
+        }
+        if !matched_friends.is_empty() {
+            score += 48.0 + (matched_friends.len().min(3) as f64 * 8.0);
+            reasons.push(format!(
+                "{} online friend(s) in-game now ({})",
+                matched_friends.len(),
+                matched_friends.join(", ")
+            ));
+        }
+
+        // 2. Compare available session minutes against HLTB main hours
+        let hltb_hours = hltb_cache
+            .entries
+            .get(&norm_title)
+            .and_then(|h| h.main_story_hours)
+            .filter(|&hrs| hrs > 0.0);
+
+        let session_fit = if let Some(main_hrs) = hltb_hours {
+            let played_hrs = (game.playtime_seconds as f64) / 3600.0;
+            let remaining_hrs = (main_hrs - played_hrs).max(0.5);
+            if remaining_hrs <= target_hrs * 1.35 {
+                score += 34.0;
+                reasons.push(format!(
+                    "Finishable in this ~{}m session ({:.1}h remaining of {:.1}h HLTB)",
+                    session_minutes, remaining_hrs, main_hrs
+                ));
+                "Ideal Finish Window".to_string()
+            } else if main_hrs <= 10.0 || target_hrs >= 1.5 {
+                score += 20.0;
+                reasons.push(format!("Strong session pace ({:.1}h HLTB main)", main_hrs));
+                "Great Session Fit".to_string()
+            } else {
+                score += 4.0;
+                reasons.push(format!("Longer campaign ({:.1}h HLTB main)", main_hrs));
+                "Deep Session".to_string()
+            }
+        } else if genre_lower.contains("roguelike")
+            || genre_lower.contains("arcade")
+            || genre_lower.contains("coop")
+            || genre_lower.contains("co-op")
+            || genre_lower.contains("racing")
+            || genre_lower.contains("platformer")
+            || game.platform_id > 0
+        {
+            score += 24.0;
+            reasons.push(format!("Fast pick-up-and-play loop for {}m", session_minutes));
+            "Pick-Up & Play".to_string()
+        } else {
+            score += 10.0;
+            "Flexible Session".to_string()
+        };
+
+        // 3. Gamepad readiness boost
+        let gamepad_friendly = game.platform_id > 0
+            || genre_lower.contains("action")
+            || genre_lower.contains("rpg")
+            || genre_lower.contains("platformer")
+            || genre_lower.contains("racing")
+            || genre_lower.contains("souls")
+            || genre_lower.contains("metroidvania")
+            || genre_lower.contains("arcade")
+            || genre_lower.contains("adventure");
+        if has_gamepad && gamepad_friendly {
+            score += 22.0;
+            reasons.push("Gamepad connected & ready".to_string());
+        }
+
+        if game.is_favorite {
+            score += 9.0;
+            reasons.push("Pinned favorite".to_string());
+        }
+        if game.playtime_seconds > 0 && game.playtime_seconds < 4 * 3600 {
+            score += 6.0;
+        }
+
+        let fit_label = if !matched_friends.is_empty() {
+            "Squad Active".to_string()
+        } else if score >= 95.0 {
+            "Top Match".to_string()
+        } else if score >= 75.0 {
+            "Strong Pick".to_string()
+        } else {
+            "Good Fit".to_string()
+        };
+
+        ranked.push(PlayTonightCandidate {
+            game_id: game.id.clone(),
+            title: game.title.clone(),
+            exe_path: game.exe_path.clone(),
+            score,
+            fit_label,
+            estimated_session_fit: session_fit,
+            hltb_main_hours: hltb_hours,
+            matched_online_friends: matched_friends,
+            gamepad_friendly,
+            reasons,
+        });
+    }
+
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    ranked.truncate(limit.max(1));
+    ranked
 }
 
 pub struct MappedCatalog {
@@ -811,6 +1424,9 @@ pub fn serialize_dkcat(cache: &CatalogCacheFile) -> Result<Vec<u8>, String> {
             crate::platforms::console_group_for_platform(entry.platform_id)
         };
 
+        let (semantic_vec, est_size_mb, hltb_tenths, semantic_flags) =
+            encode_semantic_embedding_i8(entry);
+
         records.push(CatalogRecord {
             ccu: entry.ccu,
             owners_min: entry.owners_min,
@@ -833,6 +1449,10 @@ pub fn serialize_dkcat(cache: &CatalogCacheFile) -> Result<Vec<u8>, String> {
             platform_id: entry.platform_id,
             console_group,
             _pad: [0u8; 5],
+            est_size_mb,
+            hltb_tenths,
+            semantic_flags,
+            semantic_vec,
         });
     }
 
@@ -1234,6 +1854,8 @@ impl MappedCatalog {
                 offset,
                 limit,
                 query_time_us: started.elapsed().as_micros() as u64,
+                semantic_mode: false,
+                semantic_summary: String::new(),
             };
         }
 
@@ -1278,13 +1900,15 @@ impl MappedCatalog {
             all_genres_lower.push(low);
         }
 
+        let nl_query = parse_nl_semantic_query(&params.query);
+        let semantic_mode = nl_query.is_nl_semantic;
         let q_lower = params.query.trim().to_ascii_lowercase();
         let q_tokens: Vec<&str> = q_lower
             .split_whitespace()
             .filter(|t| !t.is_empty())
             .collect();
 
-        let trigram_candidates: Option<Vec<u32>> = if !q_tokens.is_empty() {
+        let trigram_candidates: Option<Vec<u32>> = if !semantic_mode && !q_tokens.is_empty() {
             let mut posting_slices: Vec<&[u8]> = Vec::new();
             let mut seen_tris: HashSet<[u8; 3]> = HashSet::new();
             for tok in &q_tokens {
@@ -1303,6 +1927,8 @@ impl MappedCatalog {
                                     offset,
                                     limit,
                                     query_time_us: started.elapsed().as_micros() as u64,
+                                    semantic_mode: false,
+                                    semantic_summary: String::new(),
                                 };
                             }
                             posting_slices.push(slice);
@@ -1329,6 +1955,8 @@ impl MappedCatalog {
                             offset,
                             limit,
                             query_time_us: started.elapsed().as_micros() as u64,
+                            semantic_mode: false,
+                            semantic_summary: String::new(),
                         };
                     }
                 }
@@ -1382,6 +2010,35 @@ impl MappedCatalog {
                     rec.console_group,
                     platform_filter_key,
                 ) {
+                    continue;
+                }
+            } else if semantic_mode {
+                if let Some(inferred_plat) = nl_query.inferred_platform {
+                    if !crate::platforms::record_matches_platform_filter(
+                        rec.platform_id,
+                        rec.console_group,
+                        inferred_plat,
+                    ) {
+                        continue;
+                    }
+                }
+            }
+
+            if semantic_mode {
+                if let Some(max_mb) = nl_query.max_size_mb {
+                    if rec.est_size_mb > max_mb {
+                        continue;
+                    }
+                }
+                if let Some(max_t) = nl_query.max_hours_tenths {
+                    if rec.hltb_tenths > max_t {
+                        continue;
+                    }
+                }
+                if nl_query.require_controller && (rec.semantic_flags & SEM_CONTROLLER_SUPPORT) == 0 {
+                    continue;
+                }
+                if nl_query.require_coop && (rec.flags & FLAG_COOP) == 0 {
                     continue;
                 }
             }
@@ -1510,7 +2167,48 @@ impl MappedCatalog {
                 }
             }
 
-            if !q_tokens.is_empty() {
+            let mut semantic_score_bonus = 0i64;
+            if semantic_mode {
+                let dot = dot_i8_32(&rec.semantic_vec, &nl_query.query_vec) as i64;
+                semantic_score_bonus = dot.max(0);
+                if !nl_query.content_terms.is_empty() {
+                    let tags_str = cached_tags
+                        .unwrap_or_else(|| self.pool_str(rec.tags_off, rec.tags_len));
+                    let (genres_str, desc_str) =
+                        if let Some(g) = cached_genres {
+                            let _ = cached_categories;
+                            let _ = cached_devs;
+                            (g, "")
+                        } else {
+                            let meta_str = self.pool_str(rec.meta_off, rec.meta_len);
+                            let mut parts = meta_str.split(FIELD_SEP);
+                            let _ = parts.next();
+                            let _ = parts.next();
+                            let g = parts.next().unwrap_or("");
+                            let _ = parts.next();
+                            let desc = parts.next().unwrap_or("");
+                            (g, desc)
+                        };
+                    let plat_spec = crate::platforms::platform_by_id(rec.platform_id);
+                    let mut term_hits = 0i64;
+                    for term in &nl_query.content_terms {
+                        if contains_ignore_ascii_case(name_str, term)
+                            || contains_ignore_ascii_case(tags_str, term)
+                            || contains_ignore_ascii_case(genres_str, term)
+                            || (!desc_str.is_empty() && contains_ignore_ascii_case(desc_str, term))
+                            || (rec.platform_id > 0
+                                && (contains_ignore_ascii_case(plat_spec.short_name, term)
+                                    || contains_ignore_ascii_case(plat_spec.display_name, term)))
+                        {
+                            term_hits += 1;
+                        }
+                    }
+                    semantic_score_bonus += term_hits * 45_000;
+                }
+                if semantic_score_bonus <= 0 {
+                    continue;
+                }
+            } else if !q_tokens.is_empty() {
                 let tags_str = cached_tags
                     .unwrap_or_else(|| self.pool_str(rec.tags_off, rec.tags_len));
                 let (genres_str, devs_str) =
@@ -1552,7 +2250,18 @@ impl MappedCatalog {
                 0
             };
 
-            let (k1, k2, k3) = match sort_mode {
+            let effective_sort = if semantic_mode && matches!(sort_mode, "" | "value_score" | "value" | "relevancy") {
+                "semantic"
+            } else {
+                sort_mode
+            };
+
+            let (k1, k2, k3) = match effective_sort {
+                "semantic" => (
+                    semantic_score_bonus as u64,
+                    rating_tenths,
+                    f64_to_sortable_u64(rec.value_score),
+                ),
                 "ccu_desc" | "ccu" => (
                     rec.ccu,
                     f64_to_sortable_u64(rec.value_score),
@@ -1716,6 +2425,12 @@ impl MappedCatalog {
             offset,
             limit,
             query_time_us: started.elapsed().as_micros() as u64,
+            semantic_mode,
+            semantic_summary: if semantic_mode {
+                nl_query.summary
+            } else {
+                String::new()
+            },
         }
     }
 
@@ -1873,9 +2588,115 @@ fn pool_str_slice(bytes: &[u8], strings_offset: usize, tri_offset: usize, off: u
     }
 }
 
-/// Automatically upgrades a legacy `DKCAT001` archive (`CatalogRecordV1` 104B) into `DKCAT002` (`112B`)
-/// preserving every existing PC entry (`platform_id = 0`) and fetched page cursor.
+#[allow(clippy::too_many_arguments)]
+fn hydrate_legacy_entry(
+    bytes: &[u8],
+    str_start: usize,
+    tri_start: usize,
+    appid: u32,
+    platform_id: u16,
+    console_group: u8,
+    price_cents: u32,
+    initial_price_cents: u32,
+    flags: u32,
+    ccu: u64,
+    owners_min: u64,
+    owners_max: u64,
+    positive: u64,
+    negative: u64,
+    value_score: f64,
+    updated_at: u64,
+    name_off: u32,
+    name_len: u32,
+    tags_off: u32,
+    tags_len: u32,
+    meta_off: u32,
+    meta_len: u32,
+) -> CatalogGameEntry {
+    let name = pool_str_slice(bytes, str_start, tri_start, name_off, name_len).to_string();
+    let tags_raw = pool_str_slice(bytes, str_start, tri_start, tags_off, tags_len);
+    let tags: Vec<String> = if tags_raw.is_empty() {
+        Vec::new()
+    } else {
+        tags_raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+    let meta_raw = pool_str_slice(bytes, str_start, tri_start, meta_off, meta_len);
+    let mut meta_parts = meta_raw.split(FIELD_SEP);
+    let price_formatted = meta_parts.next().unwrap_or("").to_string();
+    let owners_label = meta_parts.next().unwrap_or("").to_string();
+    let genres = split_safe(meta_parts.next().unwrap_or(""));
+    let categories = split_safe(meta_parts.next().unwrap_or(""));
+    let short_description = meta_parts.next().unwrap_or("").to_string();
+    let developers = split_safe(meta_parts.next().unwrap_or(""));
+    let publishers = split_safe(meta_parts.next().unwrap_or(""));
+    let release_date = meta_parts.next().unwrap_or("").to_string();
+    let cover_url = meta_parts.next().unwrap_or("").to_string();
+    let header_url = meta_parts.next().unwrap_or("").to_string();
+    let hero_url = meta_parts.next().unwrap_or("").to_string();
+
+    let total_reviews = positive.saturating_add(negative);
+    let review_pct = if total_reviews > 0 {
+        ((positive as f64 / total_reviews as f64) * 1000.0).round() / 10.0
+    } else {
+        0.0
+    };
+    let plat_spec = crate::platforms::platform_by_id(platform_id);
+    let resolved_cg = if console_group != 0 {
+        console_group
+    } else {
+        plat_spec.console_group
+    };
+
+    CatalogGameEntry {
+        app_id: appid,
+        name,
+        platform_id,
+        console_group: resolved_cg,
+        platform_name: plat_spec.short_name.to_string(),
+        platform_slug: plat_spec.slug.to_string(),
+        price_cents,
+        initial_price_cents,
+        discount_percent: (flags >> 8) & 0xFF,
+        price_formatted,
+        is_free: (flags & FLAG_IS_FREE) != 0,
+        ccu,
+        owners_min,
+        owners_max,
+        owners_label,
+        positive,
+        negative,
+        review_pct,
+        is_singleplayer: (flags & FLAG_SINGLEPLAYER) != 0,
+        is_coop: (flags & FLAG_COOP) != 0,
+        is_multiplayer: (flags & FLAG_MULTIPLAYER) != 0,
+        is_online_only_pvp: (flags & FLAG_ONLINE_ONLY_PVP) != 0,
+        genres,
+        tags,
+        categories,
+        short_description,
+        developers,
+        publishers,
+        release_date,
+        cover_url,
+        header_url,
+        hero_url,
+        value_score,
+        details_enriched: (flags & FLAG_DETAILS_ENRICHED) != 0,
+        updated_at,
+    }
+}
+
+/// Automatically upgrades legacy `DKCAT001` (`CatalogRecordV1` 104B) or `DKCAT002` (`CatalogRecordV2` 112B)
+/// archives into `DKCAT003` (`152B` with quantized `[i8; 32]` semantic embeddings) without data loss.
 pub fn try_migrate_dkcat_v1_to_v2(dkcat_path: &Path) -> Result<bool, String> {
+    try_migrate_dkcat_legacy_to_v3(dkcat_path)
+}
+
+pub fn try_migrate_dkcat_legacy_to_v3(dkcat_path: &Path) -> Result<bool, String> {
     if !dkcat_path.is_file() {
         return Ok(false);
     }
@@ -1883,143 +2704,128 @@ pub fn try_migrate_dkcat_v1_to_v2(dkcat_path: &Path) -> Result<bool, String> {
         let file = File::open(dkcat_path)
             .map_err(|e| format!("Failed to open legacy catalog {}: {}", dkcat_path.display(), e))?;
         let mmap = unsafe { Mmap::map(&file) }
-            .map_err(|e| format!("Mmap failed during V1 migration: {}", e))?;
+            .map_err(|e| format!("Mmap failed during catalog migration: {}", e))?;
         let bytes: &[u8] = &mmap;
         let header_len = core::mem::size_of::<DkCatHeader>();
         if bytes.len() < header_len {
             return Err("Truncated legacy .dkcat header".to_string());
         }
         let header: DkCatHeader = unsafe { read_struct_unaligned(bytes, 0)? };
-        if header.magic != DKCAT_MAGIC_V1 || header.version != 2 {
+        let is_v1 = header.magic == DKCAT_MAGIC_V1 && header.version == 2;
+        let is_v2 = header.magic == DKCAT_MAGIC_V2 && header.version == 3;
+        if !is_v1 && !is_v2 {
             None
         } else {
-            let rec_size = core::mem::size_of::<CatalogRecordV1>();
+            let rec_size = if is_v1 {
+                core::mem::size_of::<CatalogRecordV1>()
+            } else {
+                core::mem::size_of::<CatalogRecordV2>()
+            };
             let rec_start = usize::try_from(header.records_offset)
-                .map_err(|_| "Corrupt V1 records_offset".to_string())?;
+                .map_err(|_| "Corrupt legacy records_offset".to_string())?;
             let str_start = usize::try_from(header.strings_offset)
-                .map_err(|_| "Corrupt V1 strings_offset".to_string())?;
+                .map_err(|_| "Corrupt legacy strings_offset".to_string())?;
             let tri_start = usize::try_from(header.trigram_offset)
-                .map_err(|_| "Corrupt V1 trigram_offset".to_string())?;
+                .map_err(|_| "Corrupt legacy trigram_offset".to_string())?;
             let rec_bytes = (header.record_count as usize)
                 .checked_mul(rec_size)
-                .ok_or_else(|| "Corrupt V1 record count".to_string())?;
+                .ok_or_else(|| "Corrupt legacy record count".to_string())?;
             let rec_end = rec_start
                 .checked_add(rec_bytes)
-                .ok_or_else(|| "Corrupt V1 record bounds".to_string())?;
+                .ok_or_else(|| "Corrupt legacy record bounds".to_string())?;
             let tri_meta_end = tri_start
                 .checked_add(16)
-                .ok_or_else(|| "Corrupt V1 trigram offset".to_string())?;
+                .ok_or_else(|| "Corrupt legacy trigram offset".to_string())?;
             if rec_start < header_len
                 || rec_end > str_start
                 || (str_start - rec_start) % rec_size != 0
                 || str_start > tri_start
                 || tri_meta_end > bytes.len()
             {
-                return Err("Corrupt section bounds in legacy DKCAT001 header".to_string());
+                return Err("Corrupt section bounds in legacy .dkcat header".to_string());
             }
 
             let fetched_at = u64::from_le_bytes(
                 bytes[tri_start..tri_start + 8]
                     .try_into()
-                    .map_err(|_| "Truncated V1 fetched_at".to_string())?,
+                    .map_err(|_| "Truncated legacy fetched_at".to_string())?,
             );
             let pages_count = u32::from_le_bytes(
                 bytes[tri_start + 12..tri_start + 16]
                     .try_into()
-                    .map_err(|_| "Truncated V1 pages_count".to_string())?,
+                    .map_err(|_| "Truncated legacy pages_count".to_string())?,
             ) as usize;
             let pages_start = tri_meta_end;
             let pages_bytes = pages_count
                 .checked_mul(4)
-                .ok_or_else(|| "Corrupt V1 page count".to_string())?;
+                .ok_or_else(|| "Corrupt legacy page count".to_string())?;
             let pages_end = pages_start
                 .checked_add(pages_bytes)
-                .ok_or_else(|| "Corrupt V1 page table".to_string())?;
+                .ok_or_else(|| "Corrupt legacy page table".to_string())?;
             if pages_end > bytes.len() {
-                return Err("Truncated V1 page list".to_string());
+                return Err("Truncated legacy page list".to_string());
             }
             let mut fetched_pages = Vec::with_capacity(pages_count);
             for chunk in bytes[pages_start..pages_end].chunks_exact(4) {
                 fetched_pages.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
             }
 
-            let pc_spec = crate::platforms::platform_by_id(crate::platforms::PLATFORM_PC);
             let mut entries = Vec::with_capacity(header.record_count as usize);
             for idx in 0..header.record_count as usize {
                 let off = rec_start + idx * rec_size;
-                let v1: CatalogRecordV1 = unsafe { read_struct_unaligned(bytes, off)? };
-                let name = pool_str_slice(bytes, str_start, tri_start, v1.name_off, v1.name_len)
-                    .to_string();
-                let tags_raw =
-                    pool_str_slice(bytes, str_start, tri_start, v1.tags_off, v1.tags_len);
-                let tags: Vec<String> = if tags_raw.is_empty() {
-                    Vec::new()
+                if is_v1 {
+                    let v1: CatalogRecordV1 = unsafe { read_struct_unaligned(bytes, off)? };
+                    entries.push(hydrate_legacy_entry(
+                        bytes,
+                        str_start,
+                        tri_start,
+                        v1.appid,
+                        crate::platforms::PLATFORM_PC,
+                        0,
+                        v1.price_cents,
+                        v1.initial_price_cents,
+                        v1.flags,
+                        v1.ccu,
+                        v1.owners_min,
+                        v1.owners_max,
+                        v1.positive,
+                        v1.negative,
+                        v1.value_score,
+                        v1.updated_at,
+                        v1.name_off,
+                        v1.name_len,
+                        v1.tags_off,
+                        v1.tags_len,
+                        v1.meta_off,
+                        v1.meta_len,
+                    ));
                 } else {
-                    tags_raw
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect()
-                };
-                let meta_raw =
-                    pool_str_slice(bytes, str_start, tri_start, v1.meta_off, v1.meta_len);
-                let mut meta_parts = meta_raw.split(FIELD_SEP);
-                let price_formatted = meta_parts.next().unwrap_or("").to_string();
-                let owners_label = meta_parts.next().unwrap_or("").to_string();
-                let genres = split_safe(meta_parts.next().unwrap_or(""));
-                let categories = split_safe(meta_parts.next().unwrap_or(""));
-                let short_description = meta_parts.next().unwrap_or("").to_string();
-                let developers = split_safe(meta_parts.next().unwrap_or(""));
-                let publishers = split_safe(meta_parts.next().unwrap_or(""));
-                let release_date = meta_parts.next().unwrap_or("").to_string();
-                let cover_url = meta_parts.next().unwrap_or("").to_string();
-                let header_url = meta_parts.next().unwrap_or("").to_string();
-                let hero_url = meta_parts.next().unwrap_or("").to_string();
-
-                let total_reviews = v1.positive.saturating_add(v1.negative);
-                let review_pct = if total_reviews > 0 {
-                    ((v1.positive as f64 / total_reviews as f64) * 1000.0).round() / 10.0
-                } else {
-                    0.0
-                };
-
-                entries.push(CatalogGameEntry {
-                    app_id: v1.appid,
-                    name,
-                    platform_id: crate::platforms::PLATFORM_PC,
-                    console_group: pc_spec.console_group,
-                    platform_name: pc_spec.short_name.to_string(),
-                    platform_slug: pc_spec.slug.to_string(),
-                    price_cents: v1.price_cents,
-                    initial_price_cents: v1.initial_price_cents,
-                    discount_percent: (v1.flags >> 8) & 0xFF,
-                    price_formatted,
-                    is_free: (v1.flags & FLAG_IS_FREE) != 0,
-                    ccu: v1.ccu,
-                    owners_min: v1.owners_min,
-                    owners_max: v1.owners_max,
-                    owners_label,
-                    positive: v1.positive,
-                    negative: v1.negative,
-                    review_pct,
-                    is_singleplayer: (v1.flags & FLAG_SINGLEPLAYER) != 0,
-                    is_coop: (v1.flags & FLAG_COOP) != 0,
-                    is_multiplayer: (v1.flags & FLAG_MULTIPLAYER) != 0,
-                    is_online_only_pvp: (v1.flags & FLAG_ONLINE_ONLY_PVP) != 0,
-                    genres,
-                    tags,
-                    categories,
-                    short_description,
-                    developers,
-                    publishers,
-                    release_date,
-                    cover_url,
-                    header_url,
-                    hero_url,
-                    value_score: v1.value_score,
-                    details_enriched: (v1.flags & FLAG_DETAILS_ENRICHED) != 0,
-                    updated_at: v1.updated_at,
-                });
+                    let v2: CatalogRecordV2 = unsafe { read_struct_unaligned(bytes, off)? };
+                    entries.push(hydrate_legacy_entry(
+                        bytes,
+                        str_start,
+                        tri_start,
+                        v2.appid,
+                        v2.platform_id,
+                        v2.console_group,
+                        v2.price_cents,
+                        v2.initial_price_cents,
+                        v2.flags,
+                        v2.ccu,
+                        v2.owners_min,
+                        v2.owners_max,
+                        v2.positive,
+                        v2.negative,
+                        v2.value_score,
+                        v2.updated_at,
+                        v2.name_off,
+                        v2.name_len,
+                        v2.tags_off,
+                        v2.tags_len,
+                        v2.meta_off,
+                        v2.meta_len,
+                    ));
+                }
             }
             Some(CatalogCacheFile {
                 fetched_at,
@@ -2357,11 +3163,55 @@ pub async fn query_catalog_mmap(params: CatalogQueryParams) -> Result<CatalogQue
                     params.limit.clamp(1, 250)
                 },
                 query_time_us: 0,
+                semantic_mode: false,
+                semantic_summary: String::new(),
             },
         }
     })
     .await
     .map_err(|e| format!("Catalog mmap query task failed: {}", e))
+}
+
+#[tauri::command]
+pub async fn get_play_tonight_recommendations(
+    app: tauri::AppHandle,
+    session_minutes: Option<u32>,
+    limit: Option<usize>,
+) -> Result<Vec<PlayTonightCandidate>, String> {
+    let mins = session_minutes.unwrap_or(60).clamp(15, 480);
+    let max_items = limit.unwrap_or(18).clamp(1, 60);
+    let library = crate::load_library_from_disk(&app)?;
+    let friends_snap = crate::friends::get_unified_friends(app.clone())
+        .await
+        .ok();
+
+    tokio::task::spawn_blocking(move || {
+        let pad = duke_core::win32_ffi::poll_xinput_state();
+        let online_pairs: Vec<(String, String)> = friends_snap
+            .map(|snap| {
+                snap.in_game
+                    .into_iter()
+                    .filter_map(|f| {
+                        let gtitle = f.game_title?;
+                        if gtitle.trim().is_empty() {
+                            None
+                        } else {
+                            Some((f.display_name, gtitle))
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(rank_play_tonight_library(
+            &library,
+            mins,
+            pad.connected,
+            &online_pairs,
+            max_items,
+        ))
+    })
+    .await
+    .map_err(|e| format!("Play Tonight ranking task failed: {}", e))?
 }
 
 #[cfg(test)]
@@ -2372,7 +3222,8 @@ mod tests {
     fn dkcat_structs_have_zero_unexpected_layout_issues() {
         assert_eq!(core::mem::size_of::<DkCatHeader>(), 72);
         assert_eq!(core::mem::size_of::<CatalogRecordV1>(), 104);
-        assert_eq!(core::mem::size_of::<CatalogRecord>(), 112);
+        assert_eq!(core::mem::size_of::<CatalogRecordV2>(), 112);
+        assert_eq!(core::mem::size_of::<CatalogRecord>(), 152);
         assert_eq!(core::mem::size_of::<TrigramIndexEntry>(), 12);
     }
 
@@ -2979,7 +3830,7 @@ mod tests {
         };
 
         let bytes = serialize_dkcat(&cache).unwrap();
-        assert_eq!(&bytes[0..8], b"DKCAT002");
+        assert_eq!(&bytes[0..8], b"DKCAT003");
         fs::write(&dkcat_path, &bytes).unwrap();
         let mapped = MappedCatalog::open(&dkcat_path).unwrap();
 
@@ -3167,6 +4018,161 @@ mod tests {
         bad_v1.clear();
 
         *write_catalog_slot() = None;
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dkcat003_quantized_semantic_nl_and_v2_migration_work() {
+        let dir = std::env::temp_dir().join(format!("duke_dkcat003_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dkcat_path = dir.join("catalog.dkcat");
+
+        let cache = CatalogCacheFile {
+            fetched_at: 1_700_000_555,
+            fetched_pages: vec![0],
+            entries: vec![
+                CatalogGameEntry {
+                    app_id: 477160,
+                    name: "Human Fall Flat".to_string(),
+                    is_coop: true,
+                    genres: vec!["Indie".to_string(), "Physics".to_string(), "Casual".to_string()],
+                    tags: vec!["Co-op".to_string(), "Physics".to_string(), "Chaos".to_string(), "Funny".to_string()],
+                    categories: vec!["Full controller support".to_string(), "Co-op".to_string()],
+                    short_description: "Hilarious physics chaos co-op platformer under 2 GB.".to_string(),
+                    positive: 150_000,
+                    negative: 7_000,
+                    review_pct: 95.5,
+                    value_score: 94.0,
+                    ..CatalogGameEntry::default()
+                },
+                CatalogGameEntry {
+                    app_id: crate::platforms::synthetic_retro_catalog_id(
+                        crate::platforms::PLATFORM_SWITCH,
+                        "Golf Story Switch RPG",
+                        "0100",
+                    ),
+                    name: "Golf Story".to_string(),
+                    platform_id: crate::platforms::PLATFORM_SWITCH,
+                    console_group: crate::platforms::GROUP_SWITCH,
+                    platform_name: "Switch".to_string(),
+                    platform_slug: "switch".to_string(),
+                    genres: vec!["RPG".to_string(), "Indie".to_string()],
+                    tags: vec!["Switch".to_string(), "RPG".to_string(), "Short".to_string()],
+                    categories: vec!["Full controller support".to_string()],
+                    short_description: "Charming 6-hour Switch RPG adventure with gamepad support.".to_string(),
+                    positive: 500,
+                    negative: 15,
+                    review_pct: 97.1,
+                    value_score: 96.0,
+                    ..CatalogGameEntry::default()
+                },
+            ],
+        };
+
+        let bytes = serialize_dkcat(&cache).unwrap();
+        assert_eq!(&bytes[0..8], b"DKCAT003");
+        fs::write(&dkcat_path, &bytes).unwrap();
+        let mapped = MappedCatalog::open(&dkcat_path).unwrap();
+
+        let q1 = mapped.query(&CatalogQueryParams {
+            query: "co-op physics chaos games under 5 GB".to_string(),
+            ..CatalogQueryParams::default()
+        });
+        assert!(q1.semantic_mode);
+        assert_eq!(q1.total_matches, 1);
+        assert_eq!(q1.items[0].name, "Human Fall Flat");
+
+        let q2 = mapped.query(&CatalogQueryParams {
+            query: "short 6-hour Switch RPG with controller support".to_string(),
+            ..CatalogQueryParams::default()
+        });
+        assert!(q2.semantic_mode);
+        assert_eq!(q2.total_matches, 1);
+        assert_eq!(q2.items[0].name, "Golf Story");
+
+        drop(mapped);
+
+        // Verify DKCAT002 (112B) -> DKCAT003 automatic upgrade
+        let v2_path = dir.join("legacy_v2.dkcat");
+        let rec_v2 = CatalogRecordV2 {
+            ccu: 50,
+            owners_min: 1000,
+            owners_max: 5000,
+            positive: 400,
+            negative: 20,
+            value_score: 88.0,
+            updated_at: 1_700_000_000,
+            genre_bits: 0,
+            appid: 999999,
+            price_cents: 999,
+            initial_price_cents: 999,
+            flags: FLAG_COOP,
+            name_off: 0,
+            name_len: 10,
+            tags_off: 10,
+            tags_len: 0,
+            meta_off: 10,
+            meta_len: 0,
+            platform_id: crate::platforms::PLATFORM_SWITCH,
+            console_group: crate::platforms::GROUP_SWITCH,
+            _pad: [0u8; 5],
+        };
+        let rec_v2_sz = core::mem::size_of::<CatalogRecordV2>();
+        let hdr_sz = core::mem::size_of::<DkCatHeader>();
+        let mut body_v2 = Vec::new();
+        body_v2.extend_from_slice(bytes_of_struct(&rec_v2));
+        body_v2.extend_from_slice(b"Peak Co-op");
+        let tri_off_v2 = (hdr_sz + body_v2.len()) as u64;
+        body_v2.extend_from_slice(&1_700_000_000u64.to_le_bytes());
+        body_v2.extend_from_slice(&0u32.to_le_bytes());
+        body_v2.extend_from_slice(&0u32.to_le_bytes());
+        let hdr_v2 = DkCatHeader {
+            magic: DKCAT_MAGIC_V2,
+            version: 3,
+            record_count: 1,
+            records_offset: hdr_sz as u64,
+            strings_offset: (hdr_sz + rec_v2_sz) as u64,
+            trigram_offset: tri_off_v2,
+            checksum_blake3: *blake3::hash(&body_v2).as_bytes(),
+        };
+        let mut raw_v2 = Vec::with_capacity(hdr_sz + body_v2.len());
+        raw_v2.extend_from_slice(bytes_of_struct(&hdr_v2));
+        raw_v2.extend_from_slice(&body_v2);
+        fs::write(&v2_path, &raw_v2).unwrap();
+
+        assert!(try_migrate_dkcat_legacy_to_v3(&v2_path).unwrap());
+        let upgraded = MappedCatalog::open(&v2_path).unwrap();
+        assert_eq!(upgraded.record_count(), 1);
+        assert_eq!(upgraded.get_entry_by_appid(999999).unwrap().name, "Peak Co-op");
+
+        // Verify Play Tonight ranking prioritizes active online friend matches
+        let lib = vec![
+            crate::GameEntry {
+                id: "g1".to_string(),
+                title: "Balatro".to_string(),
+                genre: "Roguelike".to_string(),
+                playtime_seconds: 1800,
+                ..Default::default()
+            },
+            crate::GameEntry {
+                id: "g2".to_string(),
+                title: "Deep Rock Galactic".to_string(),
+                genre: "Co-op Shooter".to_string(),
+                playtime_seconds: 7200,
+                ..Default::default()
+            },
+        ];
+        let ranked = rank_play_tonight_library(
+            &lib,
+            45,
+            true,
+            &[("Alex".to_string(), "Deep Rock Galactic".to_string())],
+            5,
+        );
+        assert_eq!(ranked[0].title, "Deep Rock Galactic");
+        assert_eq!(ranked[0].matched_online_friends, vec!["Alex".to_string()]);
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

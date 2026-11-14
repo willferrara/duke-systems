@@ -1,6 +1,6 @@
 use crate::pe_inspect::{parse_pe_exports_file, PeExportInfo};
 use crate::projfs_stream::store_cas_block;
-use crate::snapshots::CAS_DIR_NAME;
+pub(crate) use crate::snapshots::CAS_DIR_NAME;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
-const MODS_ROOT_DIR: &str = ".duke-mods";
+pub(crate) const MODS_ROOT_DIR: &str = ".duke-mods";
 const PACKS_DIR: &str = "packs";
 const STATE_FILE: &str = "mod_graph_state.json";
 

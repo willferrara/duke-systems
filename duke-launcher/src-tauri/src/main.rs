@@ -44,6 +44,10 @@ mod store_direct;
 mod stream_extract;
 mod swarm;
 mod time_machine;
+mod couch_mode;
+mod dkpack;
+mod duke_capsule;
+mod duke_pilot;
 mod vhdx_stage;
 
 use duke_core::pipe_ipc::{DukeBus, DukeEvent};
@@ -7782,6 +7786,10 @@ async fn set_game_launch_profile(
 /// 1-Click NTFS LZX / XPRESS8K Game Folder Compression (`compact.exe /c /s:"<game_folder>" /a /i /exe:xpress8k`).
 /// Compresses the game installation directory transparently on Windows 11 with zero runtime FPS penalty,
 /// recalculates physical on-disk size via `GetCompressedFileSizeW`, and updates `size_bytes` in `library.json`.
+pub(crate) async fn compress_game_folder_core(app: AppHandle, game_id: String) -> Result<Value, String> {
+    compress_game_folder(app, game_id).await
+}
+
 #[tauri::command]
 async fn compress_game_folder(app: AppHandle, game_id: String) -> Result<Value, String> {
     let current_library = load_library_from_disk(&app)?;
@@ -7925,7 +7933,7 @@ async fn change_game_exe(
 
 async fn launch_game_internal(
     app: AppHandle,
-    window: WebviewWindow,
+    window: Option<WebviewWindow>,
     exe_path: String,
     game_id: Option<String>,
     explicit_launch_args: Option<String>,
@@ -8232,8 +8240,10 @@ async fn launch_game_internal(
 
     let mut child = cmd.spawn().map_err(|e| {
         restore_normal_priority_mode();
-        let _ = window.show();
-        let _ = window.unminimize();
+        if let Some(ref w) = window {
+            let _ = w.show();
+            let _ = w.unminimize();
+        }
         let _ = app.emit(
             "game-running-state",
             serde_json::json!({ "running": false, "exePath": trimmed }),
@@ -8407,8 +8417,10 @@ async fn launch_game_internal(
             "gameBoost": launch_settings.performance_boost_enabled
         }),
     );
-    let _ = window.minimize();
-    let _ = window.hide();
+    if let Some(ref w) = window {
+        let _ = w.minimize();
+        let _ = w.hide();
+    }
     if launch_settings.performance_boost_enabled {
         enable_ecoqos_game_boost_mode();
     } else if item_platform_id > 0 {
@@ -8736,6 +8748,14 @@ fn spawn_hotkey_watcher_if_needed(app: AppHandle) {
         }
         HOTKEY_WATCHER_ACTIVE.store(false, Ordering::SeqCst);
     });
+}
+
+pub(crate) async fn suspend_or_resume_game_core(
+    app: AppHandle,
+    game_id: Option<String>,
+    action: Option<String>,
+) -> Result<SuspendStateResult, String> {
+    suspend_or_resume_game(app, game_id, action).await
 }
 
 #[tauri::command]
@@ -9101,7 +9121,7 @@ async fn launch_local_game(
     game_id: Option<String>,
     launch_args: Option<String>,
 ) -> Result<(), String> {
-    launch_game_internal(app, window, exe_path, game_id, launch_args).await
+    launch_game_internal(app, Some(window), exe_path, game_id, launch_args).await
 }
 
 #[tauri::command]
@@ -9112,7 +9132,17 @@ async fn launch_game(
     game_id: Option<String>,
     launch_args: Option<String>,
 ) -> Result<(), String> {
-    launch_game_internal(app, window, exe_path, game_id, launch_args).await
+    launch_game_internal(app, Some(window), exe_path, game_id, launch_args).await
+}
+
+pub(crate) async fn launch_game_headless(
+    app: AppHandle,
+    exe_path: String,
+    game_id: Option<String>,
+    launch_args: Option<String>,
+) -> Result<(), String> {
+    let win = app.get_webview_window("main");
+    launch_game_internal(app, win, exe_path, game_id, launch_args).await
 }
 
 fn build_steam_hero_candidates(appid: u32, _header_image: Option<&str>) -> Vec<String> {
@@ -11960,6 +11990,13 @@ async fn scan_rom_folder(app: AppHandle, folder_path: String) -> Result<IngestPa
     })
 }
 
+pub(crate) async fn ingest_dropped_paths_core(
+    app: AppHandle,
+    paths: Vec<String>,
+) -> Result<IngestPathsReport, String> {
+    ingest_dropped_paths(app, paths).await
+}
+
 #[tauri::command]
 async fn ingest_dropped_paths(
     app: AppHandle,
@@ -12092,6 +12129,17 @@ async fn ingest_dropped_paths(
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
+
+        if ext == "dkpack" {
+            match dkpack::ingest_dropped_dkpack_file(&app, &path, None).await {
+                Ok(report) => {
+                    let _ = app.emit("dkpack-applied", &report);
+                    added_titles.push(format!("Modpack: {}", report.pack_name));
+                }
+                Err(err) => skipped_reasons.push(err),
+            }
+            continue;
+        }
 
         if ext == "lnk" {
             let lnk_clone = path.clone();
@@ -13393,9 +13441,12 @@ fn spawn_overlay_trigger_watcher(app: AppHandle) {
             };
 
             let mut guide_was_down = false;
+            let mut radial_chord_was_down = false;
             let mut vision_chord_was_down = false;
             loop {
-                let mut should_toggle = false;
+                let mut should_toggle_overlay = false;
+                let mut should_toggle_guide = false;
+                let mut should_toggle_radial = false;
                 let mut should_vision = false;
 
                 if registered || vision_registered {
@@ -13405,7 +13456,7 @@ fn spawn_overlay_trigger_watcher(app: AppHandle) {
                             if msg.message == WM_HOTKEY {
                                 let id = msg.wParam.0 as i32;
                                 if id == HOTKEY_ID {
-                                    should_toggle = true;
+                                    should_toggle_overlay = true;
                                 } else if id == HOTKEY_VISION_ID {
                                     should_vision = true;
                                 }
@@ -13416,12 +13467,16 @@ fn spawn_overlay_trigger_watcher(app: AppHandle) {
 
                 let pad = duke_core::win32_ffi::poll_xinput_state();
                 let vision_chord_down = pad.connected && pad.guide && pad.y;
+                let radial_chord_down = pad.connected && pad.guide && pad.lb;
                 if vision_chord_down && !vision_chord_was_down {
                     should_vision = true;
-                } else if pad.connected && pad.guide && !pad.y && !guide_was_down {
-                    should_toggle = true;
+                } else if radial_chord_down && !radial_chord_was_down {
+                    should_toggle_radial = true;
+                } else if pad.connected && pad.guide && !pad.y && !pad.lb && !guide_was_down {
+                    should_toggle_guide = true;
                 }
                 guide_was_down = pad.connected && pad.guide;
+                radial_chord_was_down = radial_chord_down;
                 vision_chord_was_down = vision_chord_down;
 
                 if should_vision {
@@ -13437,7 +13492,27 @@ fn spawn_overlay_trigger_watcher(app: AppHandle) {
                         )
                         .await;
                     });
-                } else if should_toggle {
+                } else if should_toggle_radial {
+                    couch_mode::handle_controller_guide_event(&app, "toggle_radial", "xbox", None);
+                } else if should_toggle_guide {
+                    let app_guide = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let main_visible = app_guide
+                            .get_webview_window("main")
+                            .map(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
+                            .unwrap_or(false);
+                        if main_visible {
+                            couch_mode::handle_controller_guide_event(
+                                &app_guide,
+                                "toggle_couch",
+                                "xbox",
+                                None,
+                            );
+                        } else {
+                            let _ = toggle_overlay_window(app_guide, None).await;
+                        }
+                    });
+                } else if should_toggle_overlay {
                     let app_toggle = app.clone();
                     tauri::async_runtime::spawn(async move {
                         let _ = toggle_overlay_window(app_toggle, None).await;
@@ -13858,6 +13933,7 @@ fn main() {
     }
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    couch_mode::init_cli_couch_flag(&raw_args);
     if !win32_clipboard_protocol::acquire_single_instance_or_forward(&raw_args) {
         return;
     }
@@ -13956,7 +14032,10 @@ fn main() {
             // Map `catalog.dkcat` via zero-copy mmap on startup (`0 ms` parse, `0 KB` heap).
             let _ = catalog_mmap::ensure_catalog_mapped_standalone();
 
-            let initial_settings = load_settings_from_disk(app.handle());
+            let mut initial_settings = load_settings_from_disk(app.handle());
+            if couch_mode::is_cli_couch_booted() {
+                initial_settings.couch_mode = true;
+            }
             apply_runtime_settings(&initial_settings);
 
             if let Some(overlay) = app.get_webview_window("overlay") {
@@ -14024,6 +14103,19 @@ fn main() {
                         duration_secs,
                     } => {
                         duke_director::on_clip_saved_pulse(&game_title, &file_path, duration_secs);
+                    }
+                    DukeEvent::ControllerGuideAction {
+                        action,
+                        controller_kind,
+                        radial_slot,
+                        ..
+                    } => {
+                        couch_mode::handle_controller_guide_event(
+                            &bus_app,
+                            &action,
+                            &controller_kind,
+                            radial_slot,
+                        );
                     }
                     _ => {}
                 })
@@ -14310,7 +14402,18 @@ fn main() {
             duke_acoustics::get_acoustics_state,
             duke_acoustics::set_wasapi_session_volume,
             duke_acoustics::save_game_eq_and_denoise,
-            duke_acoustics::test_mic_rnnoise_latency
+            duke_acoustics::test_mic_rnnoise_latency,
+            catalog_mmap::get_play_tonight_recommendations,
+            couch_mode::get_couch_mode_status,
+            couch_mode::set_couch_mode_state,
+            couch_mode::trigger_couch_radial_action,
+            dkpack::export_game_dkpack,
+            dkpack::inspect_dkpack_file,
+            dkpack::apply_dkpack_recipe,
+            duke_capsule::export_game_capsule,
+            duke_capsule::inspect_game_capsule,
+            duke_pilot::plan_duke_pilot_command,
+            duke_pilot::execute_duke_pilot_plan
         ])
         .build(tauri::generate_context!())
     {

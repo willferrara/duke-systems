@@ -5,9 +5,9 @@ use hidapi::{HidApi, HidDevice};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
-use windows::core::PCWSTR;
+use windows::core::{PCSTR, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryA};
 use windows::Win32::UI::Input::XboxController::{
     XInputGetState, XInputSetState, XINPUT_STATE, XINPUT_VIBRATION,
 };
@@ -59,6 +59,8 @@ pub struct XboxTelemetry {
     pub out_lt: f32,
     pub out_rt: f32,
     pub buttons_mask: u16,
+    #[serde(default)]
+    pub guide_down: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -121,6 +123,8 @@ pub struct LiveTelemetrySnapshot {
     pub active_profile_name: String,
     pub foreground_exe: String,
     pub auto_switch_enabled: bool,
+    #[serde(default)]
+    pub active_controller_kind: String,
     pub devices: Vec<HidDeviceSummary>,
     pub xbox: XboxTelemetry,
     pub mouse: MouseTelemetry,
@@ -335,19 +339,40 @@ pub struct XInputRawState {
     pub lt: f32,
     pub rt: f32,
     pub buttons_mask: u16,
+    pub guide_down: bool,
+}
+
+type XInputGetStateExFn = unsafe extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
+static XINPUT_GET_STATE_EX_FN: std::sync::OnceLock<Option<XInputGetStateExFn>> =
+    std::sync::OnceLock::new();
+
+fn resolve_xinput_get_state_ex() -> Option<XInputGetStateExFn> {
+    *XINPUT_GET_STATE_EX_FN.get_or_init(|| unsafe {
+        let hmod = LoadLibraryA(PCSTR::from_raw(c"xinput1_4.dll".as_ptr().cast())).ok()?;
+        let proc = GetProcAddress(hmod, PCSTR::from_raw(100usize as *const u8))?;
+        Some(std::mem::transmute::<
+            unsafe extern "system" fn() -> isize,
+            XInputGetStateExFn,
+        >(proc))
+    })
 }
 
 /// Polls XInput slots `0..4`. Disconnected slots are probed periodically to eliminate XInput overhead.
 pub fn poll_xinput(probe_disconnected: bool, active_mask: &mut [bool; 4]) -> XInputRawState {
     let mut state = XINPUT_STATE::default();
+    let get_ex = resolve_xinput_get_state_ex();
     for (slot, active) in active_mask.iter_mut().enumerate() {
         if !*active && !probe_disconnected {
             continue;
         }
-        let res = unsafe { XInputGetState(slot as u32, &mut state) };
+        let res = match get_ex {
+            Some(f) => unsafe { f(slot as u32, &mut state) },
+            None => unsafe { XInputGetState(slot as u32, &mut state) },
+        };
         if res == 0 {
             *active = true;
             let gp = state.Gamepad;
+            let mask = gp.wButtons.0;
             return XInputRawState {
                 connected: true,
                 slot: slot as u8,
@@ -357,7 +382,8 @@ pub fn poll_xinput(probe_disconnected: bool, active_mask: &mut [bool; 4]) -> XIn
                 ry: normalize_i16_axis(gp.sThumbRY),
                 lt: (gp.bLeftTrigger as f32 / 255.0).clamp(0.0, 1.0),
                 rt: (gp.bRightTrigger as f32 / 255.0).clamp(0.0, 1.0),
-                buttons_mask: gp.wButtons.0,
+                buttons_mask: mask,
+                guide_down: (mask & 0x0400) != 0,
             };
         } else {
             *active = false;
@@ -394,6 +420,9 @@ pub struct GyroImuFrame {
     pub r2_down: bool,
     pub touchpad_down: bool,
     pub touchpad_click: bool,
+    pub ps_guide_down: bool,
+    pub is_dualsense: bool,
+    pub is_switch: bool,
     pub battery_pct: Option<u8>,
 }
 
@@ -953,14 +982,17 @@ fn enable_switch_pro_imu(device: &HidDevice) {
     let _ = device.write(&cmd);
 }
 
-fn parse_playstation_report(pid: u16, buf: &[u8]) -> GyroImuFrame {
+pub(crate) fn parse_playstation_report(pid: u16, buf: &[u8]) -> GyroImuFrame {
     let is_dualsense = pid == 0x0CE6 || pid == 0x0DF2;
-    let mut frame = GyroImuFrame::default();
+    let mut frame = GyroImuFrame {
+        is_dualsense,
+        ..Default::default()
+    };
 
     if is_dualsense {
-        let base = if buf[0] == 0x01 && buf.len() >= 48 {
+        let base = if !buf.is_empty() && buf[0] == 0x01 && buf.len() >= 48 {
             1usize
-        } else if buf[0] == 0x31 && buf.len() >= 50 {
+        } else if !buf.is_empty() && buf[0] == 0x31 && buf.len() >= 50 {
             2usize
         } else {
             return frame;
@@ -985,6 +1017,7 @@ fn parse_playstation_report(pid: u16, buf: &[u8]) -> GyroImuFrame {
         if buf.len() > base + 33 {
             frame.touchpad_down = (buf[base + 32] & 0x80) == 0;
         }
+        frame.ps_guide_down = (buf[base + 9] & 0x01) != 0;
         frame.touchpad_click = (buf[base + 9] & 0x02) != 0;
         if buf.len() > base + 53 {
             let level = (buf[base + 52] & 0x0F).min(10);
@@ -992,9 +1025,9 @@ fn parse_playstation_report(pid: u16, buf: &[u8]) -> GyroImuFrame {
         }
     } else {
         // DualShock 4 USB (0x01) or Bluetooth (0x11)
-        let base = if buf[0] == 0x01 && buf.len() >= 32 {
+        let base = if !buf.is_empty() && buf[0] == 0x01 && buf.len() >= 32 {
             1usize
-        } else if buf[0] == 0x11 && buf.len() >= 35 {
+        } else if !buf.is_empty() && buf[0] == 0x11 && buf.len() >= 35 {
             3usize
         } else {
             return frame;
@@ -1016,6 +1049,7 @@ fn parse_playstation_report(pid: u16, buf: &[u8]) -> GyroImuFrame {
         frame.accel_z = az / 8192.0;
         frame.l2_down = buf[base + 7] > 40;
         frame.r2_down = buf[base + 8] > 40;
+        frame.ps_guide_down = (buf[base + 6] & 0x01) != 0;
         frame.touchpad_click = (buf[base + 6] & 0x02) != 0;
         if buf.len() > base + 34 {
             frame.touchpad_down = (buf[base + 34] & 0x80) == 0;
@@ -1027,9 +1061,12 @@ fn parse_playstation_report(pid: u16, buf: &[u8]) -> GyroImuFrame {
     frame
 }
 
-fn parse_switch_pro_report(buf: &[u8]) -> GyroImuFrame {
-    let mut frame = GyroImuFrame::default();
-    if buf[0] != 0x30 || buf.len() < 25 {
+pub(crate) fn parse_switch_pro_report(buf: &[u8]) -> GyroImuFrame {
+    let mut frame = GyroImuFrame {
+        is_switch: true,
+        ..Default::default()
+    };
+    if buf.is_empty() || buf[0] != 0x30 || buf.len() < 25 {
         return frame;
     }
     let ax = i16::from_le_bytes([buf[13], buf[14]]) as f32;
@@ -1048,7 +1085,22 @@ fn parse_switch_pro_report(buf: &[u8]) -> GyroImuFrame {
     frame.accel_z = az / 4096.0;
     frame.l2_down = (buf[5] & 0x80) != 0;
     frame.r2_down = (buf[3] & 0x80) != 0;
+    frame.ps_guide_down = (buf[4] & 0x10) != 0;
     frame
+}
+
+pub fn detect_controller_kind(xbox_connected: bool, gyro: &GyroImuFrame) -> &'static str {
+    if gyro.valid && gyro.is_dualsense {
+        "dualsense"
+    } else if gyro.valid && gyro.is_switch {
+        "switch"
+    } else if gyro.valid {
+        "dualsense"
+    } else if xbox_connected {
+        "xbox"
+    } else {
+        "none"
+    }
 }
 
 fn enumerate_raw_mice() -> Vec<(String, u16, u16)> {

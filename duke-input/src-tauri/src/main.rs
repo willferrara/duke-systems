@@ -23,15 +23,17 @@ use duke_core::win32_ffi::{
     trim_current_working_set,
 };
 use hid::{
-    poll_xinput, read_raw_mouse_snapshot, set_xinput_rumble, start_raw_input_listener, DeviceKind,
-    FpvTelemetry, GyroImuFrame, HidDeviceManager, LiveTelemetrySnapshot, MouseTelemetry,
-    RawHidInspectorData, XInputRawState, XboxTelemetry,
+    detect_controller_kind, poll_xinput, read_raw_mouse_snapshot,
+    set_xinput_rumble, start_raw_input_listener, DeviceKind, FpvTelemetry, GyroImuFrame,
+    HidDeviceManager, LiveTelemetrySnapshot, MouseTelemetry, RawHidInspectorData, XInputRawState,
+    XboxTelemetry,
 };
 use injector::{send_mouse_move, InputActionEngine};
 use profiles::{
     build_default_profiles, load_store, save_store, set_windows_autostart, AppSettings,
     InputProfile, MacroMode, MacroSequence, MacroStep, MacroStepKind, ProfileStore,
 };
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -503,10 +505,90 @@ fn select_profile_for_game(
 // SHARED APPLICATION STATE
 // ============================================================================
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RadialHotbarSlot {
+    pub slot: u8,
+    pub label: String,
+    pub action_id: String,
+    pub icon: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RadialMenuState {
+    pub visible: bool,
+    pub controller_kind: String,
+    pub selected_slot: Option<u8>,
+    pub stick_angle_deg: f32,
+    pub stick_magnitude: f32,
+    pub slots: Vec<RadialHotbarSlot>,
+}
+
+pub fn default_radial_slots() -> Vec<RadialHotbarSlot> {
+    vec![
+        RadialHotbarSlot { slot: 0, label: "Couch Mode".into(), action_id: "toggle_couch_mode".into(), icon: "icon-gamepad-2".into() },
+        RadialHotbarSlot { slot: 1, label: "Freeze / Resume".into(), action_id: "suspend_resume_game".into(), icon: "icon-pause".into() },
+        RadialHotbarSlot { slot: 2, label: "Save Replay Clip".into(), action_id: "save_replay_clip".into(), icon: "icon-video".into() },
+        RadialHotbarSlot { slot: 3, label: "Purge RAM".into(), action_id: "purge_standby_ram".into(), icon: "icon-cpu".into() },
+        RadialHotbarSlot { slot: 4, label: "Switch Profile".into(), action_id: "cycle_input_profile".into(), icon: "icon-layers".into() },
+        RadialHotbarSlot { slot: 5, label: "Cycle DPI".into(), action_id: "cycle_mouse_dpi".into(), icon: "icon-mouse".into() },
+        RadialHotbarSlot { slot: 6, label: "Quick Overlay".into(), action_id: "toggle_quick_overlay".into(), icon: "icon-zap".into() },
+        RadialHotbarSlot { slot: 7, label: "Virtual Keyboard".into(), action_id: "toggle_virtual_keyboard".into(), icon: "icon-terminal".into() },
+    ]
+}
+
+/// Converts normalized right/left stick vector `(x, y)` (where +Y is Up) into one of 8 radial slots clockwise from North (`0`).
+pub fn radial_slot_from_stick(rx: f32, ry: f32) -> (Option<u8>, f32, f32) {
+    let mag = (rx * rx + ry * ry).sqrt().clamp(0.0, 1.0);
+    if mag < 0.32 {
+        return (None, 0.0, mag);
+    }
+    let mut deg = rx.atan2(ry).to_degrees();
+    if deg < 0.0 {
+        deg += 360.0;
+    }
+    let slot = (((deg + 22.5) % 360.0) / 45.0).floor() as u8;
+    (Some(slot.min(7)), deg, mag)
+}
+
+fn publish_controller_guide_action(
+    action: &str,
+    controller_kind: &str,
+    radial_slot: Option<u8>,
+) {
+    if let Some(bus) = DUKE_BUS.get() {
+        bus.publish(DukeEvent::ControllerGuideAction {
+            action: action.to_string(),
+            controller_kind: controller_kind.to_string(),
+            radial_slot,
+            source: "duke-input".to_string(),
+        });
+    }
+    if let Some(Some(shm)) = DUKE_SHM_BUS.get() {
+        let mut reserved = [0u8; 24];
+        let tag = action.as_bytes();
+        let copy_len = tag.len().min(reserved.len());
+        reserved[..copy_len].copy_from_slice(&tag[..copy_len]);
+        let frame = duke_core::shm_bus::ShmEventFrame::new(
+            ShmEventType::ControllerGuideAction,
+            ShmSourceApp::DukeInput,
+            std::process::id(),
+            0,
+            radial_slot.map(|s| s as u64 + 1).unwrap_or(0),
+            0,
+            reserved,
+        );
+        shm.publish_frame(frame);
+    }
+}
+
 struct AppState {
     store: RwLock<ProfileStore>,
     latest_telemetry: RwLock<LiveTelemetrySnapshot>,
     xbox_raw: RwLock<XInputRawState>,
+    radial_menu: RwLock<RadialMenuState>,
+    radial_force_open: AtomicBool,
     bus_active_game: Mutex<Option<(u32, String, String)>>,
     inspector_device_req: Mutex<Option<String>>,
     inspector_reset_req: AtomicBool,
@@ -529,6 +611,15 @@ impl AppState {
             store: RwLock::new(store),
             latest_telemetry: RwLock::new(LiveTelemetrySnapshot::default()),
             xbox_raw: RwLock::new(XInputRawState::default()),
+            radial_menu: RwLock::new(RadialMenuState {
+                visible: false,
+                controller_kind: "xbox".to_string(),
+                selected_slot: None,
+                stick_angle_deg: 0.0,
+                stick_magnitude: 0.0,
+                slots: default_radial_slots(),
+            }),
+            radial_force_open: AtomicBool::new(false),
             bus_active_game: Mutex::new(None),
             inspector_device_req: Mutex::new(None),
             inspector_reset_req: AtomicBool::new(false),
@@ -650,6 +741,10 @@ fn spawn_input_engine(app: AppHandle, state: Arc<AppState>) {
             let mut hz_counter: u32 = 0;
             let mut prev_sniper_active = false;
             let mut auto_switched_active = false;
+            let mut prev_guide_down = false;
+            let mut prev_radial_chord = false;
+            let mut last_radial_slot: Option<u8> = None;
+            let mut last_radial_emit = Instant::now();
             let mut last_fg_exe = String::new();
             let mut working_set_mb = get_process_working_set_mb();
 
@@ -708,6 +803,7 @@ fn spawn_input_engine(app: AppHandle, state: Arc<AppState>) {
                             active_profile_name: active_prof.name,
                             foreground_exe: last_fg_exe.clone(),
                             auto_switch_enabled: state.auto_switch_enabled.load(Ordering::Relaxed),
+                            active_controller_kind: "none".to_string(),
                             devices,
                             xbox: XboxTelemetry::default(),
                             mouse: MouseTelemetry {
@@ -861,6 +957,61 @@ fn spawn_input_engine(app: AppHandle, state: Arc<AppState>) {
                     fpv_tel.pitch_dps = pitch_dps;
                     fpv_tel.yaw_dps = yaw_dps;
                 }
+
+                // 6b. Wave 4: Guide Button Toggle (XboxGuide / PS Button / Switch Home) + Translucent Radial Hotbar Chord
+                let xb_mask = xbox_raw.buttons_mask;
+                let controller_kind = detect_controller_kind(xbox_raw.connected, &gyro_frame);
+                let guide_down_now = (xbox_raw.connected && xbox_raw.guide_down) || gyro_frame.ps_guide_down;
+                let y_held_now = xbox_raw.connected && (xb_mask & 0x8000) != 0;
+                if guide_down_now && !prev_guide_down && !y_held_now {
+                    publish_controller_guide_action("toggle_couch_mode", controller_kind, None);
+                    let _ = app.emit("guide-button-pressed", controller_kind);
+                }
+                prev_guide_down = guide_down_now;
+
+                let lb_rb_chord = xbox_raw.connected && (xb_mask & 0x0100) != 0 && (xb_mask & 0x0200) != 0;
+                let lt_rs_chord = xbox_raw.connected && xbox_raw.lt > 0.55 && (xb_mask & 0x0080) != 0;
+                let radial_open_now =
+                    lb_rb_chord || lt_rs_chord || state.radial_force_open.load(Ordering::Relaxed);
+                let (stick_x, stick_y) = if (xbox_raw.rx * xbox_raw.rx + xbox_raw.ry * xbox_raw.ry) > 0.1 {
+                    (xbox_raw.rx, xbox_raw.ry)
+                } else {
+                    (xbox_raw.lx, xbox_raw.ly)
+                };
+                let (sel_slot, angle_deg, mag) = if radial_open_now && xbox_raw.connected {
+                    radial_slot_from_stick(stick_x, stick_y)
+                } else {
+                    (None, 0.0, 0.0)
+                };
+
+                if radial_open_now != prev_radial_chord
+                    || (radial_open_now && (sel_slot != last_radial_slot || last_radial_emit.elapsed() >= Duration::from_millis(33)))
+                {
+                    last_radial_emit = Instant::now();
+                    let snapshot = {
+                        let mut guard = state.radial_menu.write().unwrap_or_else(|e| e.into_inner());
+                        guard.visible = radial_open_now;
+                        guard.controller_kind = controller_kind.to_string();
+                        guard.selected_slot = sel_slot;
+                        guard.stick_angle_deg = angle_deg;
+                        guard.stick_magnitude = mag;
+                        guard.clone()
+                    };
+                    let _ = app.emit("radial-menu-state", &snapshot);
+                    if radial_open_now && !prev_radial_chord {
+                        publish_controller_guide_action("radial_open", controller_kind, sel_slot);
+                    } else if radial_open_now && sel_slot != last_radial_slot {
+                        publish_controller_guide_action("radial_hover", controller_kind, sel_slot);
+                    } else if !radial_open_now && prev_radial_chord {
+                        if let Some(exec_slot) = last_radial_slot {
+                            execute_radial_slot_by_idx(&app, &state, &mut hid_mgr, exec_slot, controller_kind);
+                        } else {
+                            publish_controller_guide_action("radial_close", controller_kind, None);
+                        }
+                    }
+                    last_radial_slot = sel_slot;
+                }
+                prev_radial_chord = radial_open_now;
 
                 // 6. Button / Switch / Wheel Remappings & Sub-ms Macro Engine
                 let wbtn = xbox_raw.buttons_mask;
@@ -1112,6 +1263,7 @@ fn spawn_input_engine(app: AppHandle, state: Arc<AppState>) {
                         active_profile_name: cached_profile.name.clone(),
                         foreground_exe: last_fg_exe.clone(),
                         auto_switch_enabled: state.auto_switch_enabled.load(Ordering::Relaxed),
+                        active_controller_kind: detect_controller_kind(xbox_raw.connected, &gyro_frame).to_string(),
                         devices,
                         xbox: XboxTelemetry {
                             connected: xbox_raw.connected,
@@ -1129,6 +1281,7 @@ fn spawn_input_engine(app: AppHandle, state: Arc<AppState>) {
                             out_lt,
                             out_rt,
                             buttons_mask: xbox_raw.buttons_mask,
+                            guide_down: xbox_raw.guide_down,
                         },
                         mouse: MouseTelemetry {
                             active_name: mouse_name,
@@ -1196,6 +1349,109 @@ fn spawn_input_engine(app: AppHandle, state: Arc<AppState>) {
 // ============================================================================
 // TAURI IPC COMMANDS
 // ============================================================================
+
+fn execute_radial_slot_by_idx(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    hid_mgr: &mut HidDeviceManager,
+    slot_idx: u8,
+    controller_kind: &str,
+) {
+    let slots = default_radial_slots();
+    let Some(slot) = slots.get(slot_idx as usize) else {
+        return;
+    };
+    match slot.action_id.as_str() {
+        "cycle_mouse_dpi" => {
+            let mut next_dpi = 0u16;
+            {
+                let mut guard = state.store.write().unwrap_or_else(|e| e.into_inner());
+                let active_id = guard.settings.active_profile_id.clone();
+                if let Some(prof) = guard.profiles.iter_mut().find(|p| p.id == active_id) {
+                    prof.mouse.active_dpi_stage = (prof.mouse.active_dpi_stage + 1) % 4;
+                    next_dpi = prof.mouse.dpi_stages[prof.mouse.active_dpi_stage];
+                }
+            }
+            if next_dpi > 0 {
+                state.bump_revision();
+                hid_mgr.apply_logitech_dpi(next_dpi);
+            }
+        }
+        "cycle_input_profile" => {
+            let mut switched_id = String::new();
+            let mut switched_name = String::new();
+            {
+                let mut guard = state.store.write().unwrap_or_else(|e| e.into_inner());
+                if !guard.profiles.is_empty() {
+                    let cur_idx = guard
+                        .profiles
+                        .iter()
+                        .position(|p| p.id == guard.settings.active_profile_id)
+                        .unwrap_or(0);
+                    let next_idx = (cur_idx + 1) % guard.profiles.len();
+                    switched_id = guard.profiles[next_idx].id.clone();
+                    switched_name = guard.profiles[next_idx].name.clone();
+                    guard.settings.active_profile_id = switched_id.clone();
+                }
+            }
+            if !switched_id.is_empty() {
+                state.bump_revision();
+                refresh_tray_menu(app, state);
+                let _ = app.emit("profile-switched", &switched_id);
+                publish_profile_switched(&switched_name);
+            }
+        }
+        "save_replay_clip" => {
+            if let Some(bus) = DUKE_BUS.get() {
+                bus.publish(DukeEvent::ReplaySaveRequested {
+                    game_title: None,
+                    source: "duke-input-radial".to_string(),
+                });
+            }
+        }
+        "purge_standby_ram" => {
+            if let Some(bus) = DUKE_BUS.get() {
+                bus.publish(DukeEvent::RamPurgeRequested {
+                    source: "duke-input-radial".to_string(),
+                });
+            }
+        }
+        _ => {}
+    }
+    publish_controller_guide_action(&slot.action_id, controller_kind, Some(slot_idx));
+}
+
+#[tauri::command]
+fn get_radial_menu_state(state: State<'_, Arc<AppState>>) -> RadialMenuState {
+    state.radial_menu.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+#[tauri::command]
+fn set_radial_menu_open(app: AppHandle, state: State<'_, Arc<AppState>>, open: bool) -> RadialMenuState {
+    state.radial_force_open.store(open, Ordering::Relaxed);
+    let snap = {
+        let mut guard = state.radial_menu.write().unwrap_or_else(|e| e.into_inner());
+        guard.visible = open;
+        guard.clone()
+    };
+    let _ = app.emit("radial-menu-state", &snap);
+    publish_controller_guide_action(
+        if open { "radial_open" } else { "radial_close" },
+        &snap.controller_kind,
+        snap.selected_slot,
+    );
+    snap
+}
+
+#[tauri::command]
+fn trigger_radial_slot_action(app: AppHandle, state: State<'_, Arc<AppState>>, slot: u8) -> Result<String, String> {
+    let slots = default_radial_slots();
+    let found = slots.get(slot as usize).ok_or_else(|| format!("Invalid radial slot {}", slot))?;
+    let controller_kind = state.radial_menu.read().unwrap_or_else(|e| e.into_inner()).controller_kind.clone();
+    publish_controller_guide_action(&found.action_id, &controller_kind, Some(slot));
+    let _ = app.emit("radial-slot-triggered", found.action_id.as_str());
+    Ok(found.action_id.clone())
+}
 
 #[tauri::command]
 fn get_store(state: State<'_, Arc<AppState>>) -> ProfileStore {
@@ -1743,6 +1999,9 @@ fn main() {
             export_profile_json,
             import_profile_json,
             test_macro,
+            get_radial_menu_state,
+            set_radial_menu_open,
+            trigger_radial_slot_action,
         ])
         .build(tauri::generate_context!())
         .expect("Failed to build Duke Input Tauri application");
@@ -1852,6 +2111,7 @@ fn build_voice_macro_steps(keys: &[String], hold_ms: u32) -> Vec<MacroStep> {
 #[cfg(test)]
 mod wave1_tests {
     use super::*;
+    use crate::hid::parse_playstation_report;
 
     #[test]
     fn builds_balanced_voice_macro_key_steps() {
@@ -1874,5 +2134,34 @@ mod wave1_tests {
                 .expect("Switch game should match 5-point Bezier console profile");
         assert_eq!(selected.0, "console_gyro_bezier5");
         assert_eq!(selected.2, "Bezier5Point");
+    }
+
+    #[test]
+    fn maps_stick_angles_to_eight_radial_slots() {
+        assert_eq!(radial_slot_from_stick(0.0, 0.0).0, None);
+        assert_eq!(radial_slot_from_stick(0.0, 0.9).0, Some(0)); // North
+        assert_eq!(radial_slot_from_stick(0.8, 0.8).0, Some(1)); // NE
+        assert_eq!(radial_slot_from_stick(0.95, 0.0).0, Some(2)); // East
+        assert_eq!(radial_slot_from_stick(0.0, -0.95).0, Some(4)); // South
+        assert_eq!(radial_slot_from_stick(-0.95, 0.0).0, Some(6)); // West
+    }
+
+    #[test]
+    fn parses_dualsense_ps_guide_and_switch_home_buttons() {
+        let mut ds = [0u8; 64];
+        ds[0] = 0x01; // USB report
+        ds[1 + 9] = 0x01; // PS guide bit
+        let frame = parse_playstation_report(0x0CE6, &ds);
+        assert!(frame.valid);
+        assert!(frame.ps_guide_down);
+        assert_eq!(detect_controller_kind(true, &frame), "dualsense");
+
+        let mut sw = [0u8; 32];
+        sw[0] = 0x30;
+        sw[4] = 0x10; // Home button bit
+        let sw_frame = hid::parse_switch_pro_report(&sw);
+        assert!(sw_frame.valid);
+        assert!(sw_frame.ps_guide_down);
+        assert_eq!(detect_controller_kind(false, &sw_frame), "switch");
     }
 }

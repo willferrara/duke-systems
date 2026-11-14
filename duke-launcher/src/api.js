@@ -946,7 +946,7 @@ export async function getAppVersion() {
     // Fall back to explicit Rust compile-time CARGO_PKG_VERSION IPC
   }
   const backendVer = await invokeCommand("get_app_version");
-  return String(backendVer || "0.8.0").trim().replace(/^v/i, "");
+  return String(backendVer || "0.9.0").trim().replace(/^v/i, "");
 }
 
 export async function resolveCatalogCover(req = {}) {
@@ -1602,6 +1602,130 @@ export async function testMicRnnoiseLatency(strength = 0.75) {
   return invokeCommand("test_mic_rnnoise_latency", {
     strength: Number(strength)
   });
+}
+
+// =========================================================================
+// Wave 4 (v0.9.0): Duke Pilot, DKCAT003 Play Tonight, Couch Mode, .dkpack, Capsule
+// =========================================================================
+
+export async function planDukePilotCommand(query, useLocalAi = false) {
+  return invokeCommand("plan_duke_pilot_command", {
+    query: String(query || ""),
+    useLocalAi: Boolean(useLocalAi)
+  });
+}
+
+export async function executeDukePilotPlan(plan, explicitImportPath = null) {
+  return invokeCommand("execute_duke_pilot_plan", {
+    plan,
+    explicitImportPath: explicitImportPath ? String(explicitImportPath) : null
+  });
+}
+
+export async function getPlayTonightRecommendations(sessionMinutes = 60, limit = 24) {
+  return invokeCommand("get_play_tonight_recommendations", {
+    sessionMinutes: Number(sessionMinutes || 60),
+    limit: Number(limit || 24)
+  });
+}
+
+export async function getCouchModeStatus() {
+  return invokeCommand("get_couch_mode_status");
+}
+
+export async function setCouchModeState(enabled, controllerKind = null, radialOpen = null) {
+  return invokeCommand("set_couch_mode_state", {
+    enabled: Boolean(enabled),
+    controllerKind: controllerKind ? String(controllerKind) : null,
+    radialOpen: radialOpen === null ? null : Boolean(radialOpen)
+  });
+}
+
+export async function triggerCouchRadialAction(slotId, action = null) {
+  return invokeCommand("trigger_couch_radial_action", {
+    slotId: Number(slotId),
+    action: action ? String(action) : null
+  });
+}
+
+export async function exportGameDkpack(gameId, outPath = null) {
+  return invokeCommand("export_game_dkpack", {
+    gameId: String(gameId),
+    outPath: outPath ? String(outPath) : null
+  });
+}
+
+export async function inspectDkpackFile(path) {
+  return invokeCommand("inspect_dkpack_file", {
+    path: String(path || "")
+  });
+}
+
+export async function applyDkpackRecipe(dkpackPath, gameId = null) {
+  return invokeCommand("apply_dkpack_recipe", {
+    dkpackPath: String(dkpackPath || ""),
+    gameId: gameId ? String(gameId) : null
+  });
+}
+
+export async function pickDkpackFile() {
+  if (window.__TAURI__?.dialog?.open) {
+    const selected = await window.__TAURI__.dialog.open({
+      multiple: false,
+      directory: false,
+      title: "Select Deterministic Modpack Recipe (.dkpack)",
+      filters: [
+        { name: "Duke Modpack Recipes", extensions: ["dkpack"] },
+        { name: "All Files", extensions: ["*"] }
+      ]
+    });
+    return typeof selected === "string" ? selected : null;
+  }
+  return null;
+}
+
+export async function exportGameCapsule(
+  gameId,
+  outputDir = null,
+  format = "folder",
+  includeSaves = true
+) {
+  return invokeCommand("export_game_capsule", {
+    gameId: String(gameId),
+    outputDir: outputDir ? String(outputDir) : null,
+    format: String(format || "folder"),
+    includeSaves: Boolean(includeSaves)
+  });
+}
+
+export async function inspectGameCapsule(archivePath) {
+  return invokeCommand("inspect_game_capsule", {
+    archivePath: String(archivePath || "")
+  });
+}
+
+export function listenCouchStateChanged(callback) {
+  return listenEvent("couch-state-changed", callback);
+}
+
+export function listenCouchRadialToggled(callback) {
+  return listenEvent("couch-radial-toggled", callback);
+}
+
+export function listenCouchRadialAction(callback) {
+  return listenEvent("couch-radial-action", callback);
+}
+
+export function listenDkpackApplied(callback) {
+  return listenEvent("dkpack-applied", callback);
+}
+
+export function listenPilotSemanticSearch(callback) {
+  return listenEvent("duke-pilot-semantic-search", callback);
+}
+
+export function listenPilotPlayTonight(callback) {
+  return listenEvent("duke-pilot-open-play-tonight", callback);
 }
 
 
