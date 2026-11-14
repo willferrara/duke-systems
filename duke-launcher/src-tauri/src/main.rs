@@ -17,6 +17,7 @@ mod pe_inspect;
 mod platforms;
 mod retro_catalog;
 mod rom_inspect;
+mod self_heal;
 mod sidebar_icons;
 mod sites;
 mod snapshots;
@@ -119,7 +120,6 @@ static QUEUE_IO_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static SETTINGS_IO_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static CATALOG_IO_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static LIVE_CATALOG_UPSERTS: OnceLock<Mutex<HashMap<u32, CatalogGameEntry>>> = OnceLock::new();
-static TMP_FILE_SEQ: AtomicU64 = AtomicU64::new(1);
 static QUEUE_RUNNER_ACTIVE: AtomicBool = AtomicBool::new(false);
 static PRICE_SYNC_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CATALOG_SYNC_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -183,101 +183,25 @@ extern "system" {
     ) -> u32;
 }
 
-const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
-const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
-const DWMSBT_NONE: i32 = 1;
-const DWMSBT_TRANSIENTWINDOW: i32 = 3;
+pub(crate) use duke_core::win32_ffi::{
+    apply_backdrop_to_hwnd, resolve_backdrop_type_for_theme, DWMSBT_TRANSIENTWINDOW,
+};
+#[cfg(test)]
+pub(crate) use duke_core::win32_ffi::{
+    apply_backdrop_with, DwmMargins, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
+    DWMSBT_NONE,
+};
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DwmMargins {
-    cx_left_width: i32,
-    cx_right_width: i32,
-    cy_top_height: i32,
-    cy_bottom_height: i32,
-}
-
-#[cfg(target_os = "windows")]
-#[link(name = "dwmapi")]
-extern "system" {
-    fn DwmSetWindowAttribute(
-        hwnd: isize,
-        dw_attribute: u32,
-        pv_attribute: *const core::ffi::c_void,
-        cb_attribute: u32,
-    ) -> i32;
-    fn DwmExtendFrameIntoClientArea(hwnd: isize, p_mar_inset: *const DwmMargins) -> i32;
-}
-
-#[inline]
-pub(crate) fn resolve_backdrop_type_for_theme(theme_id: &str) -> i32 {
-    if theme_id.trim().eq_ignore_ascii_case("frosted-obsidian") {
-        DWMSBT_TRANSIENTWINDOW
-    } else {
-        DWMSBT_NONE
-    }
-}
-
-fn apply_backdrop_with<FAttr, FMargin>(
-    hwnd: isize,
-    theme_id: &str,
-    mut set_attr: FAttr,
-    mut extend_margins: FMargin,
-) -> Result<i32, String>
-where
-    FAttr: FnMut(isize, u32, i32) -> i32,
-    FMargin: FnMut(isize, DwmMargins) -> i32,
-{
-    if hwnd == 0 {
-        return Err("Invalid window handle (HWND = 0)".to_string());
-    }
-    let backdrop_type = resolve_backdrop_type_for_theme(theme_id);
-    let dark_mode: i32 = if theme_id.trim().eq_ignore_ascii_case("light") {
-        0
-    } else {
-        1
-    };
-    let _ = set_attr(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, dark_mode);
-    let margins = if backdrop_type == DWMSBT_TRANSIENTWINDOW {
-        DwmMargins {
-            cx_left_width: -1,
-            cx_right_width: -1,
-            cy_top_height: -1,
-            cy_bottom_height: -1,
-        }
-    } else {
-        DwmMargins {
-            cx_left_width: 0,
-            cx_right_width: 0,
-            cy_top_height: 0,
-            cy_bottom_height: 0,
-        }
-    };
-    let _ = extend_margins(hwnd, margins);
-    let _hr = set_attr(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, backdrop_type);
-    Ok(backdrop_type)
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn apply_backdrop_to_hwnd(hwnd: isize, theme_id: &str) -> Result<i32, String> {
-    apply_backdrop_with(
-        hwnd,
-        theme_id,
-        |h, attr, val| unsafe {
-            DwmSetWindowAttribute(
-                h,
-                attr,
-                (&val as *const i32).cast::<core::ffi::c_void>(),
-                core::mem::size_of::<i32>() as u32,
-            )
-        },
-        |h, margins| unsafe { DwmExtendFrameIntoClientArea(h, &margins) },
-    )
+#[tauri::command]
+fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 #[tauri::command]
 fn apply_window_backdrop(app: AppHandle, theme_id: String) -> Result<(), String> {
+    let transparent_glass = resolve_backdrop_type_for_theme(&theme_id) == DWMSBT_TRANSIENTWINDOW;
     if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
         #[cfg(target_os = "windows")]
         {
             let hwnd = win
@@ -287,7 +211,14 @@ fn apply_window_backdrop(app: AppHandle, theme_id: String) -> Result<(), String>
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = (win, theme_id);
+            let _ = (win, &theme_id, transparent_glass);
+        }
+    }
+    if let Some(overlay) = app.get_webview_window("overlay") {
+        let _ = overlay.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+        #[cfg(target_os = "windows")]
+        if let Ok(hwnd) = overlay.hwnd() {
+            let _ = apply_backdrop_to_hwnd(hwnd.0 as isize, if transparent_glass { "frosted-obsidian" } else { "dark" });
         }
     }
     Ok(())
@@ -961,29 +892,9 @@ pub(crate) fn clean_game_title(raw: &str) -> String {
     }
 }
 
-/// Unconditionally strips `:Zone.Identifier` NTFS streams on a file or tree and returns count cleared.
+/// Unconditionally strips `:Zone.Identifier` NTFS streams on `.exe`, `.dll`, `.asi`, `.bat` recursively.
 fn unblock_ntfs_zone_identifier_raw(target: &Path) -> usize {
-    if !target.exists() {
-        return 0;
-    }
-    if target.is_file() {
-        let ads_path = format!("{}:Zone.Identifier", target.display());
-        return usize::from(std::fs::remove_file(ads_path).is_ok());
-    }
-    let mut cleared = 0usize;
-    for entry in WalkDir::new(target)
-        .max_depth(6)
-        .follow_links(false)
-        .into_iter()
-        .flatten()
-    {
-        let p = entry.path();
-        let ads_path = format!("{}:Zone.Identifier", p.display());
-        if std::fs::remove_file(ads_path).is_ok() {
-            cleared += 1;
-        }
-    }
-    cleared
+    self_heal::unblock_game_tree_zone_identifiers(target)
 }
 
 /// Automatically strips the Windows NTFS Mark-of-the-Web (`:Zone.Identifier` alternate data stream)
@@ -1397,6 +1308,91 @@ pub(crate) fn find_best_game_exe_in_folder(folder: &Path, expected_game_title: &
     find_best_game_exe_with_max_depth(folder, expected_game_title, 6)
 }
 
+fn is_rom_or_console_image_name(lower_name: &str) -> bool {
+    const ROM_EXTS: &[&str] = &[
+        ".rvz", ".chd", ".3ds", ".cci", ".nsp", ".xci", ".gba", ".nds", ".z64", ".n64", ".v64",
+        ".sfc", ".smc", ".nes", ".gb", ".gbc", ".wbfs", ".gcm", ".cso",
+    ];
+    ROM_EXTS.iter().any(|ext| lower_name.ends_with(ext))
+}
+
+async fn install_detected_rom_to_library(
+    app: &AppHandle,
+    rom_path: &Path,
+    clean_title: &str,
+) -> Result<GameEntry, String> {
+    let rp = rom_path.to_path_buf();
+    let inspection = tokio::task::spawn_blocking(move || rom_inspect::inspect_rom_file(&rp))
+        .await
+        .map_err(|e| format!("ROM inspection panicked: {e}"))?;
+    let plat_id = inspection
+        .as_ref()
+        .map(|i| i.platform_id)
+        .filter(|&id| id > 0)
+        .unwrap_or_else(|| {
+            let (inferred, _) =
+                artwork::infer_game_platform_hint(clean_title, &rom_path.to_string_lossy(), "", "");
+            inferred.unwrap_or(platforms::PLATFORM_N64)
+        });
+    let fallback_title = clean_title.trim().to_string();
+    let mut entry = {
+        let mut library = load_library_from_disk(app)?;
+        let out = upsert_retro_game_entry_in_library(
+            &mut library,
+            RetroUpsertParams {
+                rom_path: Some(rom_path),
+                inspection: inspection.as_ref(),
+                platform_id: plat_id,
+                custom_title: Some(&fallback_title),
+                catalog_app_id: None,
+                cover_hint: None,
+                hero_hint: None,
+                origin_source: "turbo_downloader",
+            },
+        );
+        save_library_to_disk(app, &library)?;
+        out
+    };
+
+    if let (Ok(covers_dir), Ok(icons_dir)) = (
+        get_covers_dir(app),
+        sidebar_icons::get_sidebar_icons_dir(app),
+    ) {
+        let settings = load_settings_from_disk(app);
+        let (_, plat_hint) =
+            artwork::infer_game_platform_hint(&entry.title, &entry.exe_path, &entry.genre, &entry.source);
+        if let Some(outcome) = artwork::resolve_and_cache_cover_in_dirs(
+            &artwork::CoverResolveRequest {
+                cache_id: entry.id.clone(),
+                title: entry.title.clone(),
+                platform_id: (entry.platform_id > 0).then_some(entry.platform_id),
+                platform_hint: plat_hint,
+                steam_app_id: None,
+                existing_cover_url: (!entry.cover_url.is_empty()).then(|| entry.cover_url.clone()),
+                steamgriddb_api_key: settings.steamgriddb_api_key.unwrap_or_default(),
+                sidebar_icon_id: Some(entry.id.clone()),
+            },
+            &covers_dir,
+            &icons_dir,
+        )
+        .await
+        {
+            entry.cover_url = outcome.cover_path.to_string_lossy().to_string();
+            if let Ok(mut lib) = load_library_from_disk(app) {
+                if let Some(found) = lib.iter_mut().find(|g| g.id == entry.id) {
+                    found.cover_url = entry.cover_url.clone();
+                }
+                let _ = save_library_to_disk(app, &lib);
+            }
+        }
+    }
+
+    if let Ok(lib) = load_library_from_disk(app) {
+        let _ = app.emit("library-updated", &lib);
+    }
+    Ok(entry)
+}
+
 async fn auto_install_downloaded_file(
     app: &AppHandle,
     downloaded_file_path: &str,
@@ -1432,9 +1428,25 @@ async fn auto_install_downloaded_file(
         return Ok(added);
     }
 
-    // Case 2: Downloaded file is a supported archive (.rar, .7z, .zip, .tar, .gz, .part1.rar, .7z.001, etc.)
+    // Case 1b: Downloaded file is a direct console ROM / disc image (.rvz, .chd, .3ds, .cci, .nsp, .xci, .gba, .nds, .z64, .sfc, .nes, or console .iso)
+    if is_rom_or_console_image_name(&lower_name) {
+        return install_detected_rom_to_library(app, &path, &clean_title).await;
+    }
+    if lower_name.ends_with(".iso") {
+        let p_check = path.clone();
+        let is_console_iso = tokio::task::spawn_blocking(move || rom_inspect::inspect_rom_file(&p_check))
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|insp| insp.platform_id != platforms::PLATFORM_PC && insp.platform_id > 0);
+        if is_console_iso {
+            return install_detected_rom_to_library(app, &path, &clean_title).await;
+        }
+    }
+
+    // Case 2: Downloaded file is a supported archive (.rar, .7z, .zip, .tar, .tar.zst, .iso, etc.)
     if !is_supported_archive_name(&lower_name) {
-        return Err("File is not a recognized game archive or executable.".to_string());
+        return Err("File is not a recognized game archive, ROM, or executable.".to_string());
     }
 
     let parent_dir = path
@@ -1446,7 +1458,7 @@ async fn auto_install_downloaded_file(
     let extract_dir = parent_dir.join(&folder_safe_name);
 
     let target_exe = match find_best_game_exe_in_folder(&extract_dir, &clean_title) {
-        Some(existing_exe) => existing_exe,
+        Some(existing_exe) => Some(existing_exe),
         None => {
             let arch_clone = path.clone();
             let dest_clone = extract_dir.clone();
@@ -1457,34 +1469,47 @@ async fn auto_install_downloaded_file(
             .map_err(|e| format!("Extraction task panicked: {}", e))??;
 
             trim_process_working_set();
-
-            find_best_game_exe_in_folder(&extract_dir, &clean_title).ok_or_else(|| {
-                format!(
-                    "Extracted to '{}', but no game .exe was found inside.",
-                    extract_dir.display()
-                )
-            })?
+            find_best_game_exe_in_folder(&extract_dir, &clean_title)
         }
     };
 
-    let exe_str = target_exe.to_string_lossy().to_string();
-    let added = add_local_game_with_origin(
-        app.clone(),
-        exe_str,
-        Some(clean_title),
-        None,
-        Some("Ready".to_string()),
-        None,
-        Some("turbo_downloader"),
-    )
-    .await?;
+    if let Some(exe_pb) = target_exe {
+        let exe_str = exe_pb.to_string_lossy().to_string();
+        let added = add_local_game_with_origin(
+            app.clone(),
+            exe_str,
+            Some(clean_title),
+            None,
+            Some("Ready".to_string()),
+            None,
+            Some("turbo_downloader"),
+        )
+        .await?;
 
-    if let Ok(lib) = load_library_from_disk(app) {
-        let _ = app.emit("library-updated", &lib);
+        if let Ok(lib) = load_library_from_disk(app) {
+            let _ = app.emit("library-updated", &lib);
+        }
+
+        trim_process_working_set();
+        return Ok(added);
     }
 
-    trim_process_working_set();
-    Ok(added)
+    // Fallback for extracted console ROMs inside .zip / .7z / .tar.zst archives (e.g. Vimm's Lair)
+    let dir_scan = extract_dir.clone();
+    let roms = tokio::task::spawn_blocking(move || rom_inspect::scan_folder_for_roms(&dir_scan, 4))
+        .await
+        .map_err(|e| format!("ROM scan panicked: {e}"))?;
+    if let Some(first_rom) = roms.first() {
+        let rom_entry =
+            install_detected_rom_to_library(app, Path::new(&first_rom.path), &clean_title).await?;
+        trim_process_working_set();
+        return Ok(rom_entry);
+    }
+
+    Err(format!(
+        "Extracted to '{}', but no game .exe or console ROM was found inside.",
+        extract_dir.display()
+    ))
 }
 
 /// Queries Windows NTFS physical allocated file size (`GetCompressedFileSizeW`) so NTFS LZX/XPRESS8K
@@ -1580,6 +1605,9 @@ pub(crate) fn get_app_data_file_standalone(filename: &str) -> Result<PathBuf, St
                 }
             }
         }
+    }
+    if self_heal::is_protected_json_file(&target_file) {
+        let _ = self_heal::recover_protected_json_if_corrupt(&target_file);
     }
     Ok(target_file)
 }
@@ -1688,6 +1716,10 @@ fn get_app_data_file(app: &AppHandle, filename: &str) -> Result<PathBuf, String>
                 }
             }
         }
+    }
+
+    if self_heal::is_protected_json_file(&target_file) {
+        let _ = self_heal::recover_protected_json_if_corrupt(&target_file);
     }
 
     Ok(target_file)
@@ -1849,39 +1881,25 @@ fn get_catalog_io_lock() -> &'static Mutex<()> {
     CATALOG_IO_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-pub(crate) fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create parent directory '{}': {}", parent.display(), e))?;
+pub(crate) fn reload_queue_store_from_disk(app: &AppHandle) {
+    let Ok(dl_path) = get_app_data_file(app, "downloads.json") else {
+        return;
+    };
+    let Ok(raw) = self_heal::read_json_with_bak_recovery(&dl_path) else {
+        return;
+    };
+    if let Ok(mut parsed) = serde_json::from_str::<Vec<DownloadJob>>(&raw) {
+        for j in &mut parsed {
+            reconcile_job_bytes_from_disk(j);
+        }
+        if let Ok(mut guard) = get_queue_store().lock() {
+            *guard = parsed;
         }
     }
+}
 
-    let seq = TMP_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
-    let base_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("state.json");
-    let tmp_path = path.with_file_name(format!("{}.{}.{}.tmp", base_name, std::process::id(), seq));
-
-    let write_res = (|| -> std::io::Result<()> {
-        let mut f = File::create(&tmp_path)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        Ok(())
-    })();
-
-    if let Err(err) = write_res {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(format!("Failed writing temp file '{}': {}", tmp_path.display(), err));
-    }
-
-    if let Err(err) = fs::rename(&tmp_path, path) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(format!("Failed atomic rename to '{}': {}", path.display(), err));
-    }
-
-    Ok(())
+pub(crate) fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    self_heal::atomic_write_with_backup(path, bytes)
 }
 
 pub(crate) fn atomic_write_string(path: &Path, contents: &str) -> Result<(), String> {
@@ -2555,56 +2573,6 @@ async fn fetch_steam_app_cover_verified(app_id: u64) -> (Option<String>, Option<
     (None, None)
 }
 
-async fn search_bing_box_art_verified(query: &str) -> Option<String> {
-    let client = get_http_client();
-    let search_queries = [
-        format!("{} video game cover art banner", query),
-        format!("{} game logo wallpaper", query),
-    ];
-
-    for q in &search_queries {
-        let encoded = urlencoding::encode(q);
-        let bing_url = format!(
-            "https://www.bing.com/images/search?q={}&qft=+filterui:aspect-wide&form=IRFLTR",
-            encoded
-        );
-
-        if let Ok(resp) = client.get(&bing_url).send().await {
-            if let Ok(html) = resp.text().await {
-                for marker in ["https://tse", "https://th.bing.com/th/id/OIP"] {
-                    let mut slice = html.as_str();
-                    let mut tried = 0;
-                    while let Some(pos) = slice.find(marker) {
-                        let rest = &slice[pos..];
-                        let end = rest
-                            .find(['"', '\'', '&', ' ', '<', '>', '\\'])
-                            .unwrap_or(rest.len());
-                        let candidate = &rest[..end];
-                        if candidate.len() > 28 {
-                            let full_thumb = format!("{}&w=460&h=215&c=7&rs=1&pid=1.7", candidate);
-                            if let Some(data_uri) = fetch_verified_image_data_uri(&full_thumb).await
-                            {
-                                return Some(data_uri);
-                            }
-                            tried += 1;
-                            if tried >= 3 {
-                                break;
-                            }
-                        }
-                        if end < rest.len() {
-                            slice = &rest[end..];
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
 fn extract_exe_icon_data_uri(exe_path: &str) -> Option<String> {
     let escaped = exe_path.replace('\'', "''");
     let ps_script = format!(
@@ -2733,93 +2701,60 @@ async fn fetch_steam_app_retail_price(appid: u32) -> (u32, String) {
 }
 
 async fn smart_find_game_cover(
+    app: &AppHandle,
+    cache_id: &str,
     title: &str,
     exe_path: &str,
     install_dir: &str,
 ) -> (String, Option<u64>, Option<String>) {
-    let client = get_http_client();
     let dir_path = Path::new(install_dir);
+    let detected_app_id = if dir_path.exists() {
+        detect_steam_appid_in_folder(dir_path)
+    } else {
+        None
+    };
 
-    if dir_path.exists() {
-        if let Some(app_id) = detect_steam_appid_in_folder(dir_path) {
-            let (cover_opt, name_opt) = fetch_steam_app_cover_verified(app_id).await;
-            if let Some(valid_cover) = cover_opt {
-                return (valid_cover, Some(app_id), name_opt);
-            }
-        }
-    }
-
-    let mut candidates = Vec::new();
+    let (inferred_pid, plat_hint) =
+        artwork::infer_game_platform_hint(title, exe_path, "", "");
     let cleaned_title = clean_game_title(title);
-    if !cleaned_title.is_empty() {
-        candidates.push(cleaned_title);
-    }
+    let lookup_title = if !cleaned_title.is_empty() {
+        cleaned_title
+    } else {
+        title.trim().to_string()
+    };
 
-    if let Some(folder_name) = dir_path.file_name().and_then(|n| n.to_str()) {
-        let cf = clean_game_title(folder_name);
-        if !cf.is_empty() && !candidates.contains(&cf) {
-            candidates.push(cf);
-        }
-    }
-
-    if let Some(parent_name) = dir_path
-        .parent()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-    {
-        let cp = clean_game_title(parent_name);
-        if !cp.is_empty()
-            && cp.to_lowercase() != "games"
-            && cp.to_lowercase() != "downloads"
-            && !candidates.contains(&cp)
+    if let (Ok(covers_dir), Ok(icons_dir)) = (
+        get_covers_dir(app),
+        sidebar_icons::get_sidebar_icons_dir(app),
+    ) {
+        let api_key = load_settings_from_disk(app)
+            .steamgriddb_api_key
+            .unwrap_or_default();
+        let req = artwork::CoverResolveRequest {
+            cache_id: cache_id.to_string(),
+            title: lookup_title,
+            platform_id: inferred_pid,
+            platform_hint: plat_hint,
+            steam_app_id: detected_app_id.and_then(|v| u32::try_from(v).ok()),
+            existing_cover_url: None,
+            steamgriddb_api_key: api_key,
+            sidebar_icon_id: Some(cache_id.to_string()),
+        };
+        if let Some(outcome) =
+            artwork::resolve_and_cache_cover_in_dirs(&req, &covers_dir, &icons_dir).await
         {
-            candidates.push(cp);
+            return (
+                outcome.cover_path.to_string_lossy().to_string(),
+                detected_app_id,
+                None,
+            );
         }
     }
 
-    for query in &candidates {
-        let encoded = urlencoding::encode(query);
-        let url = format!(
-            "https://store.steampowered.com/api/storesearch/?term={}&l=english&cc=US",
-            encoded
-        );
-
-        if let Ok(resp) = client.get(&url).timeout(Duration::from_secs(5)).send().await {
-            if let Ok(json_val) = resp.json::<Value>().await {
-                if let Some(items) = json_val.get("items").and_then(|i| i.as_array()) {
-                    for item in items.iter().take(2) {
-                        if let Some(app_id) = item.get("id").and_then(|id| id.as_u64()) {
-                            let matched_name = item
-                                .get("name")
-                                .and_then(|n| n.as_str())
-                                .map(|s| s.to_string());
-
-                            let (cover_opt, details_name) =
-                                fetch_steam_app_cover_verified(app_id).await;
-                            if let Some(valid_cover) = cover_opt {
-                                return (
-                                    valid_cover,
-                                    Some(app_id),
-                                    matched_name.or(details_name),
-                                );
-                            }
-
-                            if let Some(tiny) = item.get("tiny_image").and_then(|t| t.as_str()) {
-                                if let Some(valid_tiny) = fetch_verified_image_data_uri(tiny).await
-                                {
-                                    return (valid_tiny, Some(app_id), matched_name);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    for query in &candidates {
-        if let Some(bing_cover) = search_bing_box_art_verified(query).await {
-            return (bing_cover, None, None);
+    if let Some(aid) = detected_app_id {
+        let (cover_opt, name_opt) = fetch_steam_app_cover_verified(aid).await;
+        if let Some(valid_cover) = cover_opt {
+            return (valid_cover, Some(aid), name_opt);
         }
     }
 
@@ -2827,7 +2762,7 @@ async fn smart_find_game_cover(
         return (exe_ico, None, None);
     }
 
-    (String::new(), None, None)
+    (String::new(), detected_app_id, None)
 }
 
 fn derive_filename(url: &str, disposition: Option<&str>, suggested: Option<&str>) -> String {
@@ -2990,10 +2925,24 @@ fn is_direct_cdn_binary_url(raw_url: &str) -> bool {
         ".zip",
         ".iso",
         ".exe",
+        ".msi",
         ".bin",
         ".tar",
+        ".tar.zst",
+        ".tzst",
         ".gz",
         ".tgz",
+        ".rvz",
+        ".chd",
+        ".3ds",
+        ".cci",
+        ".nsp",
+        ".xci",
+        ".gba",
+        ".nds",
+        ".z64",
+        ".sfc",
+        ".nes",
         ".7z.001",
         ".zip.001",
     ]
@@ -3469,9 +3418,87 @@ async fn try_resolve_native_api(raw_url: &str) -> Option<ResolvedStreamInfo> {
     None
 }
 
+const WIN11_EDGE_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36 Edg/134.0.0.0";
+
+fn get_grabber_webview_profile_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = resolve_data_root_dir(app)?.join("grabber_webview_profile");
+    if !dir.exists() {
+        fs::create_dir_all(&dir)
+            .map_err(|e| format!("Failed to create grabber WebView2 profile directory: {}", e))?;
+    }
+    Ok(dir)
+}
+
+fn format_cookie_list<'a, I>(cookies: I) -> String
+where
+    I: IntoIterator<Item = tauri::webview::Cookie<'a>>,
+{
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for c in cookies {
+        let name = c.name().trim().to_string();
+        let val = c.value().trim().to_string();
+        if !name.is_empty() && !pairs.iter().any(|(k, _)| k == &name) {
+            pairs.push((name, val));
+        }
+    }
+    pairs
+        .into_iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn collect_cookies_from_webview<R: tauri::Runtime>(
+    webview: &tauri::Webview<R>,
+    primary_url: &Url,
+    referer_url: Option<&str>,
+) -> String {
+    let mut combined = String::new();
+    if let Ok(list) = webview.cookies_for_url(primary_url.clone()) {
+        combined = format_cookie_list(list.iter().cloned());
+    }
+    if combined.is_empty() {
+        if let Some(rf) = referer_url.and_then(|s| Url::parse(s).ok()) {
+            if let Ok(list) = webview.cookies_for_url(rf) {
+                combined = format_cookie_list(list.iter().cloned());
+            }
+        }
+    }
+    combined
+}
+
+fn collect_cookies_from_window<R: tauri::Runtime>(
+    win: &tauri::WebviewWindow<R>,
+    primary_url: &Url,
+    referer_url: Option<&str>,
+) -> String {
+    let mut combined = String::new();
+    if let Ok(list) = win.cookies_for_url(primary_url.clone()) {
+        combined = format_cookie_list(list.iter().cloned());
+    }
+    if combined.is_empty() {
+        if let Some(rf) = referer_url.and_then(|s| Url::parse(s).ok()) {
+            if let Ok(list) = win.cookies_for_url(rf) {
+                combined = format_cookie_list(list.iter().cloned());
+            }
+        }
+    }
+    combined
+}
+
+fn schedule_delayed_window_close(app: AppHandle, label: &'static str) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        if let Some(win) = app.get_webview_window(label) {
+            let _ = win.close();
+        }
+    });
+}
+
 /// Fallback WebView2 stream grabber guarded by `WEBVIEW_GRABBER_LOCK`.
-/// Ensures two concurrent workers never collide trying to create `"stream-grabber"` at the same time,
-/// closes any stale `"stream-grabber"` window, and waits 250ms before building a new one.
+/// Uses a persistent `<app_data_dir>/grabber_webview_profile` and native Win11 Edge UA with zero
+/// automation overrides so Cloudflare Turnstile passes cleanly, and intercepts file downloads via
+/// Tauri `.on_download` with full `Referer` + session cookies.
 async fn capture_stream_via_webview(
     app: &AppHandle,
     page_url: &str,
@@ -3482,18 +3509,16 @@ async fn capture_stream_via_webview(
             stream_url: page_url.to_string(),
             referer: page_url.to_string(),
             cookie: String::new(),
-            user_agent: get_session_user_agent().to_string(),
+            user_agent: WIN11_EDGE_USER_AGENT.to_string(),
             suggested_filename: None,
         });
     }
-    if let Some(resp) =
-        probe_direct_stream(page_url, page_url, "", get_session_user_agent()).await
-    {
+    if let Some(resp) = probe_direct_stream(page_url, page_url, "", WIN11_EDGE_USER_AGENT).await {
         return Ok(ResolvedStreamInfo {
             stream_url: resp.url().to_string(),
             referer: page_url.to_string(),
             cookie: collect_cookies(&resp),
-            user_agent: get_session_user_agent().to_string(),
+            user_agent: WIN11_EDGE_USER_AGENT.to_string(),
             suggested_filename: None,
         });
     }
@@ -3502,277 +3527,172 @@ async fn capture_stream_via_webview(
 
     for label in ["stream-grabber", "grabber"] {
         if let Some(existing) = app.get_webview_window(label) {
-            let _ = existing.clear_all_browsing_data();
             let _ = existing.close();
-            let _ = existing.destroy();
         }
     }
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     let parsed_url = validate_external_http_url(page_url)?;
-    let initial_host = parsed_url.host_str().unwrap_or("").to_lowercase();
-    let initial_path = parsed_url.path().to_string();
-    let escaped_target = page_url.replace('\'', "\\'");
-    let session_ua = get_session_user_agent().to_string();
-    let session_ua_nav = session_ua.clone();
+    let initial_url_str = parsed_url.to_string();
+    let profile_dir = get_grabber_webview_profile_dir(app)?;
+    let last_page_url = Arc::new(Mutex::new(initial_url_str.clone()));
 
     let (tx, rx) = oneshot::channel::<ResolvedStreamInfo>();
     let tx_shared = Arc::new(Mutex::new(Some(tx)));
+
+    let tx_for_dl = Arc::clone(&tx_shared);
+    let last_page_dl = Arc::clone(&last_page_url);
+    let app_for_dl = app.clone();
+
     let tx_for_nav = Arc::clone(&tx_shared);
+    let last_page_nav = Arc::clone(&last_page_url);
+    let app_for_nav = app.clone();
 
-    let init_js = format!(
-        r#"
-      (function() {{
-        const TARGET_HOST_URL = '{}';
-        let hasSentToRust = false;
-
-        function sendToRust(rawUrl) {{
-          if (hasSentToRust || !rawUrl) return;
-          let fullUrl = String(rawUrl).trim();
-          if (fullUrl.startsWith('//')) {{
-            fullUrl = 'https:' + fullUrl;
-          }} else if (fullUrl.startsWith('/')) {{
-            fullUrl = window.location.origin + fullUrl;
-          }}
-          if (!fullUrl.startsWith('http://') && !fullUrl.startsWith('https://')) return;
-          if (fullUrl === window.location.href) return;
-
-          const lower = fullUrl.toLowerCase();
-          const ads = ['doubleclick', 'googlesyndication', 'popads', 'popcash', 'propellerads', 'exoclick', 'trafficjunky', 'adsterra'];
-          if (ads.some(a => lower.includes(a))) return;
-
-          hasSentToRust = true;
-          const cleanTitle = (document.title || '').split(' - ')[0].split(' | ')[0].replace('Download ', '').trim();
-          const bridgeUrl = 'https://duke-capture.local/?url=' + encodeURIComponent(fullUrl)
-            + '&name=' + encodeURIComponent(cleanTitle)
-            + '&cookie=' + encodeURIComponent(document.cookie || '')
-            + '&ref=' + encodeURIComponent(window.location.href || TARGET_HOST_URL);
-
-          try {{
-            localStorage.clear();
-            sessionStorage.clear();
-          }} catch (_) {{}}
-          window.location.replace(bridgeUrl);
-        }}
-
-        window.open = function(url) {{
-          if (url && typeof url === 'string') {{
-            const s = url.trim();
-            if (s.startsWith('http')) {{
-              sendToRust(s);
-            }}
-          }}
-          return {{ closed: false, focus: function(){{}}, close: function(){{}}, location: {{}} }};
-        }};
-
-        if (navigator.clipboard && navigator.clipboard.writeText) {{
-          const origWrite = navigator.clipboard.writeText.bind(navigator.clipboard);
-          navigator.clipboard.writeText = async function(text) {{
-            try {{ await origWrite(text); }} catch (_) {{}}
-            if (text && String(text).trim().startsWith('http')) {{
-              sendToRust(String(text).trim());
-            }}
-          }};
-        }}
-
-        const origSend = XMLHttpRequest.prototype.send;
-        XMLHttpRequest.prototype.send = function(...args) {{
-          this.addEventListener('readystatechange', function() {{
-            if (this.readyState === 4) {{
-              const hxRedir = this.getResponseHeader('hx-redirect') || this.getResponseHeader('HX-Redirect') || this.getResponseHeader('location');
-              if (hxRedir && hxRedir.length > 1) {{
-                sendToRust(hxRedir);
-              }}
-            }}
-          }});
-          return origSend.apply(this, args);
-        }};
-
-        const origFetch = window.fetch;
-        window.fetch = async function(...args) {{
-          const resp = await origFetch.apply(this, args);
-          try {{
-            const hxRedir = resp.headers && (resp.headers.get('hx-redirect') || resp.headers.get('HX-Redirect') || resp.headers.get('location'));
-            if (hxRedir && hxRedir.length > 1) {{
-              sendToRust(hxRedir);
-              return resp;
-            }}
-            if (resp.redirected && resp.url && resp.url !== window.location.href && !resp.url.endsWith('/download')) {{
-              sendToRust(resp.url);
-            }}
-          }} catch (_) {{}}
-          return resp;
-        }};
-
-        async function triggerHtmxDownloadPath(dlPath) {{
-          if (!dlPath) return;
-          try {{
-            const r = await origFetch(dlPath, {{
-              method: 'GET',
-              headers: {{ 'HX-Request': 'true', 'HX-Current-URL': window.location.href }},
-              credentials: 'include',
-              redirect: 'follow'
-            }});
-            const hx = r.headers.get('hx-redirect') || r.headers.get('HX-Redirect') || r.headers.get('location');
-            if (hx && hx.length > 1) {{
-              sendToRust(hx);
-              return;
-            }}
-            if (r.redirected && r.url && !r.url.endsWith('/download')) {{
-              sendToRust(r.url);
-            }}
-          }} catch (_) {{}}
-        }}
-
-        document.addEventListener('click', function(e) {{
-          const el = e.target.closest('a, button, [hx-get]');
-          if (!el) return;
-          if (el.tagName === 'A' && el.getAttribute('target') === '_blank') {{
-            el.removeAttribute('target');
-          }}
-          const hxGet = el.getAttribute('hx-get') || el.getAttribute('data-hx-get');
-          if (hxGet && hxGet.includes('download')) {{
-            e.preventDefault();
-            triggerHtmxDownloadPath(hxGet);
-            return;
-          }}
-          const href = el.getAttribute('href');
-          if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {{
-            const lowerHref = href.toLowerCase();
-            if (/\.(rar|7z|zip|iso|exe|bin|tar|gz)(\?|$)/i.test(lowerHref) || lowerHref.includes('fileditchfiles.me/') || lowerHref.includes('token=')) {{
-              e.preventDefault();
-              sendToRust(href);
-            }} else if (lowerHref.endsWith('/download')) {{
-              e.preventDefault();
-              triggerHtmxDownloadPath(href);
-            }}
-          }}
-        }}, true);
-
-        window.addEventListener('DOMContentLoaded', () => {{
-          const host = window.location.hostname.toLowerCase();
-
-          const banner = document.createElement('div');
-          banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:999999;background:#5c7e10;color:#ffffff;padding:10px 16px;font-family:Segoe UI,sans-serif;font-size:13px;font-weight:800;text-align:center;';
-          banner.textContent = 'DUKE STREAM GRABBER ACTIVE - Auto-capturing stream (Session data is wiped automatically upon capture)';
-          document.body.appendChild(banner);
-
-          setTimeout(() => {{
-            if (host.includes('bzzhr') || host.includes('buzzheavier') || host.includes('bhvr')) {{
-              const hxEl = document.querySelector('[hx-get*="/download"], [data-hx-get*="/download"]');
-              const dlPath = hxEl ? (hxEl.getAttribute('hx-get') || hxEl.getAttribute('data-hx-get')) : (window.location.pathname.replace(/\/$/, '') + '/download');
-              triggerHtmxDownloadPath(dlPath);
-            }}
-          }}, 450);
-        }});
-      }})();
-    "#,
-        escaped_target
-    );
+    let app_for_new = app.clone();
+    let tx_for_close = Arc::clone(&tx_shared);
 
     let grabber = WebviewWindowBuilder::new(
         app,
-        "stream-grabber",
+        "grabber",
         WebviewUrl::External(parsed_url),
     )
     .title("Duke Stream Grabber")
-    .inner_size(860.0, 560.0)
+    .inner_size(960.0, 640.0)
     .center()
-    .user_agent(&session_ua)
-    .initialization_script(&init_js)
+    .data_directory(profile_dir)
+    .user_agent(WIN11_EDGE_USER_AGENT)
+    .on_new_window(move |target_url, _features| {
+        let target_str = target_url.as_str();
+        if !is_ad_or_tracker_url(target_str) {
+            if let Some(win) = app_for_new.get_webview_window("grabber") {
+                let _ = win.navigate(target_url);
+            }
+        }
+        NewWindowResponse::Deny
+    })
+    .on_download(move |webview, event| match event {
+        DownloadEvent::Requested { url, destination } => {
+            let dl_url = url.to_string();
+            if is_ad_or_tracker_url(&dl_url) {
+                return false;
+            }
+            let referer = webview
+                .url()
+                .ok()
+                .map(|u| u.to_string())
+                .filter(|s| s.starts_with("http"))
+                .or_else(|| {
+                    last_page_dl
+                        .lock()
+                        .ok()
+                        .map(|g| g.clone())
+                        .filter(|s| !s.is_empty())
+                })
+                .unwrap_or_else(|| initial_url_str.clone());
+            let cookie = collect_cookies_from_webview(&webview, &url, Some(&referer));
+            let suggested = destination
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string());
+            let display_name = derive_filename(&dl_url, suggested.as_deref(), None);
+
+            if let Ok(mut guard) = tx_for_dl.lock() {
+                if let Some(sender) = guard.take() {
+                    let _ = sender.send(ResolvedStreamInfo {
+                        stream_url: dl_url.clone(),
+                        referer,
+                        cookie,
+                        user_agent: WIN11_EDGE_USER_AGENT.to_string(),
+                        suggested_filename: suggested,
+                    });
+                }
+            }
+            let _ = app_for_dl.emit(
+                "grabber-download-redirect",
+                DirectoryDownloadInterceptPayload {
+                    url: dl_url,
+                    file_name: display_name,
+                    site_title: "Duke Stream Grabber".to_string(),
+                },
+            );
+            let _ = webview.window().hide();
+            schedule_delayed_window_close(app_for_dl.clone(), "grabber");
+            false
+        }
+        DownloadEvent::Finished { .. } => false,
+        _ => true,
+    })
     .on_navigation(move |nav_url: &Url| -> bool {
         let nav_str = nav_url.as_str();
-        let nav_host = nav_url.host_str().unwrap_or("").to_lowercase();
-        let nav_path = nav_url.path();
-
-        if nav_host == "duke-capture.local" {
-            let mut stream_url = None;
-            let mut filename = None;
-            let mut cookie = None;
-            let mut referer = None;
-
-            for (k, v) in nav_url.query_pairs() {
-                let val = v.into_owned();
-                if val.trim().is_empty() {
-                    continue;
-                }
-                match k.as_ref() {
-                    "url" => stream_url = Some(val),
-                    "name" => filename = Some(val),
-                    "cookie" => cookie = Some(val),
-                    "ref" => referer = Some(val),
-                    _ => {}
-                }
-            }
-
-            if let Some(u) = stream_url {
-                if let Ok(mut guard) = tx_for_nav.lock() {
-                    if let Some(sender) = guard.take() {
-                        let _ = sender.send(ResolvedStreamInfo {
-                            stream_url: u,
-                            referer: referer
-                                .unwrap_or_else(|| format!("https://{}/", initial_host)),
-                            cookie: cookie.unwrap_or_default(),
-                            user_agent: session_ua_nav.clone(),
-                            suggested_filename: filename,
-                        });
-                    }
-                }
-            }
+        if is_ad_or_tracker_url(nav_str) {
             return false;
         }
 
-        let blocked_ads = [
-            "doubleclick",
-            "googlesyndication",
-            "adservice",
-            "popads",
-            "popcash",
-            "propellerads",
-            "linkvertise",
-            "exoclick",
-            "trafficjunky",
-            "adsterra",
-        ];
-        if blocked_ads.iter().any(|ad| nav_host.contains(ad)) {
-            return false;
-        }
+        if is_direct_cdn_binary_url(nav_str) {
+            let referer = last_page_nav
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| nav_str.to_string());
+            let cookie = app_for_nav
+                .get_webview_window("grabber")
+                .map(|win| collect_cookies_from_window(&win, nav_url, Some(&referer)))
+                .unwrap_or_default();
+            let display_name = derive_filename(nav_str, None, None);
 
-        if nav_host == initial_host && nav_path == initial_path {
-            return true;
-        }
-
-        if nav_host != initial_host || nav_path != initial_path {
             if let Ok(mut guard) = tx_for_nav.lock() {
                 if let Some(sender) = guard.take() {
                     let _ = sender.send(ResolvedStreamInfo {
                         stream_url: nav_str.to_string(),
-                        referer: format!("https://{}{}", initial_host, initial_path),
-                        cookie: String::new(),
-                        user_agent: session_ua_nav.clone(),
+                        referer,
+                        cookie,
+                        user_agent: WIN11_EDGE_USER_AGENT.to_string(),
                         suggested_filename: None,
                     });
+                    let _ = app_for_nav.emit(
+                        "grabber-download-redirect",
+                        DirectoryDownloadInterceptPayload {
+                            url: nav_str.to_string(),
+                            file_name: display_name,
+                            site_title: "Duke Stream Grabber".to_string(),
+                        },
+                    );
+                    if let Some(win) = app_for_nav.get_webview_window("grabber") {
+                        let _ = win.hide();
+                    }
+                    schedule_delayed_window_close(app_for_nav.clone(), "grabber");
                     return false;
                 }
             }
         }
 
+        if let Ok(mut guard) = last_page_nav.lock() {
+            *guard = nav_str.to_string();
+        }
         true
     })
     .build()
     .map_err(|e| format!("Failed to open Stream Grabber: {}", e))?;
 
-    let result = match tokio::time::timeout(Duration::from_secs(120), rx).await {
+    grabber.on_window_event(move |event| {
+        if matches!(
+            event,
+            WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed
+        ) {
+            if let Ok(mut guard) = tx_for_close.lock() {
+                guard.take();
+            }
+        }
+    });
+
+    let result = match tokio::time::timeout(Duration::from_secs(180), rx).await {
         Ok(Ok(captured)) => {
-            let _ = grabber.clear_all_browsing_data();
             let _ = grabber.close();
-            let _ = grabber.destroy();
             Ok(captured)
         }
         _ => {
-            let _ = grabber.clear_all_browsing_data();
             let _ = grabber.close();
-            let _ = grabber.destroy();
             Err("Stream Grabber closed before a download link was captured.".to_string())
         }
     };
@@ -3890,142 +3810,19 @@ async fn open_directory_browser(
         return Ok(());
     }
 
-    let session_ua = get_session_user_agent().to_string();
+    let profile_dir = get_grabber_webview_profile_dir(&app)?;
     let initial_url_str = parsed_url.to_string();
     let last_page_url = Arc::new(Mutex::new(initial_url_str));
-
-    let browser_init_js = r#"
-      (function() {
-        let lastSentAt = 0;
-        let lastSentUrl = '';
-
-        const ADS = [
-          'doubleclick', 'googlesyndication', 'googleadservices', 'adservice',
-          'popads', 'popcash', 'propellerads', 'linkvertise', 'exoclick',
-          'trafficjunky', 'adsterra', 'hilltopads', 'clickadu', 'monetag',
-          'adnxs', 'taboola', 'outbrain', 'mgid', 'revcontent', 'juicyads', 'tsyndicate'
-        ];
-
-        function isAdUrl(u) {
-          if (!u) return false;
-          const lower = String(u).toLowerCase();
-          return ADS.some(a => lower.includes(a));
-        }
-
-        function isDirectArchiveOrInstaller(rawUrl) {
-          const lower = String(rawUrl || '').trim().toLowerCase();
-          if (
-            lower.includes('ts.bzzhr.to/d/') ||
-            lower.includes('bzzhr.to/d/') ||
-            lower.includes('buzzheavier.com/d/') ||
-            lower.includes('bhvr.net/d/') ||
-            lower.includes('pixeldrain.com/api/file/') ||
-            (lower.includes('fileditchfiles.me/') && !lower.endsWith('.html'))
-          ) {
-            return true;
-          }
-          const clean = lower.split('#')[0].split('?')[0];
-          return /\.(zip|rar|7z|iso|exe|msi|bin|tar|gz|tgz|xz|7z\.001|zip\.001|part\d+\.rar)$/i.test(clean);
-        }
-
-        function sendDownloadToDuke(rawUrl, suggestedName) {
-          if (!rawUrl) return;
-          let fullUrl = String(rawUrl).trim();
-          if (fullUrl.startsWith('//')) {
-            fullUrl = 'https:' + fullUrl;
-          } else if (fullUrl.startsWith('/')) {
-            fullUrl = window.location.origin + fullUrl;
-          }
-          if (!fullUrl.startsWith('http://') && !fullUrl.startsWith('https://')) return;
-          if (isAdUrl(fullUrl)) return;
-
-          const now = Date.now();
-          if (fullUrl === lastSentUrl && now - lastSentAt < 2500) return;
-          lastSentUrl = fullUrl;
-          lastSentAt = now;
-
-          const cleanTitle = (suggestedName || document.title || '')
-            .split(' - ')[0]
-            .split(' | ')[0]
-            .replace(/^Download\s+/i, '')
-            .trim();
-
-          const bridgeUrl = 'https://duke-capture.local/?url=' + encodeURIComponent(fullUrl)
-            + '&name=' + encodeURIComponent(cleanTitle)
-            + '&cookie=' + encodeURIComponent(document.cookie || '')
-            + '&ref=' + encodeURIComponent(window.location.href || '');
-          window.location.href = bridgeUrl;
-        }
-
-        window.open = function(url) {
-          if (url && typeof url === 'string') {
-            const trimmed = url.trim();
-            if (trimmed.startsWith('http') && !isAdUrl(trimmed)) {
-              if (isDirectArchiveOrInstaller(trimmed)) {
-                sendDownloadToDuke(trimmed);
-              } else {
-                window.location.assign(trimmed);
-              }
-            }
-          }
-          return { closed: false, focus: function(){}, close: function(){}, location: {} };
-        };
-
-        document.addEventListener('click', function(e) {
-          const el = e.target && e.target.closest ? e.target.closest('a, [href]') : null;
-          if (!el) return;
-          if (el.tagName === 'A' && el.getAttribute('target') === '_blank') {
-            el.removeAttribute('target');
-          }
-          const href = el.getAttribute('href');
-          if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
-          let resolved = href;
-          try { resolved = new URL(href, window.location.href).href; } catch (_) {}
-          if (isAdUrl(resolved)) {
-            e.preventDefault();
-            e.stopPropagation();
-            return;
-          }
-          if (isDirectArchiveOrInstaller(resolved) || el.hasAttribute('download')) {
-            e.preventDefault();
-            e.stopPropagation();
-            sendDownloadToDuke(resolved, el.getAttribute('download') || '');
-          }
-        }, true);
-
-        window.addEventListener('DOMContentLoaded', function() {
-          try {
-            const style = document.createElement('style');
-            style.textContent = [
-              'iframe[src*="doubleclick"], iframe[src*="googlesyndication"], iframe[src*="adsterra"],',
-              'iframe[src*="exoclick"], ins.adsbygoogle, [class*="popunder"], [id*="popunder"] {',
-              '  display: none !important; visibility: hidden !important; pointer-events: none !important;',
-              '}'
-            ].join('\n');
-            (document.head || document.documentElement).appendChild(style);
-
-            const badge = document.createElement('div');
-            badge.style.cssText = 'position:fixed;right:14px;bottom:14px;z-index:2147483647;background:rgba(16,22,30,0.92);color:#e8edf5;border:1px solid rgba(56,189,248,0.45);border-radius:999px;padding:6px 12px;font-family:"Segoe UI",sans-serif;font-size:12px;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,0.45);display:flex;align-items:center;gap:8px;backdrop-filter:blur(8px);';
-            badge.textContent = 'Duke Safe Browser • Ad-Shield & 8-Worker Auto-Grab';
-            badge.title = 'Click any archive, installer, or download button to queue directly into Duke Downloads';
-            badge.addEventListener('click', function() { badge.remove(); });
-            document.body && document.body.appendChild(badge);
-          } catch (_) {}
-        });
-      })();
-    "#;
 
     let app_for_nav = app.clone();
     let save_dir_nav = custom_save_dir.clone();
     let speed_nav = max_speed_mbps;
-    let ua_nav = session_ua.clone();
     let last_page_nav = Arc::clone(&last_page_url);
     let site_title_nav = display_title.clone();
 
     let app_for_dl = app.clone();
     let save_dir_dl = custom_save_dir;
     let speed_dl = max_speed_mbps;
-    let ua_dl = session_ua.clone();
     let last_page_dl = Arc::clone(&last_page_url);
     let site_title_dl = display_title;
 
@@ -4040,8 +3837,8 @@ async fn open_directory_browser(
     .inner_size(1200.0, 800.0)
     .min_inner_size(820.0, 560.0)
     .center()
-    .user_agent(&session_ua)
-    .initialization_script(browser_init_js)
+    .data_directory(profile_dir)
+    .user_agent(WIN11_EDGE_USER_AGENT)
     .on_new_window(move |target_url, _features| {
         let target_str = target_url.as_str();
         if !is_ad_or_tracker_url(target_str) {
@@ -4051,7 +3848,7 @@ async fn open_directory_browser(
         }
         NewWindowResponse::Deny
     })
-    .on_download(move |_webview, event| match event {
+    .on_download(move |webview, event| match event {
         DownloadEvent::Requested { url, destination } => {
             let dl_url = url.to_string();
             if is_ad_or_tracker_url(&dl_url) {
@@ -4061,70 +3858,40 @@ async fn open_directory_browser(
                 .file_name()
                 .and_then(|n| n.to_str())
                 .map(|s| s.to_string());
-            let referer = last_page_dl
-                .lock()
+            let referer = webview
+                .url()
                 .ok()
-                .map(|g| g.clone())
-                .filter(|s| !s.is_empty());
+                .map(|u| u.to_string())
+                .filter(|s| s.starts_with("http"))
+                .or_else(|| {
+                    last_page_dl
+                        .lock()
+                        .ok()
+                        .map(|g| g.clone())
+                        .filter(|s| !s.is_empty())
+                });
+            let cookie = collect_cookies_from_webview(&webview, &url, referer.as_deref());
             spawn_intercepted_directory_download(
                 app_for_dl.clone(),
                 dl_url,
                 referer,
-                None,
-                ua_dl.clone(),
+                (!cookie.is_empty()).then_some(cookie),
+                WIN11_EDGE_USER_AGENT.to_string(),
                 suggested,
                 save_dir_dl.clone(),
                 speed_dl,
                 true,
                 site_title_dl.clone(),
             );
+            let _ = webview.window().hide();
+            schedule_delayed_window_close(app_for_dl.clone(), "directory-browser");
             false
         }
-        DownloadEvent::Finished { .. } => true,
+        DownloadEvent::Finished { .. } => false,
         _ => true,
     })
     .on_navigation(move |nav_url: &Url| -> bool {
         let nav_str = nav_url.as_str();
-        let nav_host = nav_url.host_str().unwrap_or("").to_lowercase();
-
-        if nav_host == "duke-capture.local" {
-            let mut stream_url = None;
-            let mut filename = None;
-            let mut cookie = None;
-            let mut referer = None;
-
-            for (k, v) in nav_url.query_pairs() {
-                let val = v.into_owned();
-                if val.trim().is_empty() {
-                    continue;
-                }
-                match k.as_ref() {
-                    "url" => stream_url = Some(val),
-                    "name" => filename = Some(val),
-                    "cookie" => cookie = Some(val),
-                    "ref" => referer = Some(val),
-                    _ => {}
-                }
-            }
-
-            if let Some(u) = stream_url {
-                let mark_pre = is_direct_cdn_binary_url(&u);
-                spawn_intercepted_directory_download(
-                    app_for_nav.clone(),
-                    u,
-                    referer,
-                    cookie,
-                    ua_nav.clone(),
-                    filename,
-                    save_dir_nav.clone(),
-                    speed_nav,
-                    mark_pre,
-                    site_title_nav.clone(),
-                );
-            }
-            return false;
-        }
-
         if is_ad_or_tracker_url(nav_str) {
             return false;
         }
@@ -4135,18 +3902,26 @@ async fn open_directory_browser(
                 .ok()
                 .map(|g| g.clone())
                 .filter(|s| !s.is_empty());
+            let cookie = app_for_nav
+                .get_webview_window("directory-browser")
+                .map(|win| collect_cookies_from_window(&win, nav_url, referer.as_deref()))
+                .unwrap_or_default();
             spawn_intercepted_directory_download(
                 app_for_nav.clone(),
                 nav_str.to_string(),
                 referer,
-                None,
-                ua_nav.clone(),
+                (!cookie.is_empty()).then_some(cookie),
+                WIN11_EDGE_USER_AGENT.to_string(),
                 None,
                 save_dir_nav.clone(),
                 speed_nav,
                 true,
                 site_title_nav.clone(),
             );
+            if let Some(win) = app_for_nav.get_webview_window("directory-browser") {
+                let _ = win.hide();
+            }
+            schedule_delayed_window_close(app_for_nav.clone(), "directory-browser");
             return false;
         }
 
@@ -4788,7 +4563,13 @@ async fn execute_resumable_matrix_job(
         && can_multi
         && job.total_bytes > 22
     {
-        stream_extract::prefetch_zip_remote_plan(&doh_burst_client, &job.resolved_url, job.total_bytes)
+        stream_extract::prefetch_zip_remote_plan(
+            &doh_burst_client,
+            &job.resolved_url,
+            job.total_bytes,
+            &job.referer,
+            &job.cookie,
+        )
             .await
             .map(Arc::new)
     } else {
@@ -6598,31 +6379,90 @@ async fn get_download_jobs(
 
 #[tauri::command]
 async fn auto_fix_all_covers(app: AppHandle) -> Result<Vec<GameEntry>, String> {
-    let mut library = load_library_from_disk(&app)?;
-    let mut updated_ids = Vec::new();
-    for entry in &mut library {
-        let (cover, app_id, matched_title) =
-            smart_find_game_cover(&entry.title, &entry.exe_path, &entry.install_dir).await;
-        if !cover.is_empty() {
-            entry.cover_url = cover;
-            if let Some(sid) = app_id {
-                entry.steam_app_id = Some(sid);
-                entry.app_id = u32::try_from(sid).ok();
+    let mut lib = tokio::task::spawn_blocking({
+        let app_c = app.clone();
+        move || load_library_from_disk(&app_c)
+    })
+    .await
+    .map_err(|e| format!("Failed loading library: {e}"))??;
+
+    let covers_dir = get_covers_dir(&app)?;
+    let icons_dir = sidebar_icons::get_sidebar_icons_dir(&app)?;
+    let api_key = load_settings_from_disk(&app)
+        .steamgriddb_api_key
+        .unwrap_or_default();
+    let sem = Arc::new(Semaphore::new(4));
+    let mut join_set = tokio::task::JoinSet::new();
+
+    for entry in &lib {
+        let covers_c = covers_dir.clone();
+        let icons_c = icons_dir.clone();
+        let sem_c = sem.clone();
+        let key_c = api_key.clone();
+        let entry_c = entry.clone();
+
+        join_set.spawn(async move {
+            let _permit = sem_c.acquire_owned().await.ok()?;
+            let (inferred_pid, plat_hint) = artwork::infer_game_platform_hint(
+                &entry_c.title,
+                &entry_c.exe_path,
+                &entry_c.genre,
+                &entry_c.source,
+            );
+            let eff_pid = (entry_c.platform_id > 0)
+                .then_some(entry_c.platform_id)
+                .or(inferred_pid);
+            let steam_aid = entry_c
+                .app_id
+                .or_else(|| entry_c.steam_app_id.and_then(|v| u32::try_from(v).ok()));
+
+            // Verify existing local cover file or resolve via cascading 4-tier pipeline + 32x32 sidebar icon
+            let req = artwork::CoverResolveRequest {
+                cache_id: entry_c.id.clone(),
+                title: entry_c.title.clone(),
+                platform_id: eff_pid,
+                platform_hint: plat_hint,
+                steam_app_id: steam_aid,
+                existing_cover_url: (!entry_c.cover_url.trim().is_empty())
+                    .then(|| entry_c.cover_url.trim().to_string()),
+                steamgriddb_api_key: key_c,
+                sidebar_icon_id: Some(entry_c.id.clone()),
+            };
+            let outcome = artwork::resolve_and_cache_cover_in_dirs(&req, &covers_c, &icons_c).await;
+            if let Some(ref out) = outcome {
+                return Some((entry_c.id, out.cover_path.to_string_lossy().to_string()));
             }
-            if let Some(real_name) = matched_title {
-                if entry.title.len() <= 12 || !entry.title.contains(' ') {
-                    entry.title = real_name;
-                }
-            }
-            updated_ids.push(entry.id.clone());
+            // Even when no remote cover image was found, still extract/generate 32x32 sidebar icon from .exe
+            let src = sidebar_icons::SidebarIconSource::from(&entry_c);
+            let _ = sidebar_icons::resolve_sidebar_icon_in_dirs(&src, &icons_c, &covers_c);
+            None
+        });
+    }
+
+    let mut updated_map: HashMap<String, String> = HashMap::new();
+    while let Some(res) = join_set.join_next().await {
+        if let Ok(Some((gid, cover_path))) = res {
+            updated_map.insert(gid, cover_path);
         }
     }
-    save_library_to_disk(&app, &library)?;
-    for gid in &updated_ids {
-        sidebar_icons::invalidate_sidebar_icon(&app, gid);
+
+    let mut changed = false;
+    for entry in &mut lib {
+        if let Some(new_cover) = updated_map.get(&entry.id) {
+            if entry.cover_url != *new_cover {
+                entry.cover_url = new_cover.clone();
+                changed = true;
+            }
+        }
     }
+
+    if changed {
+        save_library_to_disk(&app, &lib)?;
+    }
+    let _ = app.emit("library-updated", &lib);
+    let _ = app.emit("sidebar-icons-updated", ());
     trim_process_working_set();
-    Ok(library)
+    Ok(lib)
 }
 
 #[tauri::command]
@@ -6633,13 +6473,28 @@ async fn find_and_apply_cover(
 ) -> Result<Vec<GameEntry>, String> {
     let mut library = load_library_from_disk(&app)?;
     let mut updated_id: Option<String> = None;
+    let has_custom_query = custom_query
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    if has_custom_query {
+        if let Ok(covers_dir) = get_covers_dir(&app) {
+            artwork::clear_cached_cover_for_id(&covers_dir, &id);
+        }
+    }
     if let Some(entry) = library.iter_mut().find(|g| g.id == id) {
         let search_title = custom_query
             .filter(|q| !q.trim().is_empty())
             .unwrap_or_else(|| entry.title.clone());
 
-        let (cover, app_id, matched_name) =
-            smart_find_game_cover(&search_title, &entry.exe_path, &entry.install_dir).await;
+        let (cover, app_id, matched_name) = smart_find_game_cover(
+            &app,
+            &entry.id,
+            &search_title,
+            &entry.exe_path,
+            &entry.install_dir,
+        )
+        .await;
 
         if !cover.is_empty() {
             entry.cover_url = cover;
@@ -6661,6 +6516,8 @@ async fn find_and_apply_cover(
     if let Some(gid) = updated_id {
         sidebar_icons::invalidate_sidebar_icon(&app, &gid);
     }
+    let _ = app.emit("library-updated", &library);
+    let _ = app.emit("sidebar-icons-updated", ());
     trim_process_working_set();
     Ok(library)
 }
@@ -7359,6 +7216,14 @@ async fn add_local_game_with_origin(
         .await
         .map_err(|e| format!("Failed to calculate directory size: {}", e))?;
 
+    let id = format!(
+        "game_{}",
+        trimmed_path
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+    );
     let size_formatted = format_bytes(size_bytes);
     let explicit_appid = steam_app_id.filter(|&id| id > 0);
 
@@ -7371,8 +7236,14 @@ async fn add_local_game_with_origin(
                     if let Some(valid_cover) = cover_opt {
                         (valid_cover, Some(aid as u64), name_opt)
                     } else {
-                        let (fallback_cover, fallback_id, fallback_name) =
-                            smart_find_game_cover(&title, &trimmed_path, &install_dir_str).await;
+                        let (fallback_cover, fallback_id, fallback_name) = smart_find_game_cover(
+                            &app,
+                            &id,
+                            &title,
+                            &trimmed_path,
+                            &install_dir_str,
+                        )
+                        .await;
                         (
                             fallback_cover,
                             Some(aid as u64).or(fallback_id),
@@ -7380,7 +7251,7 @@ async fn add_local_game_with_origin(
                         )
                     }
                 } else {
-                    smart_find_game_cover(&title, &trimmed_path, &install_dir_str).await
+                    smart_find_game_cover(&app, &id, &title, &trimmed_path, &install_dir_str).await
                 }
             }
         };
@@ -7395,15 +7266,6 @@ async fn add_local_game_with_origin(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-
-    let id = format!(
-        "game_{}",
-        trimmed_path
-            .to_lowercase()
-            .chars()
-            .filter(|c| c.is_alphanumeric())
-            .collect::<String>()
-    );
 
     let mut app_id_u32 =
         explicit_appid.or_else(|| detected_steam_app_id.and_then(|sid| u32::try_from(sid).ok()));
@@ -8249,7 +8111,7 @@ async fn launch_game_internal(
             });
         }
 
-        let _ = child.wait().await;
+        let exit_code_opt = child.wait().await.ok().and_then(|st| st.code());
 
         // If the launched process acted as a bootstrapper and spawned child game processes,
         // keep tracking playtime until every descendant process in the Job Object exits.
@@ -8263,6 +8125,34 @@ async fn launch_game_internal(
                     duke_core::win32_ffi::apply_cpu_priority_mode(&remaining_pids, &cpu_mode_loop);
                 }
                 tokio::time::sleep(Duration::from_millis(450)).await;
+            }
+        }
+
+        // Fast crash auto-diagnosis (< 5s exit with known Windows NTSTATUS failure codes)
+        let raw_elapsed = session_instant.elapsed();
+        if raw_elapsed < Duration::from_secs(5) {
+            if let Some(code) = exit_code_opt {
+                if let Some((nt_hex, nt_desc)) = self_heal::is_crash_ntstatus(code) {
+                    if let Some(ref heal_gid) = gid_after {
+                        if let Ok(fix_report) =
+                            auto_fix_game(app_after.clone(), heal_gid.clone()).await
+                        {
+                            let _ = app_after.emit(
+                                "game-crash-healed",
+                                serde_json::json!({
+                                    "gameId": heal_gid,
+                                    "title": game_title_after,
+                                    "exePath": path_after,
+                                    "exitCodeHex": nt_hex,
+                                    "diagnosis": nt_desc,
+                                    "summary": fix_report.summary,
+                                    "healedDlls": fix_report.healed_dlls,
+                                    "unblockedFiles": fix_report.unblocked_files
+                                }),
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -12259,6 +12149,45 @@ async fn auto_fix_game(app: AppHandle, game_id: String) -> Result<AutoFixReport,
             )?;
             healed_dlls = heal.copied_dlls;
             unresolved_dlls = heal.skipped_dlls;
+
+            if !unresolved_dlls.is_empty() {
+                if let Some(repair_note) =
+                    self_heal::try_silent_redist_repair(&game_dir, &unresolved_dlls, preflight.is_32bit)
+                {
+                    if let Ok(re_check) = pe_inspect::inspect_exe_with_dirs(&exe_path, None, &[]) {
+                        let rem: Vec<String> = re_check
+                            .missing_dlls
+                            .iter()
+                            .map(|d| d.name.clone())
+                            .collect();
+                        if let Ok(re_heal) =
+                            pe_inspect::heal_missing_dlls_into_game_dir(&exe_path, Some(&rem), None, &[])
+                        {
+                            for c in re_heal.copied_dlls {
+                                if !healed_dlls.contains(&c) {
+                                    healed_dlls.push(c);
+                                }
+                            }
+                            unresolved_dlls = re_heal.skipped_dlls;
+                        } else {
+                            unresolved_dlls = rem;
+                        }
+                    }
+                    if !repair_note.is_empty() && !healed_dlls.iter().any(|x| x == &repair_note) {
+                        healed_dlls.push(repair_note);
+                    }
+                }
+            }
+        }
+
+        let mut enabled_laa_32bit = false;
+        if preflight.is_32bit {
+            let eff_size = library[game_idx].size_bytes.max(calculate_dir_size_sync(&game_dir));
+            if self_heal::should_enable_32bit_laa(&exe_path, &game_dir, eff_size)
+                && matches!(pe_inspect::set_pe_large_address_aware(&exe_path, true), Ok(true))
+            {
+                enabled_laa_32bit = true;
+            }
         }
 
         let env_map = pe_inspect::prepare_game_sandbox_env(&game_dir)?;
@@ -12293,6 +12222,11 @@ async fn auto_fix_game(app: AppHandle, game_id: String) -> Result<AutoFixReport,
                 unresolved_dlls.len(),
                 unresolved_dlls.join(", ")
             ));
+        }
+        if enabled_laa_32bit {
+            parts.push(
+                "enabled 4 GB Large Address Aware flag for >1.5 GB 32-bit executable".to_string(),
+            );
         }
         parts.push("enabled isolated game save folder (.duke-profile)".to_string());
         let summary = format!("{}.", parts.join(", "));
@@ -12587,7 +12521,7 @@ async fn download_url_bytes_via_doh(url: &str, dest: &Path) -> Result<(), String
     .await;
     let resp = client
         .get(url)
-        .header(USER_AGENT, "Duke-Launcher/0.2")
+        .header(USER_AGENT, concat!("Duke-Launcher/", env!("CARGO_PKG_VERSION")))
         .send()
         .await
         .map_err(|e| format!("Download request failed: {e}"))?;
@@ -12816,7 +12750,7 @@ async fn apply_game_update(
             .await;
             let mut resp = client
                 .get(&archive_url)
-                .header(USER_AGENT, "Duke-Launcher/0.2")
+                .header(USER_AGENT, concat!("Duke-Launcher/", env!("CARGO_PKG_VERSION")))
                 .send()
                 .await
                 .map_err(|e| format!("Streaming update download failed: {e}"))?;
@@ -13472,6 +13406,9 @@ fn main() {
             }
             let _ = get_backups_dir(app.handle());
 
+            // Run non-blocking startup self-healing (.bak JSON recovery, paused download reset, orphan tmp & dkcat verification).
+            self_heal::spawn_startup_self_heal(app.handle().clone());
+
             // Non-blocking background sync of Nintendo & retro Libretro RDB catalog into `catalog.dkcat` if empty
             retro_catalog::spawn_background_retro_catalog_sync_if_needed(app.handle().clone());
 
@@ -13489,6 +13426,13 @@ fn main() {
 
             let initial_settings = load_settings_from_disk(app.handle());
             apply_runtime_settings(&initial_settings);
+
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+            }
+            if let Some(overlay) = app.get_webview_window("overlay") {
+                let _ = overlay.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+            }
 
             if std::env::args().any(|a| a == "--minimized") {
                 if let Some(win) = app.get_webview_window("main") {
@@ -13592,6 +13536,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            get_app_version,
             apply_window_backdrop,
             enqueue_download,
             install_downloaded_job,
@@ -13650,6 +13595,7 @@ fn main() {
             artwork::search_steamgriddb_artwork,
             artwork::apply_custom_artwork,
             artwork::create_desktop_shortcut_with_icon,
+            artwork::resolve_catalog_cover,
             suspend_or_resume_game,
             get_active_game_sessions,
             poll_gamepad_state,

@@ -752,6 +752,8 @@ pub async fn prefetch_zip_remote_plan(
     client: &reqwest::Client,
     url: &str,
     total_size: u64,
+    referer: &str,
+    cookie: &str,
 ) -> Option<ZipRemotePlan> {
     if total_size < 22 {
         return None;
@@ -759,12 +761,14 @@ pub async fn prefetch_zip_remote_plan(
     let tail_window = 65_557u64.min(total_size);
     let tail_start = total_size - tail_window;
     let tail_range = format!("bytes={}-{}", tail_start, total_size - 1);
-    let resp = client
-        .get(url)
-        .header(reqwest::header::RANGE, tail_range)
-        .send()
-        .await
-        .ok()?;
+    let mut tail_req = client.get(url).header(reqwest::header::RANGE, tail_range);
+    if !referer.trim().is_empty() {
+        tail_req = tail_req.header(reqwest::header::REFERER, referer.trim());
+    }
+    if !cookie.trim().is_empty() {
+        tail_req = tail_req.header(reqwest::header::COOKIE, cookie.trim());
+    }
+    let resp = tail_req.send().await.ok()?;
     if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT && !resp.status().is_success() {
         return None;
     }
@@ -776,12 +780,14 @@ pub async fn prefetch_zip_remote_plan(
         inline_cd
     } else if cd_size <= 64 * 1024 * 1024 {
         let cd_range = format!("bytes={}-{}", cd_offset, cd_offset + cd_size - 1);
-        let cd_resp = client
-            .get(url)
-            .header(reqwest::header::RANGE, cd_range)
-            .send()
-            .await
-            .ok()?;
+        let mut cd_req = client.get(url).header(reqwest::header::RANGE, cd_range);
+        if !referer.trim().is_empty() {
+            cd_req = cd_req.header(reqwest::header::REFERER, referer.trim());
+        }
+        if !cookie.trim().is_empty() {
+            cd_req = cd_req.header(reqwest::header::COOKIE, cookie.trim());
+        }
+        let cd_resp = cd_req.send().await.ok()?;
         if !cd_resp.status().is_success() {
             return None;
         }

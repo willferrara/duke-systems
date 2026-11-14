@@ -90,7 +90,7 @@ pub(crate) fn invalidate_sidebar_icon_standalone(game_id: &str) {
     }
 }
 
-fn atomic_write_png_bytes(target: &Path, data: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_write_png_bytes(target: &Path, data: &[u8]) -> Result<(), String> {
     if let Some(parent) = target.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent)

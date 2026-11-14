@@ -185,16 +185,24 @@ pub(crate) fn load_sources_from_disk_standalone() -> Vec<ImportedSourceRecord> {
     let Ok(path) = crate::get_app_data_file_standalone("sources.json") else {
         return Vec::new();
     };
+    let _ = crate::self_heal::recover_protected_json_if_corrupt(&path);
     if !path.exists() {
         return Vec::new();
     }
-    let Ok(raw) = fs::read_to_string(&path) else {
+    let Ok(raw) = crate::self_heal::read_json_with_bak_recovery(&path) else {
         return Vec::new();
     };
     if raw.trim().is_empty() {
         return Vec::new();
     }
-    serde_json::from_str::<Vec<ImportedSourceRecord>>(&raw).unwrap_or_default()
+    if let Ok(parsed) = serde_json::from_str::<Vec<ImportedSourceRecord>>(&raw) {
+        return parsed;
+    }
+    let _ = crate::self_heal::recover_protected_json_if_corrupt(&path);
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<ImportedSourceRecord>>(&s).ok())
+        .unwrap_or_default()
 }
 
 pub(crate) fn save_sources_to_disk_standalone(

@@ -28,6 +28,7 @@ import {
   formatPlaytime,
   generateFallbackCoverDataUri,
   getActiveGameSessions,
+  getAppVersion,
   getCatalogGameDetails,
   getCatalogMmapStats,
   getDiskFreeSpace,
@@ -88,6 +89,7 @@ import {
   removeImportedSource,
   removeSearchSite,
   resetDefaultSearchSites,
+  resolveCatalogCover,
   restoreGameSave,
   restoreGameSnapshot,
   runSubsystemBenchmark,
@@ -293,6 +295,133 @@ function resolveMediaUrl(rawUrl) {
   return s;
 }
 
+const CATALOG_COVER_QUEUE = [];
+const CATALOG_COVER_ATTEMPTED = new Set();
+const CATALOG_COVER_CACHE = Object.create(null);
+let catalogCoverInFlight = 0;
+const MAX_CONCURRENT_CATALOG_COVERS = 4;
+
+function resolvePlatformVisuals(platformLabel = "", source = "") {
+  const hay = `${platformLabel} ${source}`.toLowerCase();
+  if (/(nintendo|switch|wii|gamecube|3ds|nds|\bds\b|gba|gbc|game boy|n64|snes|nes|famicom)/i.test(hay)) {
+    return { tone: "nintendo", icon: "icon-gamepad-2" };
+  }
+  if (/(playstation|\bps[1-5]\b|psp|vita|sony|psn)/i.test(hay)) {
+    return { tone: "sony", icon: "icon-gamepad-2" };
+  }
+  if (/(xbox|microsoft)/i.test(hay)) {
+    return { tone: "microsoft", icon: "icon-gamepad-2" };
+  }
+  if (/(sega|dreamcast|genesis|mega drive|saturn|arcade|atari|turbografx|pc engine|retro|console)/i.test(hay)) {
+    return { tone: "retro", icon: "icon-layers" };
+  }
+  if (/(steam|valve|\bvr\b)/i.test(hay)) {
+    return { tone: "steam", icon: "icon-compass" };
+  }
+  return { tone: "pc", icon: "icon-box" };
+}
+
+function buildProceduralCoverCardHtml(title, platformLabel = "PC", source = "") {
+  const { tone, icon } = resolvePlatformVisuals(platformLabel, source);
+  const safeTitle = escapeHtml(title || "Untitled Game");
+  const safePlatform = escapeHtml(platformLabel || "PC");
+  return `
+    <div class="cover-fallback-card" data-platform-tone="${tone}">
+      <span class="cover-fallback-emblem" aria-hidden="true">${svgIcon(icon)}</span>
+      <span class="cover-fallback-title">${safeTitle}</span>
+      <span class="cover-fallback-platform">${safePlatform}</span>
+    </div>
+  `;
+}
+
+function createProceduralCoverCardEl(title, platformLabel = "PC", source = "") {
+  const { tone, icon } = resolvePlatformVisuals(platformLabel, source);
+  const wrap = document.createElement("div");
+  wrap.className = "cover-fallback-card";
+  wrap.dataset.platformTone = tone;
+
+  const emblem = document.createElement("span");
+  emblem.className = "cover-fallback-emblem";
+  emblem.setAttribute("aria-hidden", "true");
+  emblem.innerHTML = svgIcon(icon);
+
+  const titleEl = document.createElement("span");
+  titleEl.className = "cover-fallback-title";
+  titleEl.textContent = String(title || "Untitled Game");
+
+  const platEl = document.createElement("span");
+  platEl.className = "cover-fallback-platform";
+  platEl.textContent = String(platformLabel || "PC");
+
+  wrap.appendChild(emblem);
+  wrap.appendChild(titleEl);
+  wrap.appendChild(platEl);
+  return wrap;
+}
+
+function applyCachedCatalogCoverToMedia(mediaEl, imgEl, rawPath) {
+  const assetUrl = resolveMediaUrl(rawPath);
+  if (!assetUrl || !mediaEl || !mediaEl.isConnected) return;
+  const fallbackEl = mediaEl.querySelector(".cover-fallback-card");
+  if (fallbackEl) fallbackEl.remove();
+  imgEl.dataset.fallbackStage = "99";
+  imgEl.src = assetUrl;
+  imgEl.style.display = "";
+  if (!imgEl.isConnected) {
+    mediaEl.prepend(imgEl);
+  }
+}
+
+function pumpCatalogCoverQueue() {
+  while (catalogCoverInFlight < MAX_CONCURRENT_CATALOG_COVERS && CATALOG_COVER_QUEUE.length > 0) {
+    const task = CATALOG_COVER_QUEUE.shift();
+    if (!task) continue;
+    catalogCoverInFlight += 1;
+    resolveCatalogCover(task.req)
+      .then((cachedPath) => {
+        if (cachedPath) {
+          CATALOG_COVER_CACHE[task.cacheKey] = cachedPath;
+          task.entry.coverUrl = cachedPath;
+          applyCachedCatalogCoverToMedia(task.mediaEl, task.imgEl, cachedPath);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        catalogCoverInFlight = Math.max(0, catalogCoverInFlight - 1);
+        pumpCatalogCoverQueue();
+      });
+  }
+}
+
+function scheduleCatalogCoverResolve(entry, imgEl, mediaEl) {
+  const appId = Number(entry?.appId || 0);
+  if (!appId) return;
+  const isRetro = Number(entry.platformId || 0) > 0;
+  const cacheKey = isRetro ? `retro_${appId}` : String(appId);
+  if (CATALOG_COVER_CACHE[cacheKey]) {
+    applyCachedCatalogCoverToMedia(mediaEl, imgEl, CATALOG_COVER_CACHE[cacheKey]);
+    return;
+  }
+  if (CATALOG_COVER_ATTEMPTED.has(cacheKey) || CATALOG_COVER_QUEUE.length >= 32) {
+    return;
+  }
+  CATALOG_COVER_ATTEMPTED.add(cacheKey);
+  CATALOG_COVER_QUEUE.push({
+    cacheKey,
+    entry,
+    imgEl,
+    mediaEl,
+    req: {
+      appId,
+      title: entry.name || "",
+      platformId: Number(entry.platformId || 0) || null,
+      platformName: entry.platformName || null,
+      coverUrl: entry.coverUrl || entry.headerUrl || null
+    }
+  });
+  pumpCatalogCoverQueue();
+}
+
 function showToast(msg, tone = "info", durationMs = 3800) {
   const c = el("toast-container");
   if (!c) return;
@@ -461,19 +590,12 @@ function getTotalPlaytimeSecs(game) {
 }
 
 function updateSidebarTelemetry(telemetry) {
-  const totalSavedCents = state.library.reduce(
-    (acc, g) => (g?.acquisitionSource === "turbo_downloader" ? acc + Number(g.steamPriceCents || 0) : acc),
-    0
-  );
   const totalBytes = state.library.reduce((acc, g) => acc + Number(g.sizeBytes || 0), 0);
 
   if (el("nav-library-count")) el("nav-library-count").textContent = String(state.library.length);
   if (el("sidebar-list-count")) el("sidebar-list-count").textContent = String(state.library.length);
   if (el("stat-installed-count")) el("stat-installed-count").textContent = String(state.library.length);
   if (el("stat-total-size")) el("stat-total-size").textContent = formatBytesJs(totalBytes);
-  if (el("stat-money-saved")) {
-    el("stat-money-saved").textContent = `$${(totalSavedCents / 100).toFixed(2)}`;
-  }
 
   const activeDls = state.downloadJobs.filter((j) =>
     ["DOWNLOADING", "RESOLVING", "INSTALLING", "QUEUED", "SCANNING", "PAUSED"].includes(
@@ -704,8 +826,7 @@ function renderLibraryGrid() {
     .map((game) => {
       const cover =
         resolveMediaUrl(game.coverUrl) ||
-        resolveMediaUrl(game.coverDataUrl) ||
-        generateFallbackCoverDataUri(game.title, game.genre || "Installed");
+        resolveMediaUrl(game.coverDataUrl);
       const playtimeStr = formatPlaytime(getTotalPlaytimeSecs(game));
       const lastStr = formatLastPlayed(game.lastPlayedTs || game.lastPlayed);
       const favClass = game.isFavorite ? "is-fav" : "";
@@ -713,11 +834,14 @@ function renderLibraryGrid() {
       const updateBadge = game.updateAvailable
         ? `<span class="card-badge card-badge-update" title="Newer version detected on update feed">Update Available</span>`
         : "";
+      const mediaContentHtml = cover
+        ? `<img src="${escapeHtml(cover)}" alt="${escapeHtml(game.title)}" class="game-card-img" loading="lazy" />`
+        : buildProceduralCoverCardHtml(game.title, sourceLabel, game.source || "");
 
       return `
         <article class="game-card" data-game-id="${escapeHtml(game.id)}">
           <div class="game-card-media">
-            <img src="${escapeHtml(cover)}" alt="${escapeHtml(game.title)}" class="game-card-img" loading="lazy" />
+            ${mediaContentHtml}
             <span class="game-source-badge">${escapeHtml(sourceLabel)}</span>
             <div class="game-card-badges">
               ${updateBadge}
@@ -753,6 +877,21 @@ function renderLibraryGrid() {
       `;
     })
     .join("");
+
+  grid.querySelectorAll("img.game-card-img").forEach((imgEl) => {
+    imgEl.addEventListener(
+      "error",
+      () => {
+        const card = imgEl.closest(".game-card");
+        const gid = card?.dataset?.gameId || "";
+        const game = state.library.find((g) => g.id === gid);
+        const title = game?.title || imgEl.alt || "Game";
+        const platformLabel = game ? resolveGameSourceLabel(game) : "PC";
+        imgEl.replaceWith(createProceduralCoverCardEl(title, platformLabel, game?.source || ""));
+      },
+      { once: true }
+    );
+  });
 }
 
 function buildHeroCandidateList(appId, fallbackUrl) {
@@ -2466,16 +2605,29 @@ function buildCatalogCardElement(entry, installedSet) {
   img.loading = "lazy";
   img.decoding = "async";
   img.dataset.fallbackStage = "0";
+  const cacheKey = isRetro ? `retro_${entry.appId}` : String(entry.appId);
+  const cachedPath = CATALOG_COVER_CACHE[cacheKey];
   const primaryCover = isRetro
-    ? (resolveMediaUrl(entry.coverUrl) ||
-      resolveMediaUrl(entry.headerUrl) ||
-      generateFallbackCoverDataUri(entry.name || "Console Game", entry.platformName || "Console"))
-    : (resolveMediaUrl(entry.coverUrl) ||
+    ? (resolveMediaUrl(cachedPath || entry.coverUrl) || resolveMediaUrl(entry.headerUrl) || "")
+    : (resolveMediaUrl(cachedPath || entry.coverUrl) ||
       `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${entry.appId}/library_600x900.jpg`);
   const headerFallback = isRetro
     ? (resolveMediaUrl(entry.headerUrl) || "")
     : (resolveMediaUrl(entry.headerUrl) ||
       `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${entry.appId}/header.jpg`);
+
+  const showCatalogFallbackCard = () => {
+    img.style.display = "none";
+    if (!media.querySelector(".cover-fallback-card")) {
+      media.prepend(
+        createProceduralCoverCardEl(
+          entry.name || (isRetro ? "Console Game" : "Steam Game"),
+          isRetro ? (entry.platformName || "Console") : "Steam",
+          entry.platformName || modePill
+        )
+      );
+    }
+  };
 
   img.addEventListener("error", () => {
     const stage = Number(img.dataset.fallbackStage || "0");
@@ -2484,11 +2636,18 @@ function buildCatalogCardElement(entry, installedSet) {
       img.src = headerFallback;
     } else if (stage < 2) {
       img.dataset.fallbackStage = "2";
-      img.src = generateFallbackCoverDataUri(entry.name || (isRetro ? "Console Game" : "Steam Game"), modePill);
+      showCatalogFallbackCard();
+      scheduleCatalogCoverResolve(entry, img, media);
     }
   });
-  img.src = primaryCover;
+
   media.appendChild(img);
+  if (primaryCover) {
+    img.src = primaryCover;
+  } else {
+    showCatalogFallbackCard();
+    scheduleCatalogCoverResolve(entry, img, media);
+  }
 
   const topBadges = document.createElement("div");
   topBadges.className = "catalog-card-badges-top";
@@ -5209,6 +5368,32 @@ function wireEvents() {
     }
   });
 
+  el("btn-crash-dismiss")?.addEventListener("click", () => {
+    el("crash-heal-banner")?.classList.add("hidden");
+    state.lastCrashHealed = null;
+  });
+
+  el("btn-crash-relaunch")?.addEventListener("click", async () => {
+    const healed = state.lastCrashHealed;
+    el("crash-heal-banner")?.classList.add("hidden");
+    state.lastCrashHealed = null;
+    if (!healed) return;
+    const targetGame =
+      state.library.find((g) => g.id === healed.gameId) ||
+      (healed.exePath
+        ? state.library.find((g) => String(g.exePath || "").toLowerCase() === String(healed.exePath).toLowerCase())
+        : null);
+    if (targetGame) {
+      await launchGameById(targetGame);
+    } else if (healed.exePath) {
+      await launchGameDirectly({
+        id: healed.gameId || "",
+        title: healed.title || "Game",
+        exePath: healed.exePath
+      });
+    }
+  });
+
   // Detail View Controls
   el("btn-detail-back")?.addEventListener("click", () => {
     state.selectedDetailId = null;
@@ -6608,6 +6793,14 @@ async function init() {
   renderThemes();
   renderSources();
   syncCatalogFilterControlsToDom();
+  getAppVersion()
+    .then((ver) => {
+      const pill = el("app-version-pill");
+      if (pill && ver) {
+        pill.textContent = `v${ver}`;
+      }
+    })
+    .catch(() => {});
   try {
     initWindowControls({
       onCtrlK: () => {
@@ -6783,7 +6976,44 @@ async function init() {
     const fileLabel = payload?.fileName || "file";
     const siteLabel = payload?.siteTitle || "Safe Browser";
     showToast(`Auto-grabbed "${fileLabel}" from ${siteLabel} -> Downloads queue.`, "success", 3400);
+    switchTab("downloader");
     refreshDownloadJobs();
+  });
+
+  await listenEvent("grabber-download-redirect", (payload) => {
+    const fileLabel = payload?.fileName || "file";
+    showToast(`Captured "${fileLabel}" in Duke Stream Grabber -> Downloads queue.`, "success", 3400);
+    switchTab("downloader");
+    refreshDownloadJobs();
+  });
+
+  await listenEvent("sidebar-icons-updated", () => {
+    invalidateSidebarIcons();
+    renderSidebarGameList();
+  });
+
+  await listenEvent("game-crash-healed", (payload) => {
+    if (!payload) return;
+    state.lastCrashHealed = payload;
+    const banner = el("crash-heal-banner");
+    const titleEl = el("crash-heal-title");
+    const summaryEl = el("crash-heal-summary");
+    if (titleEl) {
+      const exitHex = payload.exitCodeHex ? ` (${payload.exitCodeHex})` : "";
+      titleEl.textContent = `Repaired ${payload.title || "Game"}${exitHex}:`;
+    }
+    if (summaryEl) {
+      summaryEl.textContent =
+        payload.summary || payload.diagnosis || "Unblocked files & repaired missing runtime dependencies.";
+    }
+    if (banner) {
+      banner.classList.remove("hidden");
+    }
+    showToast(
+      `Self-Healed "${payload.title || "game"}" after crash. Click "Repaired — Relaunch Game" to retry.`,
+      "success",
+      5000
+    );
   });
 
   await listenEvent("duke-uri-download", (payload) => {

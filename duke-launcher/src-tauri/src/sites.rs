@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::fs;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
@@ -64,6 +63,15 @@ struct RawBulkSiteInput {
 pub fn default_search_sites() -> Vec<SearchSiteEntry> {
     vec![
         SearchSiteEntry {
+            id: "default_vimm_lair".to_string(),
+            name: "Vimm's Lair".to_string(),
+            search_url: "https://vimm.net/vault/?p=list&q={query}".to_string(),
+            home_url: "https://vimm.net/vault".to_string(),
+            tag: "Preservation".to_string(),
+            note: "Classic console ROM preservation vault (NES through Wii)".to_string(),
+            is_default: true,
+        },
+        SearchSiteEntry {
             id: "default_gog".to_string(),
             name: "GOG.com".to_string(),
             search_url: "https://www.gog.com/en/games?query={query}".to_string(),
@@ -83,12 +91,12 @@ pub fn default_search_sites() -> Vec<SearchSiteEntry> {
         },
         SearchSiteEntry {
             id: "default_archive_org".to_string(),
-            name: "Internet Archive (Classic PC)".to_string(),
+            name: "Internet Archive".to_string(),
             search_url: "https://archive.org/details/softwarelibrary_msdos_games?query={query}"
                 .to_string(),
             home_url: "https://archive.org/details/softwarelibrary_msdos_games".to_string(),
             tag: "Preservation".to_string(),
-            note: "Preserved classic PC & DOS archives".to_string(),
+            note: "Preserved classic PC & console software archives".to_string(),
             is_default: true,
         },
         SearchSiteEntry {
@@ -116,6 +124,15 @@ pub fn default_search_sites() -> Vec<SearchSiteEntry> {
             home_url: "https://steamdb.info/".to_string(),
             tag: "Database".to_string(),
             note: "AppIDs, depots, patch history & player stats".to_string(),
+            is_default: true,
+        },
+        SearchSiteEntry {
+            id: "default_libretro_db".to_string(),
+            name: "Libretro Database".to_string(),
+            search_url: "https://db.libretro.com/?q={query}".to_string(),
+            home_url: "https://db.libretro.com/".to_string(),
+            tag: "Database".to_string(),
+            note: "Canonical No-Intro & Redump console game metadata index".to_string(),
             is_default: true,
         },
     ]
@@ -195,15 +212,22 @@ fn build_validated_site_entry(
     })
 }
 
+fn normalized_site_match_key(raw_url: &str) -> String {
+    raw_url
+        .trim()
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
 fn read_sites_from_path(path: &Path) -> Result<Vec<SearchSiteEntry>, String> {
+    let _ = crate::self_heal::recover_protected_json_if_corrupt(path);
     if !path.exists() {
         let defaults = default_search_sites();
         write_sites_to_path(path, &defaults)?;
         return Ok(defaults);
     }
 
-    let raw = fs::read_to_string(path)
-        .map_err(|e| format!("Failed reading search_sites.json: {e}"))?;
+    let raw = crate::self_heal::read_json_with_bak_recovery(path)?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         let defaults = default_search_sites();
@@ -211,8 +235,34 @@ fn read_sites_from_path(path: &Path) -> Result<Vec<SearchSiteEntry>, String> {
         return Ok(defaults);
     }
 
-    serde_json::from_str::<Vec<SearchSiteEntry>>(trimmed)
-        .map_err(|e| format!("Invalid search_sites.json format: {e}"))
+    let mut existing = serde_json::from_str::<Vec<SearchSiteEntry>>(trimmed)
+        .map_err(|e| format!("Invalid search_sites.json format: {e}"))?;
+    if existing.is_empty() {
+        let defaults = default_search_sites();
+        write_sites_to_path(path, &defaults)?;
+        return Ok(defaults);
+    }
+
+    // Seamlessly merge any newly added default directories without duplicating user entries.
+    let mut changed = false;
+    for def in default_search_sites() {
+        let def_home = normalized_site_match_key(&def.home_url);
+        let def_search = normalized_site_match_key(&def.search_url);
+        let already_present = existing.iter().any(|item| {
+            item.id.eq_ignore_ascii_case(&def.id)
+                || normalized_site_match_key(&item.home_url) == def_home
+                || normalized_site_match_key(&item.search_url) == def_search
+        });
+        if !already_present {
+            existing.push(def);
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = write_sites_to_path(path, &existing);
+    }
+
+    Ok(existing)
 }
 
 fn write_sites_to_path(path: &Path, sites: &[SearchSiteEntry]) -> Result<(), String> {
@@ -452,6 +502,7 @@ pub fn reset_default_search_sites() -> Result<Vec<SearchSiteEntry>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_sites_path(label: &str) -> std::path::PathBuf {
@@ -463,20 +514,23 @@ mod tests {
     }
 
     #[test]
-    fn default_sites_match_exact_six_directories() {
+    fn default_sites_match_exact_eight_directories() {
         let defaults = default_search_sites();
-        assert_eq!(defaults.len(), 6);
-        assert_eq!(defaults[0].name, "GOG.com");
-        assert_eq!(defaults[0].tag, "DRM-Free");
+        assert_eq!(defaults.len(), 8);
+        assert_eq!(defaults[0].name, "Vimm's Lair");
+        assert_eq!(defaults[0].home_url, "https://vimm.net/vault");
+        assert_eq!(defaults[1].name, "GOG.com");
+        assert_eq!(defaults[1].tag, "DRM-Free");
         assert_eq!(
-            defaults[0].search_url,
+            defaults[1].search_url,
             "https://www.gog.com/en/games?query={query}"
         );
-        assert_eq!(defaults[1].name, "Itch.io");
-        assert_eq!(defaults[2].name, "Internet Archive (Classic PC)");
-        assert_eq!(defaults[3].name, "My Abandonware");
-        assert_eq!(defaults[4].name, "PCGamingWiki");
-        assert_eq!(defaults[5].name, "SteamDB");
+        assert_eq!(defaults[2].name, "Itch.io");
+        assert_eq!(defaults[3].name, "Internet Archive");
+        assert_eq!(defaults[4].name, "My Abandonware");
+        assert_eq!(defaults[5].name, "PCGamingWiki");
+        assert_eq!(defaults[6].name, "SteamDB");
+        assert_eq!(defaults[7].name, "Libretro Database");
     }
 
     #[test]
@@ -513,7 +567,7 @@ invalid line without separator
         let _ = fs::remove_file(&path);
 
         let initial = load_search_sites_from_path(&path).unwrap();
-        assert_eq!(initial.len(), 6);
+        assert_eq!(initial.len(), 8);
         assert!(path.exists());
 
         let after_add = add_search_site_to_path(
@@ -525,7 +579,7 @@ invalid line without separator
             None,
         )
         .unwrap();
-        assert_eq!(after_add.len(), 7);
+        assert_eq!(after_add.len(), 9);
         let added_id = after_add.last().unwrap().id.clone();
 
         let bulk_res = bulk_import_search_sites_to_path(
@@ -535,13 +589,20 @@ invalid line without separator
         .unwrap();
         assert_eq!(bulk_res.added_count, 1);
         assert_eq!(bulk_res.skipped_count, 1);
-        assert_eq!(bulk_res.sites.len(), 8);
+        assert_eq!(bulk_res.sites.len(), 10);
 
         let after_remove = remove_search_site_from_path(&path, &added_id).unwrap();
-        assert_eq!(after_remove.len(), 7);
+        assert_eq!(after_remove.len(), 9);
 
         let after_reset = reset_default_search_sites_at_path(&path).unwrap();
-        assert_eq!(after_reset.len(), 6);
+        assert_eq!(after_reset.len(), 8);
+
+        // Verify missing defaults merge smoothly without duplicating already-present sites
+        let subset = vec![after_reset[1].clone()];
+        write_sites_to_path(&path, &subset).unwrap();
+        let merged = load_search_sites_from_path(&path).unwrap();
+        assert_eq!(merged.len(), 8);
+        assert!(merged.iter().any(|s| s.home_url == "https://vimm.net/vault"));
 
         let _ = fs::remove_file(&path);
     }

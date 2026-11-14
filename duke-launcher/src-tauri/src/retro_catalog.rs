@@ -7,7 +7,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -25,7 +24,7 @@ const RDB_RAW_BASE: &str =
     "https://raw.githubusercontent.com/libretro/libretro-database/master/rdb";
 const DAT_RAW_BASE: &str =
     "https://raw.githubusercontent.com/libretro/libretro-database/master";
-const LIBRETRO_THUMBS_BASE: &str = "https://thumbnails.libretro.com";
+pub(crate) const LIBRETRO_THUMBS_BASE: &str = "https://thumbnails.libretro.com";
 const RETRO_SYNC_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 const RETRO_HARVEST_CONCURRENCY: usize = 4;
 
@@ -997,7 +996,7 @@ pub fn spawn_background_retro_catalog_sync_if_needed(app: AppHandle) {
     });
 }
 
-/// Downloads crisp boxart (`Named_Boxarts`) or `Named_Titles` fallback to `<data_root>/covers/`
+/// Downloads crisp boxart (`Named_Boxarts`) or cascading multi-source fallback to `<data_root>/covers/`
 /// and builds a cached `32x32` PNG sidebar icon into `<data_root>/sidebar_icons/` for `assetProtocol`.
 pub async fn cache_retro_cover_and_icon(
     platform_id: u16,
@@ -1007,151 +1006,27 @@ pub async fn cache_retro_cover_and_icon(
 ) -> Option<(String, String)> {
     let covers_dir = crate::get_covers_dir_standalone().ok()?;
     let icons_dir = crate::sidebar_icons::get_sidebar_icons_dir_standalone().ok()?;
-    let safe_id: String = game_id
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
-        .collect();
-    let cover_dest = covers_dir.join(format!("{}.png", safe_id));
-    let icon_dest = crate::sidebar_icons::cached_sidebar_icon_path(&icons_dir, game_id);
-
-    if cover_dest.is_file() && icon_dest.is_file() {
-        return Some((
-            cover_dest.to_string_lossy().into_owned(),
-            icon_dest.to_string_lossy().into_owned(),
-        ));
-    }
-
-    let mut urls: Vec<String> = Vec::new();
-    if let Some(hint) = hint_cover_url.filter(|u| u.starts_with("http")) {
-        urls.push(hint.to_string());
-    }
     let spec = platforms::platform_by_id(platform_id);
-    if let Some(sys) = spec.thumb_system {
-        let base_title = normalize_retro_base_title(title);
-        let variants = [
-            title.trim().to_string(),
-            format!("{} (USA)", base_title),
-            format!("{} (World)", base_title),
-            format!("{} (Europe)", base_title),
-            format!("{} (USA, Europe)", base_title),
-            base_title.clone(),
-        ];
-        for cand in variants {
-            let clean = sanitize_libretro_thumb_name(&cand);
-            if clean.is_empty() {
-                continue;
-            }
-            let sys_enc = urlencoding::encode(sys);
-            let file_enc = urlencoding::encode(&clean);
-            urls.push(format!(
-                "{}/{}/Named_Boxarts/{}.png",
-                LIBRETRO_THUMBS_BASE, sys_enc, file_enc
-            ));
-            urls.push(format!(
-                "{}/{}/Named_Titles/{}.png",
-                LIBRETRO_THUMBS_BASE, sys_enc, file_enc
-            ));
-            for &alt in spec.alt_thumb_systems {
-                let alt_enc = urlencoding::encode(alt);
-                urls.push(format!(
-                    "{}/{}/Named_Boxarts/{}.png",
-                    LIBRETRO_THUMBS_BASE, alt_enc, file_enc
-                ));
-            }
-        }
-    }
-
-    let client = duke_core::net_doh::build_doh_client_for_url(LIBRETRO_THUMBS_BASE, true, true).await;
-    let mut downloaded_png: Option<Vec<u8>> = None;
-    let mut seen_urls = HashSet::new();
-    for url in urls {
-        if !seen_urls.insert(url.clone()) {
-            continue;
-        }
-        if let Ok(resp) = client.get(&url).send().await {
-            if resp.status().is_success() {
-                if let Ok(bytes) = resp.bytes().await {
-                    if bytes.len() > 128 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
-                        downloaded_png = Some(bytes.to_vec());
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    let png_bytes = downloaded_png?;
-    let cover_c = cover_dest.clone();
-    let icon_c = icon_dest.clone();
-    tokio::task::spawn_blocking(move || -> Result<(String, String), String> {
-        fs::write(&cover_c, &png_bytes).map_err(|e| e.to_string())?;
-        if write_32x32_png_icon(&png_bytes, &icon_c).is_err() {
-            let _ = fs::copy(&cover_c, &icon_c);
-        }
-        Ok((
-            cover_c.to_string_lossy().into_owned(),
-            icon_c.to_string_lossy().into_owned(),
-        ))
-    })
-    .await
-    .ok()
-    .and_then(|r| r.ok())
-}
-
-/// Decodes an RGBA/RGB PNG boxart image and box-downscales it to a `32x32` RGBA PNG sidebar icon.
-fn write_32x32_png_icon(src_png: &[u8], dest_path: &Path) -> Result<(), String> {
-    let mut decoder = png::Decoder::new(Cursor::new(src_png));
-    decoder.set_transformations(png::Transformations::normalize_to_color8());
-    let mut reader = decoder.read_info().map_err(|e| e.to_string())?;
-    let buf_len = reader
-        .output_buffer_size()
-        .unwrap_or_else(|| src_png.len().saturating_mul(8).max(4096));
-    let mut buf = vec![0u8; buf_len];
-    let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
-    let w = info.width as usize;
-    let h = info.height as usize;
-    if w == 0 || h == 0 {
-        return Err("Empty image dimensions".to_string());
-    }
-    let ch = match info.color_type {
-        png::ColorType::Rgba => 4usize,
-        png::ColorType::Rgb => 3usize,
-        png::ColorType::GrayscaleAlpha => 2usize,
-        png::ColorType::Grayscale => 1usize,
-        png::ColorType::Indexed => 4usize,
+    let settings = crate::load_settings_standalone();
+    let req = crate::artwork::CoverResolveRequest {
+        cache_id: game_id.to_string(),
+        title: title.to_string(),
+        platform_id: (platform_id > 0).then_some(platform_id),
+        platform_hint: Some(spec.short_name.to_string()),
+        steam_app_id: None,
+        existing_cover_url: hint_cover_url.map(|s| s.to_string()),
+        steamgriddb_api_key: settings.steamgriddb_api_key.unwrap_or_default(),
+        sidebar_icon_id: Some(game_id.to_string()),
     };
 
-    const TARGET: usize = 32;
-    let mut out = vec![0u8; TARGET * TARGET * 4];
-    for ty in 0..TARGET {
-        let sy = (ty * h) / TARGET;
-        for tx in 0..TARGET {
-            let sx = (tx * w) / TARGET;
-            let src_idx = (sy * w + sx) * ch;
-            let dst_idx = (ty * TARGET + tx) * 4;
-            let (r, g, b, a) = match ch {
-                4 => (buf[src_idx], buf[src_idx + 1], buf[src_idx + 2], buf[src_idx + 3]),
-                3 => (buf[src_idx], buf[src_idx + 1], buf[src_idx + 2], 255),
-                2 => (buf[src_idx], buf[src_idx], buf[src_idx], buf[src_idx + 1]),
-                _ => (buf[src_idx], buf[src_idx], buf[src_idx], 255),
-            };
-            out[dst_idx] = r;
-            out[dst_idx + 1] = g;
-            out[dst_idx + 2] = b;
-            out[dst_idx + 3] = a;
-        }
-    }
-
-    if let Some(parent) = dest_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let file = fs::File::create(dest_path).map_err(|e| e.to_string())?;
-    let mut enc = png::Encoder::new(file, TARGET as u32, TARGET as u32);
-    enc.set_color(png::ColorType::Rgba);
-    enc.set_depth(png::BitDepth::Eight);
-    let mut writer = enc.write_header().map_err(|e| e.to_string())?;
-    writer.write_image_data(&out).map_err(|e| e.to_string())?;
-    Ok(())
+    let outcome = crate::artwork::resolve_and_cache_cover_in_dirs(&req, &covers_dir, &icons_dir).await?;
+    let icon_path = outcome
+        .sidebar_icon_path
+        .unwrap_or_else(|| crate::sidebar_icons::cached_sidebar_icon_path(&icons_dir, game_id));
+    Some((
+        outcome.cover_path.to_string_lossy().into_owned(),
+        icon_path.to_string_lossy().into_owned(),
+    ))
 }
 
 /// Public helper returning cached `32x32` sidebar icon path if present.

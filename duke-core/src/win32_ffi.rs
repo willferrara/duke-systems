@@ -1663,6 +1663,123 @@ pub use imp::{
     set_external_pid_quiet,
 };
 
+/// Win32 DWM attribute: Immersive dark mode flag (`DWMWA_USE_IMMERSIVE_DARK_MODE = 20`).
+pub const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+/// Win32 DWM attribute: System backdrop material (`DWMWA_SYSTEMBACKDROP_TYPE = 38`).
+pub const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
+/// Win32 DWM system backdrop: None (`DWMSBT_NONE = 1`).
+pub const DWMSBT_NONE: i32 = 1;
+/// Win32 DWM system backdrop: Transient Acrylic (`DWMSBT_TRANSIENTWINDOW = 3`).
+pub const DWMSBT_TRANSIENTWINDOW: i32 = 3;
+
+/// Win32 `MARGINS` struct passed to `DwmExtendFrameIntoClientArea`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DwmMargins {
+    pub cx_left_width: i32,
+    pub cx_right_width: i32,
+    pub cy_top_height: i32,
+    pub cy_bottom_height: i32,
+}
+
+/// Resolves which `DWMWA_SYSTEMBACKDROP_TYPE` value maps to a UI theme ID.
+pub fn resolve_backdrop_type_for_theme(theme_id: &str) -> i32 {
+    let clean = theme_id.trim();
+    if clean.eq_ignore_ascii_case("frosted-obsidian") || clean.eq_ignore_ascii_case("acrylic") {
+        DWMSBT_TRANSIENTWINDOW
+    } else {
+        DWMSBT_NONE
+    }
+}
+
+/// Pure testable implementation of DWM sheet-of-glass + backdrop attribute application.
+pub fn apply_backdrop_with<FAttr, FMargin>(
+    hwnd: isize,
+    theme_id: &str,
+    mut set_attr: FAttr,
+    mut extend_frame: FMargin,
+) -> Result<i32, String>
+where
+    FAttr: FnMut(isize, u32, i32) -> i32,
+    FMargin: FnMut(isize, DwmMargins) -> i32,
+{
+    if hwnd == 0 {
+        return Err("Cannot apply DWM backdrop to null HWND (0)".to_string());
+    }
+
+    let backdrop_type = resolve_backdrop_type_for_theme(theme_id);
+    let dark_mode: i32 = if theme_id.trim().eq_ignore_ascii_case("light") {
+        0
+    } else {
+        1
+    };
+
+    let _ = set_attr(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, dark_mode);
+
+    let margins = if backdrop_type == DWMSBT_TRANSIENTWINDOW {
+        DwmMargins {
+            cx_left_width: -1,
+            cx_right_width: -1,
+            cy_top_height: -1,
+            cy_bottom_height: -1,
+        }
+    } else {
+        DwmMargins {
+            cx_left_width: 0,
+            cx_right_width: 0,
+            cy_top_height: 0,
+            cy_bottom_height: 0,
+        }
+    };
+
+    let hr_margin = extend_frame(hwnd, margins);
+    let hr_attr = set_attr(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, backdrop_type);
+
+    if hr_margin != 0 && hr_attr != 0 {
+        return Err(format!(
+            "DWM backdrop failed (extend=0x{hr_margin:08X}, attr=0x{hr_attr:08X})"
+        ));
+    }
+    Ok(backdrop_type)
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "dwmapi")]
+unsafe extern "system" {
+    fn DwmSetWindowAttribute(
+        hwnd: isize,
+        dw_attribute: u32,
+        pv_attribute: *const std::ffi::c_void,
+        cb_attribute: u32,
+    ) -> i32;
+    fn DwmExtendFrameIntoClientArea(hwnd: isize, p_mar_inset: *const DwmMargins) -> i32;
+}
+
+/// Applies Win11 DWM Acrylic sheet-of-glass (`frosted-obsidian`) or resets to solid for an HWND.
+pub fn apply_backdrop_to_hwnd(hwnd: isize, theme_id: &str) -> Result<i32, String> {
+    #[cfg(target_os = "windows")]
+    {
+        apply_backdrop_with(
+            hwnd,
+            theme_id,
+            |h, attr, val| unsafe {
+                DwmSetWindowAttribute(
+                    h,
+                    attr,
+                    (&val as *const i32).cast::<std::ffi::c_void>(),
+                    std::mem::size_of::<i32>() as u32,
+                )
+            },
+            |h, margins| unsafe { DwmExtendFrameIntoClientArea(h, &margins) },
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (hwnd, theme_id);
+        Ok(DWMSBT_NONE)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1695,5 +1812,48 @@ mod tests {
         let pad = poll_xinput_state();
         assert!(!pad.connected || pad.packet_number < u32::MAX);
         assert!(reg_read_string(false, "Software\\DukeSystems__NonExistentTestKey__", "X").is_none());
+    }
+
+    #[test]
+    fn dwm_backdrop_applies_sheet_of_glass_for_frosted_obsidian() {
+        assert_eq!(
+            resolve_backdrop_type_for_theme("frosted-obsidian"),
+            DWMSBT_TRANSIENTWINDOW
+        );
+        assert_eq!(resolve_backdrop_type_for_theme("dark"), DWMSBT_NONE);
+
+        let mut attrs = Vec::new();
+        let mut margins = Vec::new();
+        let chosen = apply_backdrop_with(
+            0x2024isize,
+            "frosted-obsidian",
+            |_, a, v| {
+                attrs.push((a, v));
+                0
+            },
+            |_, m| {
+                margins.push(m);
+                0
+            },
+        )
+        .unwrap();
+
+        assert_eq!(chosen, DWMSBT_TRANSIENTWINDOW);
+        assert_eq!(
+            attrs,
+            vec![
+                (DWMWA_USE_IMMERSIVE_DARK_MODE, 1),
+                (DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW),
+            ]
+        );
+        assert_eq!(
+            margins,
+            vec![DwmMargins {
+                cx_left_width: -1,
+                cx_right_width: -1,
+                cy_top_height: -1,
+                cy_bottom_height: -1,
+            }]
+        );
     }
 }

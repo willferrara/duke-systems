@@ -61,7 +61,7 @@
       <div class="titlebar-left" data-tauri-drag-region>
         <img src="assets/dukeflaglogo.png" alt="Duke Launcher" class="titlebar-emblem" />
         <span class="titlebar-title">Duke Launcher</span>
-        <span class="titlebar-version mono-num">v0.2</span>
+        <span class="titlebar-version mono-num" id="app-version-pill">v0.4.1</span>
       </div>
 
       <div class="titlebar-center">
@@ -162,10 +162,6 @@
         <!-- Bottom-Left Telemetry Footer -->
         <div class="sidebar-stats">
           <div class="stat-row">
-            <span class="stat-label">Money Saved</span>
-            <span class="stat-val mono-num gold" id="stat-money-saved">$0.00</span>
-          </div>
-          <div class="stat-row">
             <span class="stat-label">Disk Used</span>
             <span class="stat-val mono-num" id="stat-total-size">0 MB</span>
           </div>
@@ -205,6 +201,25 @@
               <span>Download Now</span>
             </button>
             <button type="button" class="btn btn-secondary btn-sm" id="btn-clipboard-dismiss">
+              <svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg>
+              <span>Dismiss</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Game Crash Self-Heal 1-Click Relaunch Banner -->
+        <div class="crash-heal-banner hidden" id="crash-heal-banner" role="region" aria-label="Game Crash Repaired">
+          <div class="clipboard-banner-info">
+            <svg class="icon crash-heal-icon" aria-hidden="true"><use href="#icon-wrench"/></svg>
+            <span class="clipboard-banner-label" id="crash-heal-title">Game Repaired</span>
+            <span class="clipboard-banner-url" id="crash-heal-summary"></span>
+          </div>
+          <div class="clipboard-banner-actions">
+            <button type="button" class="btn btn-steam-green btn-sm" id="btn-crash-relaunch">
+              <svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>
+              <span>Repaired — Relaunch Game</span>
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-crash-dismiss">
               <svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg>
               <span>Dismiss</span>
             </button>

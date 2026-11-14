@@ -251,12 +251,22 @@ body[data-theme="frost"] {
 }
 
 /* 11. Obsidian Frosted Glass (Windows 11 DWM Acrylic + Backdrop Filter) */
+html:has(body[data-theme="frosted-obsidian"]),
+body[data-theme="frosted-obsidian"],
+body[data-theme="frosted-obsidian"] .window-shell,
+body[data-theme="frosted-obsidian"] .app-shell,
+body[data-theme="frosted-obsidian"] .main-panel {
+  background: transparent !important;
+  background-image: none !important;
+}
+
 body[data-theme="frosted-obsidian"] {
-  --bg-canvas: rgba(12, 15, 20, 0.56);
-  --bg-sidebar: rgba(17, 21, 29, 0.62);
-  --bg-surface: rgba(20, 25, 34, 0.64);
-  --bg-elevated: rgba(30, 37, 50, 0.72);
-  --bg-input: rgba(15, 20, 28, 0.64);
+  --bg-canvas: rgba(10, 13, 18, 0.32);
+  --bg-sidebar: rgba(12, 16, 23, 0.40);
+  --bg-surface: rgba(17, 22, 31, 0.44);
+  --bg-elevated: rgba(23, 29, 41, 0.52);
+  --bg-titlebar: rgba(10, 13, 19, 0.38);
+  --bg-input: rgba(12, 16, 23, 0.46);
   --bg-hover: rgba(255, 255, 255, 0.08);
   --border-hairline: rgba(255, 255, 255, 0.11);
   --border-strong: rgba(255, 255, 255, 0.19);
@@ -271,7 +281,7 @@ body[data-theme="frosted-obsidian"] {
   --accent-gold: #facc15;
   --accent-emerald: #34d399;
   --accent-crimson: #f87171;
-  --bg-wallpaper: radial-gradient(circle at 18% 12%, rgba(56, 189, 248, 0.09), transparent 46%), radial-gradient(circle at 84% 88%, rgba(129, 140, 248, 0.07), transparent 48%), linear-gradient(160deg, rgba(16, 20, 28, 0.34), rgba(10, 12, 17, 0.42));
+  --bg-wallpaper: none;
 }
 
 *, *::before, *::after {
@@ -865,7 +875,8 @@ body[data-theme="light"] .subbar {
 }
 .btn-steam-green:hover:not(:disabled) { background: var(--steam-green-hover); }
 
-.clipboard-banner {
+.clipboard-banner,
+.crash-heal-banner {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -873,6 +884,16 @@ body[data-theme="light"] .subbar {
   padding: 9px 18px;
   background: color-mix(in srgb, var(--accent-emerald) 10%, var(--bg-surface));
   border-bottom: 1px solid color-mix(in srgb, var(--accent-emerald) 38%, var(--border-hairline));
+  flex-shrink: 0;
+}
+
+.crash-heal-banner {
+  background: color-mix(in srgb, var(--accent-primary) 11%, var(--bg-surface));
+  border-bottom-color: color-mix(in srgb, var(--accent-primary) 42%, var(--border-hairline));
+}
+
+.crash-heal-icon {
+  color: var(--accent-primary);
   flex-shrink: 0;
 }
 
@@ -1012,6 +1033,72 @@ body[data-theme="light"] .subbar {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+/* Styled Procedural Platform-Tinted Cover Fallback (Zero Blank/Broken Boxes) */
+.cover-fallback-card {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 18px 14px;
+  text-align: center;
+  user-select: none;
+  background:
+    radial-gradient(circle at 50% 18%, color-mix(in srgb, var(--fallback-tint, var(--accent-primary)) 26%, transparent), transparent 68%),
+    linear-gradient(160deg, color-mix(in srgb, var(--bg-elevated) 92%, #080b10), color-mix(in srgb, var(--bg-canvas) 96%, #05070a));
+}
+
+.cover-fallback-card[data-platform-tone="nintendo"] { --fallback-tint: #ef4444; }
+.cover-fallback-card[data-platform-tone="sony"] { --fallback-tint: #3b82f6; }
+.cover-fallback-card[data-platform-tone="microsoft"] { --fallback-tint: #22c55e; }
+.cover-fallback-card[data-platform-tone="retro"] { --fallback-tint: #a855f7; }
+.cover-fallback-card[data-platform-tone="steam"] { --fallback-tint: #38bdf8; }
+.cover-fallback-card[data-platform-tone="pc"] { --fallback-tint: #0ea5e9; }
+
+.cover-fallback-emblem {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in srgb, var(--fallback-tint, var(--accent-primary)) 82%, #ffffff);
+  background: color-mix(in srgb, var(--fallback-tint, var(--accent-primary)) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fallback-tint, var(--accent-primary)) 34%, transparent);
+}
+
+.cover-fallback-emblem .icon {
+  width: 18px;
+  height: 18px;
+}
+
+.cover-fallback-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text-main);
+  max-width: 100%;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.cover-fallback-platform {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .game-card-badges {
@@ -2885,27 +2972,28 @@ body.couch-mode .filter-pill {
    OBSIDIAN FROSTED GLASS — TRANSLUCENT ACRYLIC SURFACE SYSTEM
    ========================================================================== */
 body[data-theme="frosted-obsidian"] .titlebar {
-  background: rgba(14, 17, 22, 0.68);
-  backdrop-filter: blur(18px) saturate(145%);
-  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  background: var(--bg-titlebar);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
   border-bottom: 1px solid rgba(255, 255, 255, 0.11);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 body[data-theme="frosted-obsidian"] .sidebar {
-  background: rgba(17, 21, 29, 0.62);
-  backdrop-filter: blur(18px) saturate(145%);
-  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  background: var(--bg-sidebar);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
   border-right: 1px solid rgba(255, 255, 255, 0.11);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 body[data-theme="frosted-obsidian"] .subbar,
 body[data-theme="frosted-obsidian"] .clipboard-banner,
+body[data-theme="frosted-obsidian"] .crash-heal-banner,
 body[data-theme="frosted-obsidian"] .sources-game-banner {
-  background: rgba(17, 21, 29, 0.56);
-  backdrop-filter: blur(18px) saturate(145%);
-  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  background: var(--bg-surface);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
   border-color: rgba(255, 255, 255, 0.11);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
@@ -2919,9 +3007,9 @@ body[data-theme="frosted-obsidian"] .source-result-card,
 body[data-theme="frosted-obsidian"] .dl-job-card,
 body[data-theme="frosted-obsidian"] .swarm-peer-card,
 body[data-theme="frosted-obsidian"] .sgdb-thumb-card {
-  background: rgba(22, 27, 37, 0.58);
-  backdrop-filter: blur(18px) saturate(145%);
-  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  background: var(--bg-surface);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
   border: 1px solid rgba(255, 255, 255, 0.11);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 8px 24px rgba(0, 0, 0, 0.34);
 }
@@ -2936,7 +3024,7 @@ body[data-theme="frosted-obsidian"] .source-result-card:hover,
 body[data-theme="frosted-obsidian"] .dl-job-card:hover,
 body[data-theme="frosted-obsidian"] .swarm-peer-card:hover,
 body[data-theme="frosted-obsidian"] .sgdb-thumb-card:hover {
-  background: rgba(30, 37, 50, 0.72);
+  background: var(--bg-elevated);
   border-color: rgba(255, 255, 255, 0.22);
 }
 
@@ -2953,9 +3041,9 @@ body[data-theme="frosted-obsidian"] .save-path-row,
 body[data-theme="frosted-obsidian"] .restore-snapshot-item,
 body[data-theme="frosted-obsidian"] .source-feed-chip,
 body[data-theme="frosted-obsidian"] .empty-card {
-  background: rgba(20, 25, 34, 0.62);
-  backdrop-filter: blur(18px) saturate(145%);
-  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  background: var(--bg-surface);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
   border: 1px solid rgba(255, 255, 255, 0.11);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 6px 20px rgba(0, 0, 0, 0.28);
 }
@@ -2963,22 +3051,22 @@ body[data-theme="frosted-obsidian"] .empty-card {
 body[data-theme="frosted-obsidian"] .news-item:hover,
 body[data-theme="frosted-obsidian"] .setting-toggle-row:hover,
 body[data-theme="frosted-obsidian"] .source-feed-chip:hover {
-  background: rgba(28, 35, 48, 0.72);
+  background: var(--bg-elevated);
   border-color: rgba(255, 255, 255, 0.18);
 }
 
 body[data-theme="frosted-obsidian"] .modal-backdrop {
-  background: rgba(6, 9, 14, 0.52);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
+  background: rgba(6, 9, 14, 0.44);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 
 body[data-theme="frosted-obsidian"] .modal-card,
 body[data-theme="frosted-obsidian"] .modal-foot,
 body[data-theme="frosted-obsidian"] .toast {
-  background: rgba(20, 25, 34, 0.68);
-  backdrop-filter: blur(18px) saturate(145%);
-  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  background: var(--bg-elevated);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
   border-color: rgba(255, 255, 255, 0.11);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 18px 46px rgba(0, 0, 0, 0.52);
 }
@@ -2992,9 +3080,9 @@ body[data-theme="frosted-obsidian"] .filter-pill,
 body[data-theme="frosted-obsidian"] .btn-secondary,
 body[data-theme="frosted-obsidian"] .pill,
 body[data-theme="frosted-obsidian"] .nav-count {
-  background: rgba(15, 20, 28, 0.64);
-  backdrop-filter: blur(14px) saturate(140%);
-  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  background: rgba(12, 16, 23, 0.46);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
   border-color: rgba(255, 255, 255, 0.11);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
@@ -3381,9 +3469,10 @@ body[data-theme="frosted-obsidian"] .friends-drawer,
 body[data-theme="frosted-obsidian"] .friend-card,
 body[data-theme="frosted-obsidian"] .hltb-stat-tile,
 body[data-theme="frosted-obsidian"] .ach-row {
-  background: rgba(17, 21, 29, 0.68);
-  backdrop-filter: blur(18px) saturate(145%);
-  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  background: var(--bg-surface);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  border-color: rgba(255, 255, 255, 0.11);
 }
 
 /* ---------- Guide / Alt+G In-Game Quick Overlay HUD (?mode=overlay) ---------- */
@@ -3847,9 +3936,10 @@ body[data-theme="frosted-obsidian"] .detail-care-item,
 body[data-theme="frosted-obsidian"] .detail-autofix-summary,
 body[data-theme="frosted-obsidian"] .speed-preset-btn,
 body[data-theme="frosted-obsidian"] .settings-slider-block {
-  background: rgba(17, 21, 29, 0.68);
-  backdrop-filter: blur(18px) saturate(145%);
-  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  background: var(--bg-surface);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  border-color: rgba(255, 255, 255, 0.11);
 }
 
 body[data-theme="frosted-obsidian"] .speed-preset-btn.active {
@@ -3985,7 +4075,8 @@ body[data-theme="frosted-obsidian"] .speed-preset-btn.active {
 
 body[data-theme="frosted-obsidian"] .emu-card,
 body[data-theme="frosted-obsidian"] .emu-progress-wrap {
-  background: rgba(17, 21, 29, 0.68);
-  backdrop-filter: blur(18px) saturate(145%);
-  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  background: var(--bg-surface);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  border-color: rgba(255, 255, 255, 0.11);
 }

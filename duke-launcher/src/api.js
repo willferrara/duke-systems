@@ -929,3 +929,26 @@ export function listenRetroCatalogSyncProgress(callback) {
   return listenEvent("retro-catalog-sync-progress", callback);
 }
 
+export async function getAppVersion() {
+  try {
+    const tauriVer = await window.__TAURI__?.app?.getVersion?.();
+    if (tauriVer && String(tauriVer).trim()) {
+      return String(tauriVer).trim().replace(/^v/i, "");
+    }
+  } catch {
+    // Fall back to explicit Rust compile-time CARGO_PKG_VERSION IPC
+  }
+  const backendVer = await invokeCommand("get_app_version");
+  return String(backendVer || "0.4.1").trim().replace(/^v/i, "");
+}
+
+export async function resolveCatalogCover(req = {}) {
+  return invokeCommand("resolve_catalog_cover", {
+    appId: Number(req.appId || 0),
+    title: String(req.title || ""),
+    platformId: req.platformId != null ? Number(req.platformId) : null,
+    platformName: req.platformName ? String(req.platformName) : null,
+    coverUrl: req.coverUrl ? String(req.coverUrl) : null
+  });
+}
+
