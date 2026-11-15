@@ -198,7 +198,10 @@ impl ProjFsPriorityCoordinator {
             let Some(rem) = deadline.checked_duration_since(std::time::Instant::now()) else {
                 return false;
             };
-            let (next_guard, wait_res) = self.ready_signal.wait_timeout(guard, rem).unwrap();
+            let (next_guard, wait_res) = match self.ready_signal.wait_timeout(guard, rem) {
+                Ok(pair) => pair,
+                Err(poisoned) => poisoned.into_inner(),
+            };
             guard = next_guard;
             if wait_res.timed_out() {
                 return guard.iter().any(|&(s, e)| s <= start && e >= end_inclusive);
@@ -1073,9 +1076,9 @@ mod win_projfs {
         fs::create_dir_all(&mount_dir)
             .map_err(|e| format!("Failed creating ProjFS mount root {}: {e}", mount_dir.display()))?;
 
-        let instance_guid = GUID::from_u128(
-            u128::from_le_bytes(blake3::hash(mount_id.as_bytes()).as_bytes()[..16].try_into().unwrap()),
-        );
+        let mut guid_bytes = [0u8; 16];
+        guid_bytes.copy_from_slice(&blake3::hash(mount_id.as_bytes()).as_bytes()[..16]);
+        let instance_guid = GUID::from_u128(u128::from_le_bytes(guid_bytes));
         let root_w = utf16_z(&mount_dir.to_string_lossy());
         let ver = PrjPlaceholderVersionInfo::default();
         let hr_mark = unsafe {

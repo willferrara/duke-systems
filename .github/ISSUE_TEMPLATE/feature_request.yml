@@ -1,0 +1,30 @@
+name: Feature Request
+description: Propose a new zero-bloat capability, emulator profile, or workflow enhancement for Duke Launcher.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        We prioritize native Rust / Win32 features that preserve Duke Launcher's zero-telemetry, sub-25 MB idle RAM footprint.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Workflow Bottleneck
+      description: Describe the repetitive setup, compatibility issue, or missing capability you want solved.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+      description: Explain how it should behave in the UI, CLI (`--mcp`), or Duke companion.
+    validations:
+      required: true
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Architectural Alignment
+      options:
+        - label: Works completely offline with zero account login or telemetry
+        - label: Preserves clean 1-screen card simplicity and theme compatibility

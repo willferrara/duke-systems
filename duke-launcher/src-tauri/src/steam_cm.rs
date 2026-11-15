@@ -169,7 +169,7 @@ fn now_secs() -> u64 {
 }
 
 pub fn load_persisted_store_sessions() -> PersistedStoreSessions {
-    let _g = sessions_io_lock().lock().unwrap();
+    let _g = sessions_io_lock().lock().unwrap_or_else(|e| e.into_inner());
     let Ok(path) = crate::get_app_data_file_standalone(STORE_SESSIONS_FILE) else {
         return PersistedStoreSessions::default();
     };
@@ -180,7 +180,7 @@ pub fn load_persisted_store_sessions() -> PersistedStoreSessions {
 }
 
 pub fn save_persisted_store_sessions(sessions: &PersistedStoreSessions) -> Result<(), String> {
-    let _g = sessions_io_lock().lock().unwrap();
+    let _g = sessions_io_lock().lock().unwrap_or_else(|e| e.into_inner());
     let path = crate::get_app_data_file_standalone(STORE_SESSIONS_FILE)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -438,7 +438,7 @@ async fn refresh_steam_access_token_from_cm(refresh_token: &str, steam_id: &str)
 
 fn current_status_snapshot() -> SteamCmSessionStatus {
     let persisted = load_persisted_store_sessions();
-    let state = cm_state().lock().unwrap();
+    let state = cm_state().lock().unwrap_or_else(|e| e.into_inner());
     let invites = pending_invites().lock().map(|v| v.len()).unwrap_or(0);
     let msgs = chat_log().lock().map(|v| v.len()).unwrap_or(0);
     SteamCmSessionStatus {
@@ -496,7 +496,11 @@ pub async fn connect_steam_cm(
     save_persisted_store_sessions(&persisted)?;
 
     // Stop any previous CM WebSocket worker cleanly before starting a fresh session.
-    let prev_tx = cm_state().lock().unwrap().shutdown_tx.take();
+    let prev_tx = cm_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .shutdown_tx
+        .take();
     if let Some(tx) = prev_tx {
         let _ = tx.send(()).await;
     }
@@ -535,7 +539,7 @@ pub async fn connect_steam_cm(
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
     {
-        let mut s = cm_state().lock().unwrap();
+        let mut s = cm_state().lock().unwrap_or_else(|e| e.into_inner());
         s.connecting = true;
         s.connected = false;
         s.active_cm_endpoint = Some(primary.clone());
@@ -664,13 +668,17 @@ pub async fn connect_steam_cm(
 
 #[tauri::command]
 pub async fn disconnect_steam_cm(app: AppHandle) -> SteamCmSessionStatus {
-    let tx = cm_state().lock().unwrap().shutdown_tx.take();
+    let tx = cm_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .shutdown_tx
+        .take();
     if let Some(s) = tx {
         let _ = s.send(()).await;
     }
     CM_CONNECTED_FLAG.store(false, Ordering::Relaxed);
     {
-        let mut st = cm_state().lock().unwrap();
+        let mut st = cm_state().lock().unwrap_or_else(|e| e.into_inner());
         st.connected = false;
         st.connecting = false;
         st.outgoing_tx = None;
@@ -719,7 +727,12 @@ pub async fn send_steam_chat_message(
                 delivery_status = format!("transport-error: {e}");
             }
         }
-    } else if let Some(tx) = cm_state().lock().unwrap().outgoing_tx.clone() {
+    } else if let Some(tx) = cm_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .outgoing_tx
+        .clone()
+    {
         let payload = serde_json::json!({
             "targetSteamId": target,
             "message": body,

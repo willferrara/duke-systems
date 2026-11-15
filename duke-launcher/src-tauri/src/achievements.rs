@@ -602,7 +602,7 @@ pub fn start_achievement_watcher(app: AppHandle, game: &crate::GameEntry) {
     let _stop_event_raw = 0usize;
 
     {
-        let mut map = watchers_map().lock().unwrap();
+        let mut map = watchers_map().lock().unwrap_or_else(|e| e.into_inner());
         map.insert(
             game.id.clone(),
             WatcherControl {
@@ -642,7 +642,10 @@ pub fn start_achievement_watcher(app: AppHandle, game: &crate::GameEntry) {
 }
 
 pub fn stop_achievement_watcher(game_id: &str) {
-    let control = watchers_map().lock().unwrap().remove(game_id);
+    let control = watchers_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(game_id);
     if let Some(ctrl) = control {
         let _ = ctrl.stop_tx.send(());
         #[cfg(target_os = "windows")]

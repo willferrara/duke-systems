@@ -99,7 +99,7 @@ fn shader_store_dir() -> PathBuf {
 }
 
 fn load_shader_index() -> ShaderSwarmIndex {
-    let _g = index_lock().lock().unwrap();
+    let _g = index_lock().lock().unwrap_or_else(|e| e.into_inner());
     let Ok(path) = crate::get_app_data_file_standalone(SHADER_INDEX_FILE) else {
         return ShaderSwarmIndex::default();
     };
@@ -110,7 +110,7 @@ fn load_shader_index() -> ShaderSwarmIndex {
 }
 
 fn save_shader_index(idx: &ShaderSwarmIndex) -> Result<(), String> {
-    let _g = index_lock().lock().unwrap();
+    let _g = index_lock().lock().unwrap_or_else(|e| e.into_inner());
     let path = crate::get_app_data_file_standalone(SHADER_INDEX_FILE)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Failed creating shader index dir: {e}"))?;
@@ -212,7 +212,7 @@ pub fn hash_file_blake3(path: &Path) -> Result<String, String> {
     let mut file = File::open(path)
         .map_err(|e| format!("Failed opening {} for BLAKE3 hash: {e}", path.display()))?;
     let mut hasher = blake3::Hasher::new();
-    let mut buf = [0u8; 256 * 1024];
+    let mut buf = vec![0u8; 256 * 1024];
     loop {
         let n = file
             .read(&mut buf)
@@ -362,7 +362,11 @@ pub fn decode_dkshd_bundle(zst_bytes: &[u8]) -> Result<Vec<PackedShaderEntry>, S
     if raw.len() < 12 || &raw[0..8] != DKSHD_MAGIC {
         return Err("Invalid DKSHD001 shader bundle header".to_string());
     }
-    let count = u32::from_le_bytes(raw[8..12].try_into().unwrap()) as usize;
+    let count = u32::from_le_bytes(
+        raw[8..12]
+            .try_into()
+            .map_err(|_| "Truncated DKSHD entry count".to_string())?,
+    ) as usize;
     let mut cursor = 12usize;
     let mut entries = Vec::with_capacity(count.min(4096));
     for _ in 0..count {
@@ -385,7 +389,11 @@ pub fn decode_dkshd_bundle(zst_bytes: &[u8]) -> Result<Vec<PackedShaderEntry>, S
         let rel_path = String::from_utf8(raw[cursor..cursor + rlen].to_vec())
             .map_err(|_| "Invalid UTF-8 in shader relative path".to_string())?;
         cursor += rlen;
-        let dlen = u64::from_le_bytes(raw[cursor..cursor + 8].try_into().unwrap()) as usize;
+        let dlen = u64::from_le_bytes(
+            raw[cursor..cursor + 8]
+                .try_into()
+                .map_err(|_| "Truncated DKSHD entry payload length".to_string())?,
+        ) as usize;
         cursor += 8;
         if cursor + dlen > raw.len() {
             return Err("Truncated DKSHD shader payload".to_string());

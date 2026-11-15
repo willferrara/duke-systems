@@ -263,7 +263,7 @@ fn now_secs() -> u64 {
 }
 
 fn load_or_init_swarm_state() -> SwarmLocalState {
-    let _g = state_io_lock().lock().unwrap();
+    let _g = state_io_lock().lock().unwrap_or_else(|e| e.into_inner());
     let Ok(path) = get_app_data_file_standalone("swarm_state.json") else {
         return SwarmLocalState {
             node_id: format!("node-{}", std::process::id()),
@@ -302,7 +302,7 @@ fn save_swarm_state_locked(path: &Path, state: &SwarmLocalState) -> Result<(), S
 }
 
 fn save_swarm_state(state: &SwarmLocalState) -> Result<(), String> {
-    let _g = state_io_lock().lock().unwrap();
+    let _g = state_io_lock().lock().unwrap_or_else(|e| e.into_inner());
     let path = get_app_data_file_standalone("swarm_state.json")?;
     save_swarm_state_locked(&path, state)
 }
@@ -606,7 +606,7 @@ async fn handle_tcp_connection(mut stream: TcpStream) -> Result<(), String> {
 
     let response = match req {
         SwarmWireRequest::GetBeacon => {
-            let port = *listening_port_slot().lock().unwrap();
+            let port = *listening_port_slot().lock().unwrap_or_else(|e| e.into_inner());
             SwarmWireResponse::Beacon(build_local_beacon(port))
         }
         SwarmWireRequest::BeamManifest { game_key } => {
@@ -771,7 +771,10 @@ fn record_discovered_peer(beacon: SwarmBeacon, remote_ip: IpAddr, transport: &st
         apps: beacon.apps,
         save_clocks: beacon.save_clocks,
     };
-    peer_registry().lock().unwrap().insert(beacon.node_id, info);
+    peer_registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(beacon.node_id, info);
 }
 
 fn normalize_peer_socket_addr(raw: &str) -> String {
@@ -892,7 +895,7 @@ pub fn start_swarm_background_services() {
             }
             if let Some(listener) = listener {
                 let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
-                *listening_port_slot().lock().unwrap() = bound_port;
+                *listening_port_slot().lock().unwrap_or_else(|e| e.into_inner()) = bound_port;
 
                 tauri::async_runtime::spawn(async move {
                     loop {
@@ -927,7 +930,7 @@ pub fn start_swarm_background_services() {
                     loop {
                         let settings = load_settings_standalone();
                         if settings.swarm_enabled {
-                            let port = *listening_port_slot().lock().unwrap();
+                            let port = *listening_port_slot().lock().unwrap_or_else(|e| e.into_inner());
                             if port > 0 {
                                 let beacon = build_local_beacon(port);
                                 if let Ok(bytes) = serde_json::to_vec(&beacon) {
@@ -960,9 +963,9 @@ pub fn start_swarm_background_services() {
 fn snapshot_swarm_status() -> SwarmStatusSnapshot {
     let settings = load_settings_standalone();
     let (node_id, node_name) = local_node_identity();
-    let port = *listening_port_slot().lock().unwrap();
+    let port = *listening_port_slot().lock().unwrap_or_else(|e| e.into_inner());
     let now = now_secs();
-    let mut map = peer_registry().lock().unwrap();
+    let mut map = peer_registry().lock().unwrap_or_else(|e| e.into_inner());
     map.retain(|_, p| now.saturating_sub(p.last_seen_secs) <= 120);
     let mut peers: Vec<SwarmPeerInfo> = map.values().cloned().collect();
     peers.sort_by(|a, b| a.node_name.cmp(&b.node_name));

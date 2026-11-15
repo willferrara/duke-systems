@@ -1240,7 +1240,7 @@ pub fn ioring_copy_file(src: &Path, dst: &Path) -> Result<IoRingTransferReport, 
         .map_err(|e| format!("Failed opening source {}: {e}", src.display()))?;
     let mut writer = fs::File::create(dst)
         .map_err(|e| format!("Failed creating destination {}: {e}", dst.display()))?;
-    let mut buf = [0u8; 64 * 1024];
+    let mut buf = vec![0u8; 64 * 1024];
     let mut total = 0u64;
     loop {
         let n = reader

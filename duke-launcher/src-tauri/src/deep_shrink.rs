@@ -8,11 +8,11 @@ use walkdir::WalkDir;
 
 use duke_core::win32_ffi::create_hard_link;
 
-use crate::ntfs_compress::measure_game_storage_stats;
-use crate::snapshots::{create_snapshot_in_dir, CAS_DIR_NAME};
+use crate::ntfs_compress::{measure_game_storage_stats, run_wof_operation_sync, WofAlgorithm};
+use crate::snapshots::{create_snapshot_in_dir, gc_cas_blobs, CAS_DIR_NAME};
 use crate::{
-    format_bytes, load_library_from_disk, load_library_standalone, resolve_game_root_dir,
-    save_library_to_disk,
+    format_bytes, load_library_from_disk, load_library_standalone, query_disk_free_space_sync,
+    resolve_game_root_dir, save_library_to_disk, trim_process_working_set,
 };
 
 const MIN_MEDIA_DUPLICATE_BYTES: u64 = 128 * 1024;
@@ -889,6 +889,294 @@ pub async fn deduplicate_library_blake3(
     .map_err(|e| format!("Library BLAKE3 deduplication task failed: {}", e))?
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskPressureGameCandidate {
+    pub game_id: String,
+    pub title: String,
+    pub install_dir: String,
+    pub days_untouched: u64,
+    pub current_bytes: u64,
+    pub current_formatted: String,
+    pub estimated_wof_savings_bytes: u64,
+    pub foreign_lang_bytes: u64,
+    pub total_estimated_reclaim_bytes: u64,
+    pub total_estimated_reclaim_formatted: String,
+    pub already_wof_compressed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskPressureAutopilotReport {
+    pub triggered: bool,
+    pub drive_root: String,
+    pub free_bytes: u64,
+    pub free_gb: f64,
+    pub threshold_gb: f64,
+    pub min_untouched_days: u32,
+    pub total_estimated_reclaim_bytes: u64,
+    pub total_estimated_reclaim_formatted: String,
+    pub candidates: Vec<DiskPressureGameCandidate>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskPressureExecuteReport {
+    pub games_processed: usize,
+    pub total_reclaimed_bytes: u64,
+    pub total_reclaimed_formatted: String,
+    pub cas_blobs_pruned: usize,
+    pub cas_bytes_freed: u64,
+    pub new_free_gb: f64,
+    pub summary: String,
+}
+
+pub fn rank_disk_pressure_candidates_pure(
+    mut candidates: Vec<DiskPressureGameCandidate>,
+) -> Vec<DiskPressureGameCandidate> {
+    candidates.sort_by(|a, b| {
+        b.total_estimated_reclaim_bytes
+            .cmp(&a.total_estimated_reclaim_bytes)
+            .then_with(|| b.days_untouched.cmp(&a.days_untouched))
+    });
+    candidates
+}
+
+#[tauri::command]
+pub async fn evaluate_disk_pressure_autopilot(
+    threshold_gb: Option<f64>,
+    min_untouched_days: Option<u32>,
+    force_preview: Option<bool>,
+) -> Result<DiskPressureAutopilotReport, String> {
+    tokio::task::spawn_blocking(move || {
+        let settings = crate::load_settings_standalone();
+        let thresh_gb = threshold_gb
+            .unwrap_or(settings.disk_pressure_threshold_gb)
+            .clamp(5.0, 1000.0);
+        let min_days = min_untouched_days
+            .unwrap_or(settings.disk_pressure_days_threshold)
+            .clamp(7, 3650);
+        let library = load_library_standalone()?;
+
+        // Pick primary drive from first installed game or default save dir
+        let probe_path = library
+            .iter()
+            .find_map(|g| {
+                let r = resolve_game_root_dir(Path::new(&g.exe_path));
+                r.is_dir().then_some(r)
+            })
+            .or_else(|| settings.default_save_dir.as_deref().map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("C:\\"));
+        let drive_root = probe_path
+            .ancestors()
+            .last()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "C:\\".to_string());
+
+        let (free_bytes, _) = query_disk_free_space_sync(&probe_path)?;
+        let free_gb = ((free_bytes as f64) / (1024.0 * 1024.0 * 1024.0) * 100.0).round() / 100.0;
+        let under_pressure = free_gb < thresh_gb;
+        if !under_pressure && !force_preview.unwrap_or(false) {
+            return Ok(DiskPressureAutopilotReport {
+                triggered: false,
+                drive_root,
+                free_bytes,
+                free_gb,
+                threshold_gb: thresh_gb,
+                min_untouched_days: min_days,
+                total_estimated_reclaim_bytes: 0,
+                total_estimated_reclaim_formatted: "0 B".to_string(),
+                candidates: Vec::new(),
+                summary: format!(
+                    "Primary games drive has {free_gb:.1} GB free (threshold: {thresh_gb:.0} GB)."
+                ),
+            });
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let keep = vec!["english".to_string()];
+        let mut raw_candidates = Vec::new();
+        for g in library {
+            if !g.is_installed {
+                continue;
+            }
+            let last = g.last_played_ts.or(g.last_played).unwrap_or(g.added_at);
+            let age_secs = now.saturating_sub(last);
+            let days = age_secs / 86_400;
+            if days < min_days as u64 {
+                continue;
+            }
+            let root = resolve_game_root_dir(Path::new(&g.exe_path));
+            if !root.is_dir() {
+                continue;
+            }
+            let storage = measure_game_storage_stats(&g.id, &root);
+            let shrink = scan_game_deep_shrink_internal(&g.id, &root, &keep);
+            let current = storage.compressed_bytes.max(g.size_bytes);
+            if current < 100 * 1024 * 1024 {
+                continue;
+            }
+            let already_wof = storage.eligible_files > 0 && storage.compressed_files > storage.eligible_files / 2;
+            let est_wof = if already_wof {
+                0
+            } else {
+                // Conservative ~24% WOF/LZX savings estimate on uncompressed PC/ROM files
+                (current.saturating_sub(shrink.total_reclaimable_bytes) as f64 * 0.24) as u64
+            };
+            let foreign_bytes = shrink.total_reclaimable_bytes;
+            let total_est = est_wof.saturating_add(foreign_bytes);
+            if total_est < 64 * 1024 * 1024 {
+                continue;
+            }
+            raw_candidates.push(DiskPressureGameCandidate {
+                game_id: g.id,
+                title: g.title,
+                install_dir: root.to_string_lossy().into_owned(),
+                days_untouched: days,
+                current_bytes: current,
+                current_formatted: format_bytes(current),
+                estimated_wof_savings_bytes: est_wof,
+                foreign_lang_bytes: foreign_bytes,
+                total_estimated_reclaim_bytes: total_est,
+                total_estimated_reclaim_formatted: format_bytes(total_est),
+                already_wof_compressed: already_wof,
+            });
+        }
+
+        let candidates = rank_disk_pressure_candidates_pure(raw_candidates);
+        let total_reclaim: u64 = candidates
+            .iter()
+            .map(|c| c.total_estimated_reclaim_bytes)
+            .sum();
+        let summary = if candidates.is_empty() {
+            format!(
+                "Drive {drive_root} has {free_gb:.1} GB free (< {thresh_gb:.0} GB), no untouched {min_days}+ day games qualify."
+            )
+        } else {
+            format!(
+                "Low Space Alert ({free_gb:.1} GB free < {thresh_gb:.0} GB): {} untouched {min_days}+ day game(s) can reclaim ~{} via WOF LZX + language trim.",
+                candidates.len(),
+                format_bytes(total_reclaim)
+            )
+        };
+
+        Ok(DiskPressureAutopilotReport {
+            triggered: under_pressure && !candidates.is_empty(),
+            drive_root,
+            free_bytes,
+            free_gb,
+            threshold_gb: thresh_gb,
+            min_untouched_days: min_days,
+            total_estimated_reclaim_bytes: total_reclaim,
+            total_estimated_reclaim_formatted: format_bytes(total_reclaim),
+            candidates,
+            summary,
+        })
+    })
+    .await
+    .map_err(|e| format!("Disk pressure evaluation failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn execute_disk_pressure_autopilot(
+    app: tauri::AppHandle,
+    game_ids: Vec<String>,
+    keep_languages: Option<Vec<String>>,
+) -> Result<DiskPressureExecuteReport, String> {
+    tokio::task::spawn_blocking(move || {
+        let keeps = keep_languages.unwrap_or_else(|| vec!["english".to_string()]);
+        let mut library = load_library_from_disk(&app)?;
+        let mut processed = 0usize;
+        let mut reclaimed_total = 0u64;
+        let mut cas_pruned = 0usize;
+        let mut cas_freed = 0u64;
+        let mut last_probe_root = PathBuf::from("C:\\");
+
+        for gid in game_ids {
+            let Some(idx) = library.iter().position(|g| g.id == gid) else {
+                continue;
+            };
+            let root = resolve_game_root_dir(Path::new(&library[idx].exe_path));
+            if !root.is_dir() {
+                continue;
+            }
+            last_probe_root = root.clone();
+            let before = measure_game_storage_stats(&gid, &root).compressed_bytes;
+            let cas_dir = root.join(CAS_DIR_NAME);
+            let _ = create_snapshot_in_dir(
+                &gid,
+                &root,
+                &cas_dir,
+                Some("Pre-Disk-Pressure Autopilot"),
+            );
+
+            // 1. Strip unused foreign language packs
+            let scan = scan_game_deep_shrink_internal(&gid, &root, &keeps);
+            for cand in scan.candidates {
+                if cand.kind.starts_with("foreign_") {
+                    let target = root.join(cand.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+                    let _ = fs::remove_file(target);
+                }
+            }
+
+            // 2. Compact with WOF LZX (max compression ratio for cold 60+ day games)
+            let wof_rep = run_wof_operation_sync(
+                Some(&app),
+                &gid,
+                &root,
+                true,
+                WofAlgorithm::Lzx,
+            );
+            let after = wof_rep.compressed_bytes;
+            reclaimed_total = reclaimed_total.saturating_add(before.saturating_sub(after));
+
+            // 3. Prune orphaned .duke-cas blobs
+            if cas_dir.is_dir() {
+                if let Ok((rm_cnt, rm_bytes)) = gc_cas_blobs(&cas_dir) {
+                    cas_pruned += rm_cnt;
+                    cas_freed += rm_bytes;
+                }
+            }
+
+            library[idx].size_bytes = after;
+            library[idx].size_formatted = format_bytes(after);
+            processed += 1;
+        }
+
+        if processed > 0 {
+            let _ = save_library_to_disk(&app, &library);
+            let _ = tauri::Emitter::emit(&app, "library-updated", &library);
+            trim_process_working_set();
+        }
+
+        let (free_after, _) = query_disk_free_space_sync(&last_probe_root).unwrap_or((0, 0));
+        let new_free_gb =
+            ((free_after as f64) / (1024.0 * 1024.0 * 1024.0) * 100.0).round() / 100.0;
+        let total_with_cas = reclaimed_total.saturating_add(cas_freed);
+        Ok(DiskPressureExecuteReport {
+            games_processed: processed,
+            total_reclaimed_bytes: total_with_cas,
+            total_reclaimed_formatted: format_bytes(total_with_cas),
+            cas_blobs_pruned: cas_pruned,
+            cas_bytes_freed: cas_freed,
+            new_free_gb,
+            summary: format!(
+                "Disk Pressure Autopilot reclaimed {} across {} game(s) ({} CAS blobs freed). Drive free space: {:.1} GB.",
+                format_bytes(total_with_cas),
+                processed,
+                cas_pruned,
+                new_free_gb
+            ),
+        })
+    })
+    .await
+    .map_err(|e| format!("Disk pressure execution failed: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -983,5 +1271,38 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn disk_pressure_ranking_orders_by_highest_reclaim_bytes() {
+        let small = DiskPressureGameCandidate {
+            game_id: "g_small".to_string(),
+            title: "Small Cold Game".to_string(),
+            install_dir: "C:\\Games\\Small".to_string(),
+            days_untouched: 120,
+            current_bytes: 2 * 1024 * 1024 * 1024,
+            current_formatted: "2.00 GB".to_string(),
+            estimated_wof_savings_bytes: 500 * 1024 * 1024,
+            foreign_lang_bytes: 0,
+            total_estimated_reclaim_bytes: 500 * 1024 * 1024,
+            total_estimated_reclaim_formatted: "500.0 MB".to_string(),
+            already_wof_compressed: false,
+        };
+        let huge = DiskPressureGameCandidate {
+            game_id: "g_huge".to_string(),
+            title: "Huge Cold Game".to_string(),
+            install_dir: "C:\\Games\\Huge".to_string(),
+            days_untouched: 65,
+            current_bytes: 90 * 1024 * 1024 * 1024,
+            current_formatted: "90.00 GB".to_string(),
+            estimated_wof_savings_bytes: 20 * 1024 * 1024 * 1024,
+            foreign_lang_bytes: 8 * 1024 * 1024 * 1024,
+            total_estimated_reclaim_bytes: 28 * 1024 * 1024 * 1024,
+            total_estimated_reclaim_formatted: "28.00 GB".to_string(),
+            already_wof_compressed: false,
+        };
+        let ranked = rank_disk_pressure_candidates_pure(vec![small, huge]);
+        assert_eq!(ranked[0].game_id, "g_huge");
+        assert_eq!(ranked[1].game_id, "g_small");
     }
 }

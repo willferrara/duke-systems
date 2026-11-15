@@ -1299,6 +1299,109 @@ fn format_bus_event(event: &DukeEvent) -> (&'static str, String, String) {
                     .unwrap_or_default()
             ),
         ),
+        DukeEvent::VoiceMacroTriggered {
+            phrase,
+            action_id,
+            hold_ms,
+            source,
+            ..
+        } => (
+            "VoiceMacroTriggered",
+            source.clone(),
+            format!(
+                "Voice macro '{}' -> {} ({}ms)",
+                phrase, action_id, hold_ms
+            ),
+        ),
+        DukeEvent::HighlightClipRequested {
+            game_title,
+            achievement_or_boss,
+            intensity,
+            duration_secs,
+            source,
+            ..
+        } => (
+            "HighlightClipRequested",
+            source.clone(),
+            format!(
+                "Highlight clip ({:.1}s, intensity {}){}{}",
+                duration_secs,
+                intensity,
+                game_title
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(|t| format!(" for {}", t))
+                    .unwrap_or_default(),
+                achievement_or_boss
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(|m| format!(" [{}]", m))
+                    .unwrap_or_default(),
+            ),
+        ),
+        DukeEvent::CaptureSignalTelemetry {
+            system_peak_pct,
+            mic_peak_pct,
+            transient_spike,
+            motion_score,
+            ring_duration_secs,
+        } => (
+            "CaptureSignalTelemetry",
+            "duke-capture".to_string(),
+            format!(
+                "Signal sys={}% mic={}% spike={} motion={:.2} ring={:.1}s",
+                system_peak_pct, mic_peak_pct, transient_spike, motion_score, ring_duration_secs
+            ),
+        ),
+        DukeEvent::SubtitleBroadcast {
+            channel,
+            source_lang,
+            target_lang,
+            translated_text,
+            backend,
+            ..
+        } => (
+            "SubtitleBroadcast",
+            backend.clone(),
+            format!(
+                "[{} {}->{}] {}",
+                channel, source_lang, target_lang, translated_text
+            ),
+        ),
+        DukeEvent::ControllerGuideAction {
+            action,
+            controller_kind,
+            radial_slot,
+            source,
+        } => (
+            "ControllerGuideAction",
+            source.clone(),
+            format!(
+                "Guide action {} ({}{})",
+                action,
+                controller_kind,
+                radial_slot
+                    .map(|s| format!(" slot {}", s))
+                    .unwrap_or_default()
+            ),
+        ),
+        DukeEvent::GhostInputFrame {
+            target_exe,
+            pid,
+            buttons,
+            active,
+            ..
+        } => (
+            "GhostInputFrame",
+            format!("duke-ghost:{}", target_exe),
+            format!(
+                "Ghost {} (pid {}) {} buttons=0x{:04X}",
+                target_exe,
+                pid,
+                if *active { "active" } else { "paused" },
+                buttons
+            ),
+        ),
     }
 }
 

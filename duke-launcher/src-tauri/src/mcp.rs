@@ -511,7 +511,10 @@ async fn execute_tool_call(name: &str, args: &Value) -> Result<Value, String> {
             };
 
             let currently_suspended = {
-                suspended_pid_set().lock().unwrap().contains(&target_pid)
+                suspended_pid_set()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&target_pid)
             };
 
             let do_suspend = match action.as_str() {
@@ -522,7 +525,10 @@ async fn execute_tool_call(name: &str, args: &Value) -> Result<Value, String> {
 
             if do_suspend {
                 let freed_mb = duke_core::win32_ffi::suspend_external_pid(target_pid)?;
-                suspended_pid_set().lock().unwrap().insert(target_pid);
+                suspended_pid_set()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(target_pid);
                 Ok(json!({
                     "pid": target_pid,
                     "isSuspended": true,
@@ -530,7 +536,10 @@ async fn execute_tool_call(name: &str, args: &Value) -> Result<Value, String> {
                 }))
             } else {
                 duke_core::win32_ffi::resume_external_pid(target_pid)?;
-                suspended_pid_set().lock().unwrap().remove(&target_pid);
+                suspended_pid_set()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&target_pid);
                 Ok(json!({
                     "pid": target_pid,
                     "isSuspended": false
@@ -636,10 +645,16 @@ pub fn handle_mcp_line(line: &str, rt: &tokio::runtime::Runtime) -> Option<Strin
 
 /// Runs headless stdio JSON-RPC 2.0 MCP server (0 MB WebView2 RAM).
 pub fn run_mcp_stdio_server() {
-    let rt = tokio::runtime::Builder::new_current_thread()
+    let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("Failed initializing tokio runtime for Duke Launcher --mcp");
+    {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("Failed initializing tokio runtime for Duke Launcher --mcp: {err}");
+            return;
+        }
+    };
 
     let stdin = io::stdin();
     let stdout = io::stdout();

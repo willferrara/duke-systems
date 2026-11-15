@@ -35,6 +35,11 @@ pub enum PilotActionKind {
     ExportDkpack,
     ToggleCouchMode,
     PlayTonight,
+    ScanMalware,
+    BlockInternet,
+    FindFixes,
+    VerifyBios,
+    DiskPressureAutopilot,
     SemanticCatalogSearch,
 }
 
@@ -496,8 +501,14 @@ pub fn parse_pilot_command(raw_query: &str, library: &[GameEntry]) -> PilotPlan 
             }
         }
 
-        // 3. Import folder / ROMs / `.dkpack`
-        if lower.starts_with("import ") || lower.starts_with("scan ") || lower.contains(" import ") {
+        // 3. Import folder / ROMs / `.dkpack` (exclude malware/security scans handled below)
+        if (lower.starts_with("import ")
+            || (lower.starts_with("scan ")
+                && !lower.contains("malware")
+                && !lower.contains("security")
+                && !lower.starts_with("scan for ")))
+            || lower.contains(" import ")
+        {
             let explicit_path = extract_windows_path_from_clause(clause);
             let prompt_needed = explicit_path.is_none();
             if prompt_needed {
@@ -755,6 +766,165 @@ pub fn parse_pilot_command(raw_query: &str, library: &[GameEntry]) -> PilotPlan 
                 target_titles: titles,
                 console_id: None,
                 path_hint: dkpack_path,
+                min_size_gb: None,
+                session_minutes: None,
+                capsule_format: None,
+                query_text: Some(clause.clone()),
+                requires_folder_prompt: false,
+            });
+            continue;
+        }
+
+        // 9b. 1-Click Security, Fix Finder, BIOS Verification, Disk Pressure Autopilot
+        if lower.contains("malware")
+            || lower.contains("security scan")
+            || lower.starts_with("scan for ")
+        {
+            let (ids, titles, detail) = match target_game {
+                Some(ref g) => (
+                    vec![g.id.clone()],
+                    vec![g.title.clone()],
+                    format!("Run Security Shield v2 deep PE static inspection on {}.", g.title),
+                ),
+                None => (
+                    Vec::new(),
+                    Vec::new(),
+                    "Run Security Shield v2 deep PE malware & dropper inspection across library."
+                        .to_string(),
+                ),
+            };
+            steps.push(PilotStep {
+                id: step_id,
+                kind: PilotActionKind::ScanMalware,
+                label: match target_game {
+                    Some(ref g) => format!("Scan {} for Malware", g.title),
+                    None => "Security Shield v2 Malware Scan".to_string(),
+                },
+                detail,
+                action_icon: "icon-shield-check".to_string(),
+                target_game_ids: ids,
+                target_titles: titles,
+                console_id: None,
+                path_hint: None,
+                min_size_gb: None,
+                session_minutes: None,
+                capsule_format: None,
+                query_text: Some(clause.clone()),
+                requires_folder_prompt: false,
+            });
+            continue;
+        }
+
+        if lower.contains("block internet")
+            || lower.contains("offline mode")
+            || lower.contains("network lock")
+        {
+            let (ids, titles, detail) = match target_game {
+                Some(ref g) => (
+                    vec![g.id.clone()],
+                    vec![g.title.clone()],
+                    format!("Enable Offline Mode WFP/AppContainer network lock for {}.", g.title),
+                ),
+                None => (
+                    Vec::new(),
+                    Vec::new(),
+                    "Identify a library game to lock into Offline Mode.".to_string(),
+                ),
+            };
+            steps.push(PilotStep {
+                id: step_id,
+                kind: PilotActionKind::BlockInternet,
+                label: match target_game {
+                    Some(ref g) => format!("Block Internet for {}", g.title),
+                    None => "Block Internet (Offline Mode)".to_string(),
+                },
+                detail,
+                action_icon: "icon-shield-check".to_string(),
+                target_game_ids: ids,
+                target_titles: titles,
+                console_id: None,
+                path_hint: None,
+                min_size_gb: None,
+                session_minutes: None,
+                capsule_format: None,
+                query_text: Some(clause.clone()),
+                requires_folder_prompt: false,
+            });
+            continue;
+        }
+
+        if lower.contains("find fix") || lower.starts_with("fix ") || lower.contains("crash fix") {
+            let (ids, titles, detail) = match target_game {
+                Some(ref g) => (
+                    vec![g.id.clone()],
+                    vec![g.title.clone()],
+                    format!("Diagnose missing DLLs/crashes & fetch PCGamingWiki fixes for {}.", g.title),
+                ),
+                None => (
+                    Vec::new(),
+                    Vec::new(),
+                    "Specify a game title to run Crash-to-Fix diagnosis + PCGamingWiki lookup."
+                        .to_string(),
+                ),
+            };
+            steps.push(PilotStep {
+                id: step_id,
+                kind: PilotActionKind::FindFixes,
+                label: match target_game {
+                    Some(ref g) => format!("Find Fixes for {}", g.title),
+                    None => "Crash-to-Fix & PCGamingWiki Diagnostics".to_string(),
+                },
+                detail,
+                action_icon: "icon-wrench".to_string(),
+                target_game_ids: ids,
+                target_titles: titles,
+                console_id: None,
+                path_hint: None,
+                min_size_gb: None,
+                session_minutes: None,
+                capsule_format: None,
+                query_text: Some(clause.clone()),
+                requires_folder_prompt: false,
+            });
+            continue;
+        }
+
+        if lower.contains("verify bios") || lower.contains("check bios") || lower.contains("bios vault") {
+            steps.push(PilotStep {
+                id: step_id,
+                kind: PilotActionKind::VerifyBios,
+                label: "Verify Console BIOS & Firmware Vault".to_string(),
+                detail: "Check Libretro MD5/SHA-1 hashes across DuckStation, PCSX2, melonDS, Azahar & RetroArch."
+                    .to_string(),
+                action_icon: "icon-shield-check".to_string(),
+                target_game_ids: Vec::new(),
+                target_titles: Vec::new(),
+                console_id: None,
+                path_hint: None,
+                min_size_gb: None,
+                session_minutes: None,
+                capsule_format: None,
+                query_text: Some(clause.clone()),
+                requires_folder_prompt: false,
+            });
+            continue;
+        }
+
+        if lower.contains("disk pressure")
+            || lower.contains("free space autopilot")
+            || lower.contains("space autopilot")
+        {
+            steps.push(PilotStep {
+                id: step_id,
+                kind: PilotActionKind::DiskPressureAutopilot,
+                label: "Run Smart Disk-Space Pressure Autopilot".to_string(),
+                detail: "Rank untouched 60+ day games by highest WOF/LZX + language trim space reclaimed."
+                    .to_string(),
+                action_icon: "icon-hard-drive".to_string(),
+                target_game_ids: Vec::new(),
+                target_titles: Vec::new(),
+                console_id: None,
+                path_hint: None,
                 min_size_gb: None,
                 session_minutes: None,
                 capsule_format: None,
@@ -1163,6 +1333,75 @@ pub async fn execute_duke_pilot_plan(
                     rep.pack_id, rep.size_bytes, rep.output_path
                 ))
             }
+            PilotActionKind::ScanMalware => {
+                let target_gid = step.target_game_ids.first().cloned();
+                let library = crate::load_library_from_disk(&app)?;
+                if let Some(gid) = target_gid {
+                    let entry = library
+                        .into_iter()
+                        .find(|g| g.id == gid)
+                        .ok_or_else(|| "Target game not found.".to_string())?;
+                    let shield = crate::pe_inspect::inspect_pe_security_shield_file(
+                        std::path::Path::new(&entry.exe_path),
+                        false,
+                        None,
+                    )?;
+                    Ok(format!(
+                        "Security Shield v2 scanned {}: badge={} ({} behavioral finding(s)).",
+                        entry.title,
+                        shield.shield_badge,
+                        shield.suspicious_behaviors.len()
+                    ))
+                } else {
+                    let mut scanned = 0usize;
+                    let mut flagged = 0usize;
+                    for entry in library.iter().take(25) {
+                        let p = std::path::Path::new(&entry.exe_path);
+                        if p.is_file() {
+                            if let Ok(sh) = crate::pe_inspect::inspect_pe_security_shield_file(p, false, None) {
+                                scanned += 1;
+                                if sh.shield_badge != "Safe" {
+                                    flagged += 1;
+                                }
+                            }
+                        }
+                    }
+                    Ok(format!(
+                        "Security Shield v2 scanned {scanned} binaries ({flagged} warning/blocked)."
+                    ))
+                }
+            }
+            PilotActionKind::BlockInternet => {
+                let gid = step
+                    .target_game_ids
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| "Identify which game to lock offline.".to_string())?;
+                let st = crate::duke_jail::set_game_jail_policy(app.clone(), gid, false, true).await?;
+                Ok(st.summary)
+            }
+            PilotActionKind::FindFixes => {
+                let gid = step
+                    .target_game_ids
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| "Identify which game to diagnose fixes for.".to_string())?;
+                let rep = crate::fix_finder::analyze_game_crash_or_preflight(gid, None, None).await?;
+                Ok(rep.plain_english_cause)
+            }
+            PilotActionKind::VerifyBios => {
+                let rep = crate::bios_vault::get_bios_vault_status().await?;
+                Ok(rep.summary)
+            }
+            PilotActionKind::DiskPressureAutopilot => {
+                let rep = crate::deep_shrink::evaluate_disk_pressure_autopilot(
+                    None,
+                    None,
+                    Some(true),
+                )
+                .await?;
+                Ok(rep.summary)
+            }
             PilotActionKind::ToggleCouchMode => {
                 follow_up_action = Some("toggle_couch_mode".to_string());
                 Ok("Toggling Duke Deck couch interface.".to_string())
@@ -1319,5 +1558,23 @@ mod tests {
         let p6 = parse_pilot_command("co-op physics chaos games under 5 GB", &lib);
         assert_eq!(p6.steps.len(), 1);
         assert_eq!(p6.steps[0].kind, PilotActionKind::SemanticCatalogSearch);
+
+        // 7. Security, Fix, BIOS, Disk Pressure actions
+        let p7 = parse_pilot_command("block internet for Balatro", &lib);
+        assert_eq!(p7.steps[0].kind, PilotActionKind::BlockInternet);
+        assert_eq!(p7.steps[0].target_titles, vec!["Balatro"]);
+
+        let p8 = parse_pilot_command("find fixes for Cyberpunk 2077", &lib);
+        assert_eq!(p8.steps[0].kind, PilotActionKind::FindFixes);
+        assert_eq!(p8.steps[0].target_titles, vec!["Cyberpunk 2077"]);
+
+        let p9 = parse_pilot_command("scan for malware", &lib);
+        assert_eq!(p9.steps[0].kind, PilotActionKind::ScanMalware);
+
+        let p10 = parse_pilot_command("verify bios", &lib);
+        assert_eq!(p10.steps[0].kind, PilotActionKind::VerifyBios);
+
+        let p11 = parse_pilot_command("disk pressure", &lib);
+        assert_eq!(p11.steps[0].kind, PilotActionKind::DiskPressureAutopilot);
     }
 }

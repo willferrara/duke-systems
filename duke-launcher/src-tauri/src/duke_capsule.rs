@@ -158,7 +158,7 @@ fn hash_file_blake3(path: &Path) -> Result<String, String> {
         .map_err(|e| format!("Failed reading '{}' for BLAKE3: {}", path.display(), e))?;
     let mut reader = BufReader::with_capacity(64 * 1024, file);
     let mut hasher = blake3::Hasher::new();
-    let mut buf = [0u8; 64 * 1024];
+    let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = reader
             .read(&mut buf)

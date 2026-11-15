@@ -13,7 +13,7 @@ use crate::{atomic_write_string, load_library_standalone, resolve_game_root_dir}
 const HASH_CHUNK_BYTES: usize = 64 * 1024;
 const HARDLINK_MIN_BYTES: u64 = 1024 * 1024;
 pub(crate) const CAS_DIR_NAME: &str = ".duke-cas";
-const PROFILE_DIR_NAME: &str = ".duke-profile";
+pub(crate) const PROFILE_DIR_NAME: &str = ".duke-profile";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -466,11 +466,11 @@ pub fn create_snapshot_in_dir_filtered(
             scope.spawn(move || {
                 let mut local_buf = vec![0u8; HASH_CHUNK_BYTES];
                 loop {
-                    if error_slot.lock().unwrap().is_some() {
+                    if error_slot.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
                         break;
                     }
                     let item = {
-                        let mut guard = queue.lock().unwrap();
+                        let mut guard = queue.lock().unwrap_or_else(|e| e.into_inner());
                         guard.pop()
                     };
                     let Some((full_path, rel_path, size_bytes, mtime_ns)) = item else {
@@ -493,7 +493,7 @@ pub fn create_snapshot_in_dir_filtered(
                             let mut file = match File::open(&full_path) {
                                 Ok(f) => f,
                                 Err(e) => {
-                                    *error_slot.lock().unwrap() =
+                                    *error_slot.lock().unwrap_or_else(|e| e.into_inner()) =
                                         Some(format!("Failed to open {}: {}", full_path.display(), e));
                                     break;
                                 }
@@ -517,7 +517,7 @@ pub fn create_snapshot_in_dir_filtered(
                                 }
                             }
                             if let Some(err) = read_err {
-                                *error_slot.lock().unwrap() = Some(err);
+                                *error_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(err);
                                 break;
                             }
                             hasher.finalize().to_hex().to_string()
@@ -525,43 +525,46 @@ pub fn create_snapshot_in_dir_filtered(
                     };
 
                     let per_hash_lock = {
-                        let mut locks = hash_locks.lock().unwrap();
+                        let mut locks = hash_locks.lock().unwrap_or_else(|e| e.into_inner());
                         Arc::clone(
                             locks
                                 .entry(blake3_hex.clone())
                                 .or_insert_with(|| Arc::new(Mutex::new(()))),
                         )
                     };
-                    let _hash_guard = per_hash_lock.lock().unwrap();
+                    let _hash_guard = per_hash_lock.lock().unwrap_or_else(|e| e.into_inner());
                     match ensure_blob_stored(cas_dir, &blake3_hex, &full_path, size_bytes) {
                         Ok(true) => {
-                            *blobs_added.lock().unwrap() += 1;
+                            *blobs_added.lock().unwrap_or_else(|e| e.into_inner()) += 1;
                         }
                         Ok(false) => {
-                            *dedup_count.lock().unwrap() += 1;
+                            *dedup_count.lock().unwrap_or_else(|e| e.into_inner()) += 1;
                         }
                         Err(err) => {
-                            *error_slot.lock().unwrap() = Some(err);
+                            *error_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(err);
                             break;
                         }
                     }
 
-                    results.lock().unwrap().push(SnapshotFileRecord {
-                        rel_path,
-                        size_bytes,
-                        mtime_ns,
-                        blake3: blake3_hex,
-                    });
+                    results
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(SnapshotFileRecord {
+                            rel_path,
+                            size_bytes,
+                            mtime_ns,
+                            blake3: blake3_hex,
+                        });
                 }
             });
         }
     });
 
-    if let Some(err) = error_slot.lock().unwrap().take() {
+    if let Some(err) = error_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
         return Err(err);
     }
 
-    let mut files = std::mem::take(&mut *results.lock().unwrap());
+    let mut files = std::mem::take(&mut *results.lock().unwrap_or_else(|e| e.into_inner()));
     files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     let total_bytes = files.iter().map(|f| f.size_bytes).sum();
     save_stat_index(cas_dir, &files);
@@ -581,8 +584,8 @@ pub fn create_snapshot_in_dir_filtered(
         created_at,
         file_count: files.len(),
         total_bytes,
-        unique_blobs_added: *blobs_added.lock().unwrap(),
-        deduplicated_files: *dedup_count.lock().unwrap(),
+        unique_blobs_added: *blobs_added.lock().unwrap_or_else(|e| e.into_inner()),
+        deduplicated_files: *dedup_count.lock().unwrap_or_else(|e| e.into_inner()),
         elapsed_ms: started.elapsed().as_millis() as u64,
         files,
     };
@@ -879,6 +882,12 @@ pub async fn reclaim_snapshot_space() -> Result<SnapshotGcReport, String> {
     })
     .await
     .map_err(|e| format!("Restore point cleanup worker failed: {}", e))?
+}
+
+/// Resolves the fallback data-root `.duke-cas` directory path.
+#[allow(dead_code)]
+pub fn cas_root_dir_standalone() -> Result<PathBuf, String> {
+    crate::resolve_data_root_dir_standalone().map(|root| root.join(CAS_DIR_NAME))
 }
 
 #[tauri::command]

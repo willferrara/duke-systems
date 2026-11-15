@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
@@ -27,6 +27,15 @@ pub struct EtwXrayCapability {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct XrayOptimizationSuggestion {
+    pub id: String,
+    pub title: String,
+    pub rationale: String,
+    pub action_kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LiveXrayTick {
     pub game_id: String,
     pub pid: u32,
@@ -42,6 +51,10 @@ pub struct LiveXrayTick {
     pub cpu_gpu_bottleneck_ratio: f64,
     pub bottleneck_verdict: String,
     pub shader_stutter_spikes: u32,
+    #[serde(default)]
+    pub gpu_reset_events: u32,
+    #[serde(default)]
+    pub spike_correlations: Vec<String>,
     pub telemetry_source: String,
 }
 
@@ -66,6 +79,12 @@ pub struct SessionPerformanceScorecard {
     pub gpu_bound_pct: f64,
     pub bottleneck_verdict: String,
     pub shader_stutter_spikes: u32,
+    #[serde(default)]
+    pub gpu_reset_events: u32,
+    #[serde(default)]
+    pub spike_correlations: Vec<String>,
+    #[serde(default)]
+    pub optimization_suggestions: Vec<XrayOptimizationSuggestion>,
     pub telemetry_source: String,
     pub anti_cheat_safe: bool,
 }
@@ -92,6 +111,8 @@ struct XrayCollectorState {
     gpu_busy_ms: Mutex<VecDeque<f64>>,
     last_present_qpc: Mutex<HashMap<u32, i64>>,
     pending_present_start_qpc: Mutex<HashMap<u32, i64>>,
+    gpu_reset_events: AtomicU32,
+    spike_causes: Mutex<Vec<String>>,
     qpc_freq: i64,
 }
 
@@ -110,6 +131,8 @@ impl XrayCollectorState {
             gpu_busy_ms: Mutex::new(VecDeque::with_capacity(2048)),
             last_present_qpc: Mutex::new(HashMap::new()),
             pending_present_start_qpc: Mutex::new(HashMap::new()),
+            gpu_reset_events: AtomicU32::new(0),
+            spike_causes: Mutex::new(Vec::new()),
             qpc_freq: qpc_freq.max(1),
         }
     }
@@ -122,6 +145,38 @@ impl XrayCollectorState {
                 }
             }
         }
+    }
+
+    fn current_pids(&self) -> Vec<u32> {
+        self.target_pids
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    fn record_gpu_reset(&self) {
+        self.gpu_reset_events.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_spike_cause(&self, cause: String) {
+        if cause.trim().is_empty() {
+            return;
+        }
+        if let Ok(mut g) = self.spike_causes.lock() {
+            if !g.iter().any(|existing| existing == &cause) && g.len() < 12 {
+                g.push(cause);
+            }
+        }
+    }
+
+    fn snapshot_extras(&self) -> (u32, Vec<String>) {
+        let resets = self.gpu_reset_events.load(Ordering::Relaxed);
+        let causes = self
+            .spike_causes
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        (resets, causes)
     }
 
     fn tracks_pid(&self, pid: u32) -> bool {
@@ -658,7 +713,14 @@ mod win_etw {
         let qpc_now = ev.event_header.timestamp;
         let opcode = ev.event_header.event_descriptor.opcode;
         let id = ev.event_header.event_descriptor.id;
+        let task = ev.event_header.event_descriptor.task;
         let freq = state.qpc_freq as f64;
+
+        // Detect DxgKrnl TDR / GPU device reset / adapter recovery events (non-invasive telemetry)
+        if provider == dxgkrnl && (id == 52 || id == 53 || id == 170 || id == 221 || task == 104) {
+            state.record_gpu_reset();
+            state.record_spike_cause("GPU driver TDR / device reset event in DxgKrnl".to_string());
+        }
 
         // Track Present Start (opcode 1) and Stop (opcode 2) or DXGI Present events (42/43).
         if opcode == 1 || id == 42 {
@@ -985,6 +1047,180 @@ fn save_scorecard_store(store: &ScorecardStore) -> Result<(), String> {
     atomic_write_string(&path, &json)
 }
 
+/// Enumerates heavyweight background processes outside the active game process tree
+/// when ETW/DWM detects frame-time stutter spikes (pure-Rust kernel32 snapshot, zero DLL injection).
+#[cfg(windows)]
+pub fn sample_background_pressure_processes(exclude_pids: &[u32]) -> Vec<String> {
+    use std::ffi::c_void;
+    use windows::core::{PCSTR, PCWSTR};
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+
+    const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+    const HEAVY_WATCH_EXES: &[(&str, &str)] = &[
+        ("chrome.exe", "Google Chrome background tabs"),
+        ("msedge.exe", "Microsoft Edge WebView/tabs"),
+        ("firefox.exe", "Firefox browser threads"),
+        ("obs64.exe", "OBS Studio encoder/capture"),
+        ("discord.exe", "Discord overlay/voice worker"),
+        ("searchindexer.exe", "Windows Search Indexer I/O"),
+        ("tiworker.exe", "Windows Update Module Installer"),
+        ("msmpeng.exe", "Windows Defender real-time scan"),
+        ("onedrive.exe", "OneDrive cloud sync I/O"),
+        ("steamwebhelper.exe", "Steam CEF background helper"),
+        ("wallpaper32.exe", "Wallpaper Engine GPU compositor"),
+        ("wallpaper64.exe", "Wallpaper Engine 64-bit GPU"),
+        ("nvidia share.exe", "NVIDIA ShadowPlay capture"),
+        ("radeonsoftware.exe", "AMD Adrenalin overlay"),
+    ];
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct ProcessEntry32W {
+        dwSize: u32,
+        cntUsage: u32,
+        th32ProcessID: u32,
+        th32DefaultHeapID: usize,
+        th32ModuleID: u32,
+        cntThreads: u32,
+        th32ParentProcessID: u32,
+        pcPriClassBase: i32,
+        dwFlags: u32,
+        szExeFile: [u16; 260],
+    }
+
+    type CreateSnapshotFn = unsafe extern "system" fn(u32, u32) -> isize;
+    type ProcessFirstWFn = unsafe extern "system" fn(isize, *mut ProcessEntry32W) -> i32;
+    type ProcessNextWFn = unsafe extern "system" fn(isize, *mut ProcessEntry32W) -> i32;
+
+    let mut found = Vec::new();
+    let k32_w: Vec<u16> = "kernel32.dll\0".encode_utf16().collect();
+    unsafe {
+        let Ok(k32) = LoadLibraryW(PCWSTR(k32_w.as_ptr())) else {
+            return found;
+        };
+        if k32.is_invalid() {
+            return found;
+        }
+        let (Some(snap_p), Some(first_p), Some(next_p)) = (
+            GetProcAddress(k32, PCSTR(c"CreateToolhelp32Snapshot".as_ptr().cast())),
+            GetProcAddress(k32, PCSTR(c"Process32FirstW".as_ptr().cast())),
+            GetProcAddress(k32, PCSTR(c"Process32NextW".as_ptr().cast())),
+        ) else {
+            return found;
+        };
+
+        let create_snap: CreateSnapshotFn = std::mem::transmute(snap_p);
+        let proc_first: ProcessFirstWFn = std::mem::transmute(first_p);
+        let proc_next: ProcessNextWFn = std::mem::transmute(next_p);
+
+        let snap = create_snap(TH32CS_SNAPPROCESS, 0);
+        if snap == -1 || snap == 0 {
+            return found;
+        }
+        let mut pe: ProcessEntry32W = std::mem::zeroed();
+        pe.dwSize = std::mem::size_of::<ProcessEntry32W>() as u32;
+        if proc_first(snap, &mut pe) != 0 {
+            loop {
+                if !exclude_pids.contains(&pe.th32ProcessID) && pe.th32ProcessID > 4 {
+                    let end = pe
+                        .szExeFile
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(pe.szExeFile.len());
+                    let exe = String::from_utf16_lossy(&pe.szExeFile[..end]);
+                    let lower = exe.to_ascii_lowercase();
+                    if let Some((_, desc)) = HEAVY_WATCH_EXES.iter().find(|(pat, _)| lower == *pat) {
+                        let tag = format!("{} ({} · {} threads)", exe, desc, pe.cntThreads);
+                        if !found.contains(&tag) {
+                            found.push(tag);
+                        }
+                    } else if pe.cntThreads >= 64 && !found.iter().any(|f| f.starts_with(&exe)) {
+                        found.push(format!("{} (High thread load: {})", exe, pe.cntThreads));
+                    }
+                    if found.len() >= 6 {
+                        break;
+                    }
+                }
+                if proc_next(snap, &mut pe) == 0 {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(windows::Win32::Foundation::HANDLE(snap as *mut c_void));
+    }
+    found
+}
+
+#[cfg(not(windows))]
+pub fn sample_background_pressure_processes(_exclude_pids: &[u32]) -> Vec<String> {
+    Vec::new()
+}
+
+pub fn build_xray_optimization_suggestions(
+    stats: &FramePercentileStats,
+    spike_correlations: &[String],
+    gpu_reset_events: u32,
+) -> Vec<XrayOptimizationSuggestion> {
+    let mut out = Vec::new();
+    if stats.shader_stutter_spikes >= 3 {
+        out.push(XrayOptimizationSuggestion {
+            id: "sync_shaders".to_string(),
+            title: "Sync Shader Swarm & Purge Stale Driver Cache".to_string(),
+            rationale: format!(
+                "Detected {} shader-compilation frame hitches (>2.25x baseline frame time).",
+                stats.shader_stutter_spikes
+            ),
+            action_kind: "sync_shader_swarm".to_string(),
+        });
+    }
+    if stats.cpu_bound_pct >= 56.0 || stats.bottleneck_verdict.contains("CPU") {
+        out.push(XrayOptimizationSuggestion {
+            id: "cpu_latency_boost".to_string(),
+            title: "Enable High-Priority CPU & 0.5 ms Frame Pacing".to_string(),
+            rationale: format!(
+                "Main thread is CPU-bound ({:.0}% CPU vs {:.0}% GPU).",
+                stats.cpu_bound_pct, stats.gpu_bound_pct
+            ),
+            action_kind: "enable_latency_boost".to_string(),
+        });
+    }
+    if stats.gpu_bound_pct >= 58.0 || (stats.avg_fps > 0.0 && stats.avg_fps < 55.0) {
+        out.push(XrayOptimizationSuggestion {
+            id: "gpu_upscale_auto".to_string(),
+            title: "Enable Flip-Model Borderless & Spatial Upscaling".to_string(),
+            rationale: format!(
+                "GPU render bound ({:.0}% GPU pressure, {:.1} FPS avg).",
+                stats.gpu_bound_pct, stats.avg_fps
+            ),
+            action_kind: "enable_upscaler".to_string(),
+        });
+    }
+    if !spike_correlations.is_empty() {
+        out.push(XrayOptimizationSuggestion {
+            id: "trim_background_ram".to_string(),
+            title: "Trim Standby & Background Working-Set RAM".to_string(),
+            rationale: format!(
+                "Frame spikes coincided with {} active background culprit(s).",
+                spike_correlations.len()
+            ),
+            action_kind: "trim_ram".to_string(),
+        });
+    }
+    if gpu_reset_events > 0 {
+        out.push(XrayOptimizationSuggestion {
+            id: "check_tdr_fixes".to_string(),
+            title: "Inspect GPU Driver Reset & DXVK Stability Fixes".to_string(),
+            rationale: format!(
+                "Captured {} GPU reset/TDR event(s) during gameplay.",
+                gpu_reset_events
+            ),
+            action_kind: "open_fix_finder".to_string(),
+        });
+    }
+    out
+}
+
 pub fn start_session_xray(
     app: &tauri::AppHandle,
     game_id: &str,
@@ -1013,7 +1249,8 @@ pub fn start_session_xray(
         win_etw::run_kernel_dxgi_etw_or_dwm(session_name, stop_etw, state_etw, src_etw);
     });
 
-    // Live ticker thread updating child PIDs from ProcessTreeJob and emitting 1 Hz ticks to UI.
+    // Live ticker thread updating child PIDs from ProcessTreeJob, correlating stutter spikes
+    // with background processes, and emitting 1 Hz ticks to UI.
     let stop_tick = Arc::clone(&stop);
     let state_tick = Arc::clone(&state);
     let src_tick = Arc::clone(&telemetry_source);
@@ -1021,6 +1258,7 @@ pub fn start_session_xray(
     let gid_tick = game_id.to_string();
     let started = Instant::now();
     std::thread::spawn(move || {
+        let mut prev_spikes = 0u32;
         while !stop_tick.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(1000));
             if stop_tick.load(Ordering::Relaxed) {
@@ -1034,6 +1272,15 @@ pub fn start_session_xray(
                 continue;
             }
             let stats = compute_frame_scorecard(&frames, &present, &cpu, &gpu);
+            if stats.shader_stutter_spikes > prev_spikes {
+                prev_spikes = stats.shader_stutter_spikes;
+                let mut exclude = state_tick.current_pids();
+                exclude.push(std::process::id());
+                for culprit in sample_background_pressure_processes(&exclude) {
+                    state_tick.record_spike_cause(culprit);
+                }
+            }
+            let (gpu_reset_events, spike_correlations) = state_tick.snapshot_extras();
             let source_label = src_tick
                 .lock()
                 .map(|s| s.clone())
@@ -1053,6 +1300,8 @@ pub fn start_session_xray(
                 cpu_gpu_bottleneck_ratio: stats.cpu_gpu_bottleneck_ratio,
                 bottleneck_verdict: stats.bottleneck_verdict,
                 shader_stutter_spikes: stats.shader_stutter_spikes,
+                gpu_reset_events,
+                spike_correlations,
                 telemetry_source: source_label,
             };
             let _ = app_tick.emit("etw-xray-tick", &tick);
@@ -1097,6 +1346,15 @@ pub fn stop_and_persist_scorecard(
         return None;
     }
 
+    let (gpu_reset_events, mut spike_correlations) = handle.state.snapshot_extras();
+    if stats.shader_stutter_spikes > 0 && spike_correlations.is_empty() {
+        let mut exclude = handle.state.current_pids();
+        exclude.push(std::process::id());
+        spike_correlations = sample_background_pressure_processes(&exclude);
+    }
+    let optimization_suggestions =
+        build_xray_optimization_suggestions(&stats, &spike_correlations, gpu_reset_events);
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1126,6 +1384,9 @@ pub fn stop_and_persist_scorecard(
         gpu_bound_pct: stats.gpu_bound_pct,
         bottleneck_verdict: stats.bottleneck_verdict,
         shader_stutter_spikes: stats.shader_stutter_spikes,
+        gpu_reset_events,
+        spike_correlations,
+        optimization_suggestions,
         telemetry_source: source,
         anti_cheat_safe: true,
     };
@@ -1215,6 +1476,31 @@ mod tests {
         assert_eq!(stats.shader_stutter_spikes, 1);
         assert_eq!(stats.bottleneck_verdict, "GPU Render Bound");
         assert!(stats.cpu_gpu_bottleneck_ratio < 0.82);
+    }
+
+    #[test]
+    fn xray_correlates_spikes_and_generates_actionable_suggestions() {
+        let stats = FramePercentileStats {
+            total_frames: 600,
+            avg_fps: 48.0,
+            low_1pct_fps: 24.0,
+            low_0_1pct_fps: 11.0,
+            avg_frame_ms: 20.8,
+            low_1pct_frame_ms: 41.6,
+            low_0_1pct_frame_ms: 90.0,
+            gpu_present_latency_ms: 13.0,
+            cpu_gpu_bottleneck_ratio: 0.65,
+            cpu_bound_pct: 36.0,
+            gpu_bound_pct: 64.0,
+            bottleneck_verdict: "GPU Render Bound".to_string(),
+            shader_stutter_spikes: 5,
+        };
+        let corr = vec!["obs64.exe (OBS Studio encoder/capture · 42 threads)".to_string()];
+        let suggs = build_xray_optimization_suggestions(&stats, &corr, 1);
+        assert!(suggs.iter().any(|s| s.action_kind == "sync_shader_swarm"));
+        assert!(suggs.iter().any(|s| s.action_kind == "enable_upscaler"));
+        assert!(suggs.iter().any(|s| s.action_kind == "trim_ram"));
+        assert!(suggs.iter().any(|s| s.action_kind == "open_fix_finder"));
     }
 
     #[test]

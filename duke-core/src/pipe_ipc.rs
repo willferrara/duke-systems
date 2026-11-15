@@ -109,6 +109,18 @@ pub enum DukeEvent {
         radial_slot: Option<u8>,
         source: String,
     },
+    GhostInputFrame {
+        target_exe: String,
+        pid: u32,
+        buttons: u16,
+        lt: u8,
+        rt: u8,
+        lx: i8,
+        ly: i8,
+        rx: i8,
+        ry: i8,
+        active: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

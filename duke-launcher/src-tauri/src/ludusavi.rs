@@ -529,8 +529,8 @@ pub fn expand_ludusavi_template(pattern: &str, env: &PathEnvVars) -> Vec<PathBuf
     results
 }
 
-fn load_ludusavi_cache_from_disk() -> LudusaviCacheFile {
-    let _guard = get_ludusavi_io_lock().lock().unwrap();
+pub(crate) fn load_ludusavi_cache_from_disk() -> LudusaviCacheFile {
+    let _guard = get_ludusavi_io_lock().lock().unwrap_or_else(|e| e.into_inner());
     let Ok(path) = crate::get_app_data_file_standalone("ludusavi_cache.json") else {
         return LudusaviCacheFile::default();
     };
@@ -547,7 +547,7 @@ fn load_ludusavi_cache_from_disk() -> LudusaviCacheFile {
 }
 
 fn save_ludusavi_cache_to_disk(cache: &LudusaviCacheFile) -> Result<(), String> {
-    let _guard = get_ludusavi_io_lock().lock().unwrap();
+    let _guard = get_ludusavi_io_lock().lock().unwrap_or_else(|e| e.into_inner());
     let path = crate::get_app_data_file_standalone("ludusavi_cache.json")?;
     let serialized = serde_json::to_string(cache)
         .map_err(|e| format!("Failed serializing ludusavi_cache.json: {}", e))?;

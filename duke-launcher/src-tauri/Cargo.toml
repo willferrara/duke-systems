@@ -1,6 +1,6 @@
 [package]
 name = "duke-launcher"
-version = "0.9.0"
+version = "1.0.0"
 description = "Duke Launcher - Turbo Download Manager, Malware Shield & Game Launcher"
 authors = ["Duke Launcher Contributors"]
 license = "MIT"

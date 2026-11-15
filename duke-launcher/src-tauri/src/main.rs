@@ -4,6 +4,7 @@
 mod achievements;
 mod artwork;
 mod bench;
+mod bios_vault;
 mod catalog_mmap;
 mod deep_shrink;
 mod delta_patch;
@@ -16,6 +17,7 @@ mod duke_director;
 mod duke_doctor;
 mod duke_link;
 mod duke_upscale;
+mod duke_verified;
 mod duke_vision;
 mod emulators;
 mod etw_xray;
@@ -25,14 +27,17 @@ mod latency_lab;
 mod ludusavi;
 mod mcp;
 mod metadata_ext;
+mod mod_dropper;
 mod mod_graph;
 mod ntfs_compress;
 mod pe_inspect;
 mod platforms;
 mod projfs_stream;
 mod quick_resume;
+mod retro_achievements;
 mod retro_catalog;
 mod rom_inspect;
+mod rom_patcher;
 mod self_heal;
 mod shader_swarm;
 mod sidebar_icons;
@@ -44,10 +49,16 @@ mod store_direct;
 mod stream_extract;
 mod swarm;
 mod time_machine;
+mod uninstaller;
 mod couch_mode;
 mod dkpack;
 mod duke_capsule;
+mod duke_ghost;
+mod duke_jail;
 mod duke_pilot;
+mod duke_sandbox;
+mod fix_finder;
+mod privacy_vault;
 mod vhdx_stage;
 
 use duke_core::pipe_ipc::{DukeBus, DukeEvent};
@@ -313,11 +324,7 @@ fn get_app_version() -> String {
 
 #[tauri::command]
 fn apply_window_backdrop(app: AppHandle, theme_id: String) -> Result<(), String> {
-    let clean_theme = if theme_id.trim().eq_ignore_ascii_case("frosted-obsidian") {
-        "dark".to_string()
-    } else {
-        theme_id
-    };
+    let clean_theme = normalize_theme_id(&theme_id);
     if let Some(win) = app.get_webview_window("main") {
         #[cfg(target_os = "windows")]
         {
@@ -551,6 +558,8 @@ pub struct LauncherSettings {
     pub xbox_api_key_configured: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub psn_npsso_configured: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub steamgriddb_api_key_configured: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detected_steam_id: Option<String>,
     // --- Essentials UX Fields ---
@@ -605,6 +614,18 @@ pub struct LauncherSettings {
     pub frame_pacing_enabled: bool,
     #[serde(default, alias = "customEmulatorPaths")]
     pub custom_emulator_paths: HashMap<String, String>,
+    #[serde(default = "default_disk_pressure_gb", alias = "diskPressureThresholdGb")]
+    pub disk_pressure_threshold_gb: f64,
+    #[serde(default = "default_disk_pressure_days", alias = "diskPressureDaysThreshold")]
+    pub disk_pressure_days_threshold: u32,
+}
+
+fn default_disk_pressure_gb() -> f64 {
+    50.0
+}
+
+fn default_disk_pressure_days() -> u32 {
+    60
 }
 
 fn default_true() -> bool {
@@ -632,10 +653,7 @@ pub(crate) fn normalize_loaded_settings(raw_json: &str) -> (LauncherSettings, bo
     let mut parsed = serde_json::from_str::<LauncherSettings>(raw_json).unwrap_or_default();
     let mut migrated = false;
     let trimmed_theme = parsed.theme.trim();
-    if trimmed_theme.is_empty() || trimmed_theme.eq_ignore_ascii_case("frosted-obsidian") {
-        if trimmed_theme.eq_ignore_ascii_case("frosted-obsidian") {
-            migrated = true;
-        }
+    if trimmed_theme.is_empty() {
         parsed.theme = "dark".to_string();
     } else {
         let normalized = normalize_theme_id(trimmed_theme);
@@ -678,9 +696,15 @@ impl LauncherSettings {
             .as_deref()
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
+        copy.steamgriddb_api_key_configured = copy
+            .steamgriddb_api_key
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
         copy.steam_api_key = None;
         copy.xbox_api_key = None;
         copy.psn_npsso = None;
+        copy.steamgriddb_api_key = None;
         copy.detected_steam_id = friends::detect_local_steam_id64();
         copy
     }
@@ -705,6 +729,7 @@ impl Default for LauncherSettings {
             steam_api_key_configured: false,
             xbox_api_key_configured: false,
             psn_npsso_configured: false,
+            steamgriddb_api_key_configured: false,
             detected_steam_id: None,
             default_save_dir: None,
             download_speed_preset: "max".to_string(),
@@ -731,6 +756,8 @@ impl Default for LauncherSettings {
             shader_swarm_enabled: true,
             frame_pacing_enabled: true,
             custom_emulator_paths: HashMap::new(),
+            disk_pressure_threshold_gb: default_disk_pressure_gb(),
+            disk_pressure_days_threshold: default_disk_pressure_days(),
         }
     }
 }
@@ -747,9 +774,11 @@ fn effective_speed_limit_kbps(settings: &LauncherSettings) -> u64 {
 }
 
 fn apply_runtime_settings(settings: &LauncherSettings) {
+    let (doh_provider, vault_proxy) = privacy_vault::current_doh_and_proxy_overrides();
+    duke_core::net_doh::set_doh_provider_mode(&doh_provider);
     let _ = duke_core::net_doh::set_network_privacy_config(
-        settings.doh_enabled,
-        settings.custom_proxy_url.as_deref(),
+        settings.doh_enabled && doh_provider != "disabled",
+        settings.custom_proxy_url.as_deref().or(vault_proxy.as_deref()),
     );
     GLOBAL_SPEED_LIMIT_KBPS.store(effective_speed_limit_kbps(settings), Ordering::Relaxed);
     let ram_mode = match settings.ram_trim_mode.trim().to_ascii_lowercase().as_str() {
@@ -858,6 +887,13 @@ pub struct SecurityScanReport {
     pub shannon_entropy: f64,
     pub pe_architecture: Option<String>,
     pub pe_sections: Vec<String>,
+    pub shield_badge: String,
+    pub authenticode_status: String,
+    pub authenticode_detail: String,
+    pub imported_api_hits: Vec<String>,
+    pub suspicious_behaviors: Vec<pe_inspect::PeSecurityFinding>,
+    pub quarantine_path: Option<String>,
+    pub zone_unblocked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1143,6 +1179,27 @@ fn validate_extracted_tree_against_zip_slip(dest_dir: &Path) -> Result<(), Strin
         }
     }
 
+    let q_dir = if cfg!(test) {
+        None
+    } else {
+        pe_inspect::quarantine_root_dir_standalone().ok()
+    };
+    let shield_summary = pe_inspect::gate_game_directory_pe_security(dest_dir, q_dir.as_deref(), 256);
+    if let Some((blocked_path, reason, q_path)) = shield_summary.blocked_files.first() {
+        let name = blocked_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("binary");
+        let q_note = q_path
+            .as_ref()
+            .map(|p| format!(" (quarantined to {})", p.display()))
+            .unwrap_or_default();
+        return Err(format!(
+            "Security Shield v2 blocked high-risk binary '{}' inside archive{}: {}",
+            name, q_note, reason
+        ));
+    }
+
     unblock_ntfs_zone_identifier(dest_dir);
     Ok(())
 }
@@ -1166,7 +1223,7 @@ fn is_supported_archive_name(lower_name: &str) -> bool {
 
 /// Extracts `.rar`, `.7z`, `.zip`, `.tar`, `.gz`, and multi-part archives (`.part1.rar`, `.7z.001`) into `dest_dir`
 /// while enforcing strict Zip-Slip / Path Traversal protection.
-fn extract_archive_to_folder_sync(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
+pub(crate) fn extract_archive_to_folder_sync(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
     for comp in archive_path.components() {
         if matches!(comp, Component::ParentDir) {
             return Err("Security Error: Invalid archive path traversal.".to_string());
@@ -1734,15 +1791,16 @@ pub(crate) fn calculate_dir_size_sync(target_path: &Path) -> u64 {
         .sum()
 }
 
-/// Checks if Portable Mode is active (`portable.flag` or `data/` directory alongside the executable).
-/// When active, all state (`library.json`, `downloads.json`, `covers/`, `backups/`) lives inside `./data/`
-/// with zero `AppData` footprint.
+/// Checks if Portable Mode is active (`portable.txt`, `portable.flag`, or `data/` directory alongside the executable).
+/// When active, all state (`library.json`, `settings.json`, `catalog.dkcat`, `emulators/`, `.duke-cas/`) lives relative
+/// to the executable with zero host `AppData` footprint.
 fn resolve_portable_data_dir() -> Option<PathBuf> {
     let exe_path = std::env::current_exe().ok()?;
     let exe_dir = exe_path.parent()?;
+    let txt_file = exe_dir.join("portable.txt");
     let flag_file = exe_dir.join("portable.flag");
     let data_dir = exe_dir.join("data");
-    if flag_file.exists() || data_dir.is_dir() {
+    if txt_file.exists() || flag_file.exists() || data_dir.is_dir() {
         if !data_dir.exists() {
             let _ = fs::create_dir_all(&data_dir);
         }
@@ -2103,9 +2161,11 @@ pub(crate) fn load_settings_standalone() -> LauncherSettings {
     if raw.trim().is_empty() {
         return LauncherSettings::default();
     }
-    let (settings, migrated) = normalize_loaded_settings(&raw);
-    if migrated {
-        if let Ok(serialized) = serde_json::to_string_pretty(&settings) {
+    let (mut settings, migrated) = normalize_loaded_settings(&raw);
+    let vault_migrated = privacy_vault::hydrate_settings_from_vault(&mut settings);
+    if migrated || vault_migrated {
+        let scrubbed = privacy_vault::extract_secrets_for_settings_save(&settings);
+        if let Ok(serialized) = serde_json::to_string_pretty(&scrubbed) {
             let _ = atomic_write_string(&path, &serialized);
         }
     }
@@ -2267,9 +2327,11 @@ fn load_settings_from_disk(app: &AppHandle) -> LauncherSettings {
     if raw.trim().is_empty() {
         return LauncherSettings::default();
     }
-    let (settings, migrated) = normalize_loaded_settings(&raw);
-    if migrated {
-        if let Ok(serialized) = serde_json::to_string_pretty(&settings) {
+    let (mut settings, migrated) = normalize_loaded_settings(&raw);
+    let vault_migrated = privacy_vault::hydrate_settings_from_vault(&mut settings);
+    if migrated || vault_migrated {
+        let scrubbed = privacy_vault::extract_secrets_for_settings_save(&settings);
+        if let Ok(serialized) = serde_json::to_string_pretty(&scrubbed) {
             let _ = atomic_write_string(&path, &serialized);
         }
     }
@@ -2281,7 +2343,8 @@ fn save_settings_to_disk(app: &AppHandle, settings: &LauncherSettings) -> Result
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let path = get_app_data_file(app, "settings.json")?;
-    let serialized = serde_json::to_string_pretty(settings)
+    let scrubbed = privacy_vault::extract_secrets_for_settings_save(settings);
+    let serialized = serde_json::to_string_pretty(&scrubbed)
         .map_err(|e| format!("Failed to serialize settings: {}", e))?;
     atomic_write_string(&path, &serialized)
 }
@@ -2291,7 +2354,8 @@ pub(crate) fn save_settings_standalone(settings: &LauncherSettings) -> Result<()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let path = get_app_data_file_standalone("settings.json")?;
-    let serialized = serde_json::to_string_pretty(settings)
+    let scrubbed = privacy_vault::extract_secrets_for_settings_save(settings);
+    let serialized = serde_json::to_string_pretty(&scrubbed)
         .map_err(|e| format!("Failed to serialize settings: {}", e))?;
     atomic_write_string(&path, &serialized)
 }
@@ -4226,7 +4290,7 @@ fn try_steal_slowest_tail(
     active_cnt: &AtomicU64,
     steal_lock: &Mutex<()>,
 ) -> Option<usize> {
-    let _steal_guard = steal_lock.lock().unwrap();
+    let _steal_guard = steal_lock.lock().unwrap_or_else(|e| e.into_inner());
     let active_count = (active_cnt.load(Ordering::Acquire) as usize).min(slots.len());
     if active_count >= slots.len() {
         return None;
@@ -4282,7 +4346,7 @@ async fn execute_resumable_matrix_job(
 ) -> Result<DownloadJob, String> {
     let pause_flag = Arc::new(AtomicBool::new(false));
     {
-        let mut map = get_pause_map().lock().unwrap();
+        let mut map = get_pause_map().lock().unwrap_or_else(|e| e.into_inner());
         map.insert(job.download_id.clone(), Arc::clone(&pause_flag));
     }
 
@@ -4342,7 +4406,10 @@ async fn execute_resumable_matrix_job(
                         job.message = "Paused - Click RESUME to start".to_string();
                         update_job_in_memory_and_disk(&app, &job, true);
                         let _ = app.emit("download-progress", &job);
-                        get_pause_map().lock().unwrap().remove(&job.download_id);
+                        get_pause_map()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&job.download_id);
                         return Ok(job);
                     }
 
@@ -4381,7 +4448,10 @@ async fn execute_resumable_matrix_job(
                                 "CDN stream probe paused - Click RESUME to retry".to_string();
                             update_job_in_memory_and_disk(&app, &job, true);
                             let _ = app.emit("download-progress", &job);
-                            get_pause_map().lock().unwrap().remove(&job.download_id);
+                            get_pause_map()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&job.download_id);
                             return Err(job.message);
                         }
                     }
@@ -4391,7 +4461,10 @@ async fn execute_resumable_matrix_job(
                     job.message = format!("Paused ({}) - Click RESUME to continue", e);
                     update_job_in_memory_and_disk(&app, &job, true);
                     let _ = app.emit("download-progress", &job);
-                    get_pause_map().lock().unwrap().remove(&job.download_id);
+                    get_pause_map()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&job.download_id);
                     return Err(e);
                 }
             }
@@ -4853,7 +4926,7 @@ async fn execute_resumable_matrix_job(
                             }
                             let pipe_pos = in_flight_pipe_w
                                 .lock()
-                                .unwrap()
+                                .unwrap_or_else(|e| e.into_inner())
                                 .as_ref()
                                 .map(|p| p.next_contiguous_offset())
                                 .unwrap_or(0);
@@ -4994,7 +5067,7 @@ async fn execute_resumable_matrix_job(
                             if let Some(ref pf) = part_file_w {
                                 seek_write_all_at(pf, *offset, &buf[..allowed])
                                     .map_err(|e| format!("Positional disk write error: {}", e))?;
-                            } else if let Some(ref pipe) = *in_flight_pipe_w.lock().unwrap() {
+                            } else if let Some(ref pipe) = *in_flight_pipe_w.lock().unwrap_or_else(|e| e.into_inner()) {
                                 pipe.submit_range(*offset, &buf[..allowed])?;
                                 streamed_worker.fetch_add(allowed as u64, Ordering::Relaxed);
                             }
@@ -5170,7 +5243,7 @@ async fn execute_resumable_matrix_job(
                     let dir_c = extract_dir_w.clone();
                     let _ = tokio::task::spawn_blocking(move || {
                         if let Ok(_guard) = dispatch_c.try_lock() {
-                            let mut set_guard = extracted_c.lock().unwrap();
+                            let mut set_guard = extracted_c.lock().unwrap_or_else(|e| e.into_inner());
                             let _ = stream_extract::dispatch_ready_zip_entries(
                                 &part_c,
                                 &dir_c,
@@ -5216,7 +5289,10 @@ async fn execute_resumable_matrix_job(
     is_finished.store(true, Ordering::Relaxed);
     let _ = reporter_handle.await;
     projfs_stream::unregister_job_coordinator(&job.download_id);
-    get_pause_map().lock().unwrap().remove(&job.download_id);
+    get_pause_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&job.download_id);
 
     // Sync and drop the pre-allocated `.part` file handle before finalizing or pausing.
     if let Some(part_file_sync) = shared_part_file {
@@ -5259,7 +5335,10 @@ async fn execute_resumable_matrix_job(
     job.eta_secs = None;
 
     if pause_flag.load(Ordering::Relaxed) {
-        let _ = in_flight_zst_pipe.lock().unwrap().take();
+        let _ = in_flight_zst_pipe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         job.status = "PAUSED".to_string();
         job.message = format!(
             "Paused at {} - Saved to disk (Click RESUME anytime)",
@@ -5272,7 +5351,10 @@ async fn execute_resumable_matrix_job(
     }
 
     if let Some(err_msg) = worker_error {
-        let _ = in_flight_zst_pipe.lock().unwrap().take();
+        let _ = in_flight_zst_pipe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         job.status = "PAUSED".to_string();
         job.message = format!(
             "Saved at {} ({}) - Click RESUME to continue",
@@ -5285,7 +5367,12 @@ async fn execute_resumable_matrix_job(
         return Ok(job);
     }
 
-    let zst_pipe_opt = { in_flight_zst_pipe.lock().unwrap().take() };
+    let zst_pipe_opt = {
+        in_flight_zst_pipe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    };
     if let Some(pipe) = zst_pipe_opt {
         job.status = "SCANNING".to_string();
         job.message = "Finalizing in-flight zstd stream & running Security Shield...".to_string();
@@ -5411,7 +5498,7 @@ async fn execute_resumable_matrix_job(
             let dir_c = stream_extract_dir.clone();
             let extracted_c = Arc::clone(&extracted_zip_entries);
             let _ = tokio::task::spawn_blocking(move || {
-                let mut set_guard = extracted_c.lock().unwrap();
+                let mut set_guard = extracted_c.lock().unwrap_or_else(|e| e.into_inner());
                 let _ = stream_extract::dispatch_ready_zip_entries(
                     &final_c,
                     &dir_c,
@@ -5600,7 +5687,7 @@ pub(crate) async fn enqueue_download_internal(
 
     spawn_queue_scheduler(app.clone());
 
-    let guard = get_queue_store().lock().unwrap();
+    let guard = get_queue_store().lock().unwrap_or_else(|e| e.into_inner());
     Ok(guard.clone())
 }
 
@@ -5632,7 +5719,7 @@ async fn enqueue_download(
 async fn install_downloaded_job(app: AppHandle, download_id: String) -> Result<GameEntry, String> {
     ensure_queue_initialized(&app);
     let mut target_job = {
-        let guard = get_queue_store().lock().unwrap();
+        let guard = get_queue_store().lock().unwrap_or_else(|e| e.into_inner());
         guard
             .iter()
             .find(|j| j.download_id == download_id)
@@ -5673,7 +5760,7 @@ async fn install_downloaded_job(app: AppHandle, download_id: String) -> Result<G
 async fn clear_completed_downloads(app: AppHandle) -> Result<Vec<DownloadJob>, String> {
     ensure_queue_initialized(&app);
     let remaining = {
-        let mut guard = get_queue_store().lock().unwrap();
+        let mut guard = get_queue_store().lock().unwrap_or_else(|e| e.into_inner());
         guard.retain(|j| j.status != "COMPLETED");
         persist_queue_to_disk(&app, &guard);
         guard.clone()
@@ -5734,6 +5821,8 @@ async fn update_launcher_settings(
     projfs_streaming_enabled: Option<bool>,
     shader_swarm_enabled: Option<bool>,
     frame_pacing_enabled: Option<bool>,
+    disk_pressure_threshold_gb: Option<f64>,
+    disk_pressure_days_threshold: Option<u32>,
 ) -> Result<LauncherSettings, String> {
     let app_for_save = app.clone();
     let autostart_change = start_minimized_with_windows;
@@ -5744,11 +5833,12 @@ async fn update_launcher_settings(
         }
         if let Some(key) = steamgriddb_api_key {
             let trimmed = key.trim().to_string();
-            current.steamgriddb_api_key = if trimmed.is_empty() {
-                None
+            if trimmed.is_empty() {
+                current.steamgriddb_api_key = None;
+                privacy_vault::clear_slot_by_name("steamgriddb");
             } else {
-                Some(trimmed)
-            };
+                current.steamgriddb_api_key = Some(trimmed);
+            }
         }
         if let Some(hk) = suspend_hotkey {
             let trimmed = hk.trim().to_string();
@@ -5780,6 +5870,7 @@ async fn update_launcher_settings(
         }
         if clear_steam_api_key.unwrap_or(false) {
             current.steam_api_key = None;
+            privacy_vault::clear_slot_by_name("steam");
         } else if let Some(key) = steam_api_key {
             let trimmed = key.trim().to_string();
             if !trimmed.is_empty() {
@@ -5796,6 +5887,7 @@ async fn update_launcher_settings(
         }
         if clear_xbox_api_key.unwrap_or(false) {
             current.xbox_api_key = None;
+            privacy_vault::clear_slot_by_name("xbox");
         } else if let Some(key) = xbox_api_key {
             let trimmed = key.trim().to_string();
             if !trimmed.is_empty() {
@@ -5804,6 +5896,7 @@ async fn update_launcher_settings(
         }
         if clear_psn_npsso.unwrap_or(false) {
             current.psn_npsso = None;
+            privacy_vault::clear_slot_by_name("psn");
         } else if let Some(tok) = psn_npsso {
             let trimmed = tok.trim().to_string();
             if !trimmed.is_empty() {
@@ -5916,6 +6009,12 @@ async fn update_launcher_settings(
         if let Some(fp) = frame_pacing_enabled {
             current.frame_pacing_enabled = fp;
         }
+        if let Some(thresh_gb) = disk_pressure_threshold_gb {
+            current.disk_pressure_threshold_gb = thresh_gb.clamp(5.0, 1000.0);
+        }
+        if let Some(days) = disk_pressure_days_threshold {
+            current.disk_pressure_days_threshold = days.clamp(7, 3650);
+        }
 
         save_settings_to_disk(&app_for_save, &current)?;
         apply_runtime_settings(&current);
@@ -5930,7 +6029,7 @@ async fn update_launcher_settings(
 
     if updated.auto_clean_completed {
         let remaining_opt = {
-            let mut guard = get_queue_store().lock().unwrap();
+            let mut guard = get_queue_store().lock().unwrap_or_else(|e| e.into_inner());
             if prune_auto_cleanable_jobs(&mut guard, true) {
                 persist_queue_to_disk(&app, &guard);
                 Some(guard.clone())
@@ -6491,11 +6590,15 @@ async fn set_speed_limit(max_speed_mbps: Option<f64>) -> Result<(), String> {
 #[tauri::command]
 async fn pause_download(app: AppHandle, download_id: String) -> Result<Vec<DownloadJob>, String> {
     ensure_queue_initialized(&app);
-    if let Some(flag) = get_pause_map().lock().unwrap().get(&download_id) {
+    if let Some(flag) = get_pause_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&download_id)
+    {
         flag.store(true, Ordering::Relaxed);
     }
 
-    let mut guard = get_queue_store().lock().unwrap();
+    let mut guard = get_queue_store().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(job) = guard.iter_mut().find(|j| j.download_id == download_id) {
         reconcile_job_bytes_from_disk(job);
         job.status = "PAUSED".to_string();
@@ -6528,7 +6631,7 @@ async fn resume_download(
 
     ensure_queue_initialized(&app);
     let target_job = {
-        let mut guard = get_queue_store().lock().unwrap();
+        let mut guard = get_queue_store().lock().unwrap_or_else(|e| e.into_inner());
         let any_running = guard.iter().any(|j| {
             j.download_id != download_id
                 && (j.status == "DOWNLOADING"
@@ -6569,7 +6672,7 @@ async fn resume_download(
         spawn_queue_scheduler(app.clone());
     }
 
-    let guard = get_queue_store().lock().unwrap();
+    let guard = get_queue_store().lock().unwrap_or_else(|e| e.into_inner());
     Ok(guard.clone())
 }
 
@@ -6580,11 +6683,15 @@ async fn remove_download_job(
     delete_file: bool,
 ) -> Result<Vec<DownloadJob>, String> {
     ensure_queue_initialized(&app);
-    if let Some(flag) = get_pause_map().lock().unwrap().remove(&download_id) {
+    if let Some(flag) = get_pause_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&download_id)
+    {
         flag.store(true, Ordering::Relaxed);
     }
 
-    let mut guard = get_queue_store().lock().unwrap();
+    let mut guard = get_queue_store().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(job) = guard.iter().find(|j| j.download_id == download_id) {
         if delete_file {
             for i in 0..32 {
@@ -6609,7 +6716,7 @@ async fn get_download_jobs(
     if current.is_empty() {
         if let Some(backups) = backup_jobs {
             if !backups.is_empty() {
-                let mut guard = get_queue_store().lock().unwrap();
+                let mut guard = get_queue_store().lock().unwrap_or_else(|e| e.into_inner());
                 for mut b in backups {
                     reconcile_job_bytes_from_disk(&mut b);
                     if b.status == "DOWNLOADING" || b.status == "RESOLVING" {
@@ -7260,10 +7367,98 @@ pub(crate) async fn scan_file_security_core(path: String) -> Result<SecurityScan
             }
         }
 
-        // Automatic NTFS Mark-of-the-Web (Zone.Identifier) Unblocker when file passes security scan
-        if verdict != "DANGER" {
+        // 4. Security Shield v2: Static PE32/PE32+ Import APIs + Droppers + WinVerifyTrust Authenticode + Quarantine
+        let mut shield_res = pe_inspect::PeSecurityShieldResult {
+            shield_badge: if verdict == "DANGER" {
+                "Blocked".to_string()
+            } else {
+                "Safe".to_string()
+            },
+            authenticode_status: if pe_summary.is_some() {
+                "Unsigned".to_string()
+            } else {
+                "NotApplicable".to_string()
+            },
+            authenticode_detail: String::new(),
+            imported_api_hits: Vec::new(),
+            suspicious_behaviors: Vec::new(),
+            quarantine_path: None,
+        };
+
+        let is_pe_target = pe_summary.is_some()
+            || lower_name.ends_with(".exe")
+            || lower_name.ends_with(".dll")
+            || lower_name.ends_with(".asi");
+        if is_pe_target {
+            if let Ok(mut pe_shield) = pe_inspect::inspect_pe_security_shield_file(
+                &target,
+                matched_whitelist_tag.is_some(),
+                Some(shannon_entropy),
+            ) {
+                details.push(format!(
+                    "Authenticode: {} ({})",
+                    pe_shield.authenticode_status, pe_shield.authenticode_detail
+                ));
+                if !pe_shield.imported_api_hits.is_empty() {
+                    details.push(format!(
+                        "Security-Relevant Imports: {}",
+                        pe_shield.imported_api_hits.join(", ")
+                    ));
+                }
+                for f in &pe_shield.suspicious_behaviors {
+                    details.push(format!("[{}] {}: {}", f.severity, f.title, f.explanation));
+                }
+                if pe_shield.shield_badge == "Blocked" {
+                    verdict = "DANGER".to_string();
+                    summary = pe_shield
+                        .suspicious_behaviors
+                        .first()
+                        .map(|f| format!("BLOCKED ({}): {}", f.title, f.explanation))
+                        .unwrap_or_else(|| {
+                            "Security Shield v2 blocked this executable due to high-risk behaviors.".to_string()
+                        });
+                    if !cfg!(test) {
+                        if let Ok(q_dir) = pe_inspect::quarantine_root_dir_standalone() {
+                            let reasons: Vec<String> = pe_shield
+                                .suspicious_behaviors
+                                .iter()
+                                .map(|f| format!("{}: {}", f.title, f.explanation))
+                                .collect();
+                            if let Ok(q_path) = pe_inspect::quarantine_high_risk_binary(
+                                &target,
+                                &q_dir,
+                                &reasons,
+                                Some(&sha256_hex),
+                            ) {
+                                let q_str = q_path.to_string_lossy().to_string();
+                                details.push(format!("Quarantined automatically to: {}", q_str));
+                                pe_shield.quarantine_path = Some(q_str);
+                            }
+                        }
+                    }
+                } else if pe_shield.shield_badge == "Warning" && verdict == "SAFE" {
+                    summary = format!(
+                        "WARNING: {} Caution advised before launching outside AppContainer Jail.",
+                        pe_shield
+                            .suspicious_behaviors
+                            .first()
+                            .map(|f| f.explanation.as_str())
+                            .unwrap_or("Review executable heuristics or enable AppContainer Jail.")
+                    );
+                }
+                if verdict == "DANGER" && pe_shield.shield_badge != "Blocked" {
+                    // Keep Security Shield v2 PE heuristics distinct from small-stub packed checks
+                }
+                shield_res = pe_shield;
+            }
+        }
+
+        // Automatic NTFS Mark-of-the-Web (Zone.Identifier) Unblocker ONLY after passing security inspection
+        let mut zone_unblocked = false;
+        if verdict != "DANGER" && shield_res.shield_badge != "Blocked" {
             unblock_ntfs_zone_identifier(&target);
-            details.push("NTFS Zone.Identifier: Unblocked for instant SmartScreen-free launch".to_string());
+            zone_unblocked = true;
+            details.push("NTFS Zone.Identifier: Unblocked after passing Security Shield v2 inspection".to_string());
         }
 
         Ok(SecurityScanReport {
@@ -7279,6 +7474,13 @@ pub(crate) async fn scan_file_security_core(path: String) -> Result<SecurityScan
             shannon_entropy,
             pe_architecture,
             pe_sections,
+            shield_badge: shield_res.shield_badge,
+            authenticode_status: shield_res.authenticode_status,
+            authenticode_detail: shield_res.authenticode_detail,
+            imported_api_hits: shield_res.imported_api_hits,
+            suspicious_behaviors: shield_res.suspicious_behaviors,
+            quarantine_path: shield_res.quarantine_path,
+            zone_unblocked,
         })
     })
     .await
@@ -7292,6 +7494,21 @@ async fn delete_flagged_file(path: String) -> Result<(), String> {
         fs::remove_file(&target).map_err(|e| format!("Failed to delete file: {}", e))?;
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn unblock_motw_for_path(path: String) -> Result<usize, String> {
+    let clean = path.trim().trim_matches('"').to_string();
+    if clean.is_empty() {
+        return Err("Target path is empty.".to_string());
+    }
+    let target = PathBuf::from(&clean);
+    if !target.exists() {
+        return Err(format!("Target path does not exist: {}", clean));
+    }
+    tokio::task::spawn_blocking(move || Ok(unblock_ntfs_zone_identifier_raw(&target)))
+        .await
+        .map_err(|e| format!("MOTW unblock task failed: {}", e))?
 }
 
 #[tauri::command]
@@ -7443,15 +7660,18 @@ async fn add_local_game_with_origin(
     steam_app_id: Option<u32>,
     origin: Option<&str>,
 ) -> Result<GameEntry, String> {
-    let trimmed_path = exe_path.trim().trim_matches('"').to_string();
-    let exe_file = PathBuf::from(&trimmed_path);
+    let raw_trimmed = exe_path.trim().trim_matches('"').to_string();
+    let raw_exe_file = PathBuf::from(&raw_trimmed);
 
-    if !exe_file.exists() || !exe_file.is_file() {
+    if !raw_exe_file.exists() || !raw_exe_file.is_file() {
         return Err(format!(
             "Executable file not found at '{}'. Please select a valid .exe binary.",
-            trimmed_path
+            raw_trimmed
         ));
     }
+
+    let exe_file = canonicalize_drop_path(&raw_exe_file);
+    let trimmed_path = exe_file.to_string_lossy().to_string();
 
     let install_dir = resolve_game_root_dir(&exe_file);
     let install_dir_str = install_dir.to_string_lossy().to_string();
@@ -7583,12 +7803,57 @@ async fn add_local_game_with_origin(
 
     let app_clone = app.clone();
     let entry_clone = new_entry.clone();
+    let exe_check_path = PathBuf::from(&trimmed_path);
     let unblock_dir = install_dir.clone();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let q_dir = if cfg!(test) {
+            None
+        } else {
+            pe_inspect::quarantine_root_dir_standalone().ok()
+        };
+        if let Ok(shield) = pe_inspect::inspect_pe_security_shield_file(&exe_check_path, false, None) {
+            if shield.shield_badge == "Blocked" {
+                let reasons: Vec<String> = shield
+                    .suspicious_behaviors
+                    .iter()
+                    .map(|f| format!("{}: {}", f.title, f.explanation))
+                    .collect();
+                let q_note = q_dir
+                    .as_deref()
+                    .and_then(|qd| pe_inspect::quarantine_high_risk_binary(&exe_check_path, qd, &reasons, None).ok())
+                    .map(|p| format!(" Quarantined to {}", p.display()))
+                    .unwrap_or_default();
+                return Err(format!(
+                    "Security Shield v2 blocked '{}': {}.{}",
+                    entry_clone.title,
+                    reasons.join(" | "),
+                    q_note
+                ));
+            }
+        }
+        let dir_shield = pe_inspect::gate_game_directory_pe_security(&unblock_dir, q_dir.as_deref(), 48);
+        if let Some((b_path, b_reason, b_q)) = dir_shield.blocked_files.first() {
+            let b_name = b_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("binary");
+            let q_note = b_q
+                .as_ref()
+                .map(|p| format!(" (quarantined to {})", p.display()))
+                .unwrap_or_default();
+            return Err(format!(
+                "Security Shield v2 blocked suspicious file '{}' in game directory{}: {}",
+                b_name, q_note, b_reason
+            ));
+        }
         unblock_ntfs_zone_identifier(&unblock_dir);
         let mut library = load_library_from_disk(&app_clone)?;
         if let Some(existing) = library.iter_mut().find(|g| {
-            g.id == entry_clone.id || g.exe_path.eq_ignore_ascii_case(&entry_clone.exe_path)
+            g.id == entry_clone.id
+                || g.exe_path.eq_ignore_ascii_case(&entry_clone.exe_path)
+                || canonicalize_drop_path(Path::new(&g.exe_path))
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&entry_clone.exe_path)
         }) {
             let preserve_fav = existing.is_favorite;
             let preserve_last_played = existing.last_played_ts.or(existing.last_played);
@@ -8105,15 +8370,13 @@ async fn launch_game_internal(
         return Err(format!("Game executable not found at: {}", trimmed));
     }
 
-    // Automatically strip NTFS Mark-of-the-Web (:Zone.Identifier) before launching so SmartScreen never blocks
-    unblock_ntfs_zone_identifier(&exe_file);
-
     let (spawn_exe, working_dir, emu_prefix_args, resolved_emu_id) = if item_platform_id > 0 {
         let resolved = emulators::resolve_emulator_launch(
             item_platform_id,
             item_emulator_id.as_deref(),
             &exe_file,
         )?;
+        unblock_ntfs_zone_identifier(&exe_file);
         unblock_ntfs_zone_identifier(&resolved.exe_path);
         (
             resolved.exe_path,
@@ -8122,6 +8385,48 @@ async fn launch_game_internal(
             resolved.emulator_id,
         )
     } else {
+        let q_dir = if cfg!(test) {
+            None
+        } else {
+            pe_inspect::quarantine_root_dir_standalone().ok()
+        };
+        if let Ok(shield) = pe_inspect::inspect_pe_security_shield_file(&exe_file, false, None) {
+            if shield.shield_badge == "Blocked" {
+                let reasons: Vec<String> = shield
+                    .suspicious_behaviors
+                    .iter()
+                    .map(|f| format!("{}: {}", f.title, f.explanation))
+                    .collect();
+                let q_note = q_dir
+                    .as_deref()
+                    .and_then(|qd| pe_inspect::quarantine_high_risk_binary(&exe_file, qd, &reasons, None).ok())
+                    .map(|p| format!(" Quarantined to {}", p.display()))
+                    .unwrap_or_default();
+                return Err(format!(
+                    "Security Shield v2 blocked pre-launch execution of '{}': {}.{}",
+                    game_title,
+                    reasons.join(" | "),
+                    q_note
+                ));
+            }
+        }
+        // Automatically strip NTFS Mark-of-the-Web (:Zone.Identifier) ONLY after passing Security Shield v2
+        unblock_ntfs_zone_identifier(&exe_file);
+        if let Some(ref gid_v) = game_id {
+            if let Ok(droot) = resolve_data_root_dir_standalone() {
+                if let Some(applied_msg) = duke_verified::auto_apply_verified_wrappers_on_first_launch(
+                    gid_v,
+                    &exe_file,
+                    &game_root_dir,
+                    &droot.join("wrappers"),
+                ) {
+                    let _ = app.emit(
+                        "duke-verified-applied",
+                        serde_json::json!({ "gameId": gid_v, "message": applied_msg }),
+                    );
+                }
+            }
+        }
         let wd = exe_file
             .parent()
             .map(|p| p.to_path_buf())
@@ -8205,23 +8510,26 @@ async fn launch_game_internal(
         parsed_args.extend(parse_cli_launch_args(per_game_args));
     }
 
-    // Anti-Telemetry Game Launch Scrubbing (when enabled) + Global/Per-Game CLI Launch Arguments
-    let mut cmd = tokio::process::Command::new(&spawn_exe);
-    cmd.current_dir(&working_dir)
-        .args(&parsed_args)
-        .env("STEAM_FRAME_FORCE_CLOSE", "1");
-    if launch_settings.block_game_telemetry {
-        cmd.env("DO_NOT_TRACK", "1")
-            .env("SENTRY_DSN", "")
-            .env("UNITY_DISABLE_ANALYTICS", "1")
-            .env("UE_DISABLE_CRASH_REPORTER", "1");
+    // Anti-Telemetry Game Launch Scrubbing (injected on every launch) + Global/Per-Game CLI Launch Arguments
+    let jail_policy = game_id
+        .as_deref()
+        .map(duke_jail::get_policy_for_game)
+        .unwrap_or_default();
+    let use_appcontainer_jail = item_platform_id == 0 && jail_policy.jail_enabled;
+    if item_platform_id == 0 && !use_appcontainer_jail && jail_policy.offline_mode {
+        let _ = duke_jail::apply_or_remove_offline_firewall_rule(&spawn_exe, true);
     }
 
-    if sandbox_enabled {
+    let mut launch_env: Vec<(String, String)> = vec![
+        ("STEAM_FRAME_FORCE_CLOSE".to_string(), "1".to_string()),
+    ];
+    for (k, v) in privacy_vault::anti_telemetry_env_pairs() {
+        launch_env.push(((*k).to_string(), (*v).to_string()));
+    }
+
+    if sandbox_enabled || use_appcontainer_jail {
         if let Ok(env_overrides) = pe_inspect::prepare_game_sandbox_env(&game_root_dir) {
-            for (k, v) in env_overrides {
-                cmd.env(k, v);
-            }
+            launch_env.extend(env_overrides);
         }
     }
 
@@ -8234,28 +8542,75 @@ async fn launch_game_internal(
         }
     }
     latency_lab::apply_saved_profile_if_present(&trimmed);
-    for (k, v) in latency_lab::shader_cache_launch_env() {
-        cmd.env(k, v);
+    launch_env.extend(latency_lab::shader_cache_launch_env());
+
+    enum SpawnedChildKind {
+        Tokio(Box<tokio::process::Child>),
+        JailedProcHandle(isize),
     }
 
-    let mut child = cmd.spawn().map_err(|e| {
-        restore_normal_priority_mode();
-        if let Some(ref w) = window {
-            let _ = w.show();
-            let _ = w.unminimize();
+    let mut jailed_thread_to_resume: isize = 0;
+    let (mut spawned_child_opt, game_pid) = if use_appcontainer_jail {
+        let jail_gid = game_id.as_deref().unwrap_or(&trimmed);
+        let profile_dir = game_root_dir.join(".duke-profile");
+        let outcome = duke_jail::spawn_jailed_process(
+            jail_gid,
+            &game_title,
+            &spawn_exe,
+            &game_root_dir,
+            &working_dir,
+            &profile_dir,
+            &parsed_args,
+            &launch_env,
+            jail_policy.offline_mode,
+        )
+        .map_err(|e| {
+            restore_normal_priority_mode();
+            if let Some(ref w) = window {
+                let _ = w.show();
+                let _ = w.unminimize();
+            }
+            let _ = app.emit(
+                "game-running-state",
+                serde_json::json!({ "running": false, "exePath": trimmed }),
+            );
+            let _ = app.emit(
+                "game-session-state",
+                serde_json::json!({ "running": false, "exePath": trimmed }),
+            );
+            format!("Failed launching inside AppContainer Jail: {}", e)
+        })?;
+        jailed_thread_to_resume = outcome.thread_handle_raw;
+        (
+            Some(SpawnedChildKind::JailedProcHandle(outcome.process_handle_raw)),
+            outcome.pid,
+        )
+    } else {
+        let mut cmd = tokio::process::Command::new(&spawn_exe);
+        cmd.current_dir(&working_dir).args(&parsed_args);
+        for (k, v) in &launch_env {
+            cmd.env(k, v);
         }
-        let _ = app.emit(
-            "game-running-state",
-            serde_json::json!({ "running": false, "exePath": trimmed }),
-        );
-        let _ = app.emit(
-            "game-session-state",
-            serde_json::json!({ "running": false, "exePath": trimmed }),
-        );
-        format!("Failed to launch '{}': {}", trimmed, e)
-    })?;
+        let child = cmd.spawn().map_err(|e| {
+            restore_normal_priority_mode();
+            if let Some(ref w) = window {
+                let _ = w.show();
+                let _ = w.unminimize();
+            }
+            let _ = app.emit(
+                "game-running-state",
+                serde_json::json!({ "running": false, "exePath": trimmed }),
+            );
+            let _ = app.emit(
+                "game-session-state",
+                serde_json::json!({ "running": false, "exePath": trimmed }),
+            );
+            format!("Failed to launch '{}': {}", trimmed, e)
+        })?;
+        let pid = child.id().unwrap_or(0);
+        (Some(SpawnedChildKind::Tokio(Box::new(child))), pid)
+    };
 
-    let game_pid = child.id().unwrap_or(0);
     let session_key = game_id
         .clone()
         .unwrap_or_else(|| format!("pid_{}", game_pid));
@@ -8267,12 +8622,16 @@ async fn launch_game_internal(
         None
     };
 
+    if jailed_thread_to_resume != 0 {
+        duke_jail::resume_thread_keep_process(jailed_thread_to_resume);
+    }
+
     let cpu_mode_for_tree = launch_settings.cpu_priority_mode.clone();
     let should_boost_tree = item_platform_id > 0
         || launch_settings.performance_boost_enabled
         || cpu_mode_for_tree != "auto";
     if game_pid > 0 {
-        let mut guard = get_active_sessions().lock().unwrap();
+        let mut guard = get_active_sessions().lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(
             session_key.clone(),
             ActiveGameSession {
@@ -8464,7 +8823,18 @@ async fn launch_game_internal(
             });
         }
 
-        let exit_code_opt = child.wait().await.ok().and_then(|st| st.code());
+        let exit_code_opt = match spawned_child_opt.take() {
+            Some(SpawnedChildKind::Tokio(mut child)) => {
+                child.wait().await.ok().and_then(|st| st.code())
+            }
+            Some(SpawnedChildKind::JailedProcHandle(proc_handle)) => {
+                tokio::task::spawn_blocking(move || duke_jail::wait_process_exit_blocking(proc_handle))
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            None => None,
+        };
 
         // If the launched process acted as a bootstrapper and spawned child game processes,
         // keep tracking playtime until every descendant process in the Job Object exits.
@@ -8481,10 +8851,23 @@ async fn launch_game_internal(
             }
         }
 
-        // Fast crash auto-diagnosis (< 5s exit with known Windows NTSTATUS failure codes)
+        // Fast crash auto-diagnosis (< 5s exit with known Windows NTSTATUS failure codes + Fix Finder telemetry)
         let raw_elapsed = session_instant.elapsed();
         if raw_elapsed < Duration::from_secs(5) {
             if let Some(code) = exit_code_opt {
+                if code != 0 {
+                    let diag_gid = gid_after.as_deref().unwrap_or(&session_key_after);
+                    let app_id_opt = (item_app_id > 0).then_some(item_app_id);
+                    let diag = fix_finder::diagnose_crash_code(
+                        diag_gid,
+                        &game_title_after,
+                        &path_after,
+                        app_id_opt,
+                        code,
+                        raw_elapsed.as_millis() as u64,
+                    );
+                    let _ = app_after.emit("game-crash-detected", &diag);
+                }
                 if let Some((nt_hex, nt_desc)) = self_heal::is_crash_ntstatus(code) {
                     if let Some(ref heal_gid) = gid_after {
                         if let Ok(fix_report) =
@@ -8519,12 +8902,35 @@ async fn launch_game_internal(
         let _ = app_after.emit("quick-resume-updated", quick_resume::build_summary_snapshot());
 
         duke_upscale::stop_game_upscale_runtime(&session_key_after);
-        etw_xray::stop_and_persist_scorecard(
+        let scorecard_opt = etw_xray::stop_and_persist_scorecard(
             &app_after,
             &session_key_after,
             &game_title_after,
             raw_elapsed.as_secs_f64(),
         );
+        {
+            let verified_path = PathBuf::from(&path_after);
+            let verified_boot_ok =
+                raw_elapsed >= Duration::from_secs(5) || exit_code_opt.unwrap_or(0) == 0;
+            let verified_crash_code = (!verified_boot_ok)
+                .then(|| exit_code_opt.map(|c| format!("0x{:08X}", c as u32)))
+                .flatten();
+            let verified_fps = scorecard_opt.as_ref().map(|c| c.avg_fps);
+            let emu_core_opt = (!resolved_emu_id.trim().is_empty()).then_some(resolved_emu_id.clone());
+            tokio::task::spawn_blocking(move || {
+                if let Ok(hash) = duke_verified::hash_binary_blake3_streaming(&verified_path) {
+                    let _ = duke_verified::record_verified_outcome_in_matrix(
+                        &hash,
+                        verified_boot_ok,
+                        verified_crash_code.as_deref(),
+                        verified_fps,
+                        None,
+                        None,
+                        emu_core_opt.as_deref(),
+                    );
+                }
+            });
+        }
 
         if frame_pacing_enabled_exit {
             let fp = duke_core::win32_ffi::end_frame_pacing_runtime();
@@ -8772,7 +9178,7 @@ async fn suspend_or_resume_game(
     let act = action.unwrap_or_else(|| "toggle".to_string()).to_lowercase();
 
     let (session_key, title, pid, currently_suspended) = {
-        let guard = get_active_sessions().lock().unwrap();
+        let guard = get_active_sessions().lock().unwrap_or_else(|e| e.into_inner());
         let found = if let Some(ref gid) = target_gid {
             guard.get(gid).cloned().or_else(|| {
                 guard
@@ -8818,7 +9224,7 @@ async fn suspend_or_resume_game(
     };
 
     {
-        let mut guard = get_active_sessions().lock().unwrap();
+        let mut guard = get_active_sessions().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(sess) = guard.get_mut(&session_key) {
             sess.is_suspended = want_suspend;
         }
@@ -11068,7 +11474,7 @@ async fn enrich_catalog_query(
     let total_indexed = if !upserts.is_empty() {
         let app_for_save = app.clone();
         tokio::task::spawn_blocking(move || {
-            let _guard = get_catalog_io_lock().lock().unwrap();
+            let _guard = get_catalog_io_lock().lock().unwrap_or_else(|e| e.into_inner());
             let dkcat_path = get_app_data_file(&app_for_save, "catalog.dkcat")?;
             let stats = catalog_mmap::upsert_entries_dkcat(&dkcat_path, &upserts, None, &[])?;
             Ok::<usize, String>(stats.record_count as usize)
@@ -11150,7 +11556,7 @@ async fn get_catalog_game_details(
     let enriched_for_cache = enriched.clone();
     let app_for_save = app.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        let _guard = get_catalog_io_lock().lock().unwrap();
+        let _guard = get_catalog_io_lock().lock().unwrap_or_else(|e| e.into_inner());
         if let Ok(dkcat_path) = get_app_data_file(&app_for_save, "catalog.dkcat") {
             let _ = catalog_mmap::upsert_entries_dkcat(
                 &dkcat_path,
@@ -11928,9 +12334,13 @@ async fn scan_rom_folder(app: AppHandle, folder_path: String) -> Result<IngestPa
         return Err(format!("Selected ROM folder does not exist: {}", trimmed));
     }
 
-    let detected = tokio::task::spawn_blocking(move || rom_inspect::scan_folder_for_roms(&dir, 4))
-        .await
-        .map_err(|e| format!("ROM folder scanner failed: {}", e))?;
+    let dir_m3u = dir.clone();
+    let detected = tokio::task::spawn_blocking(move || {
+        let _ = rom_patcher::generate_m3u_playlists_in_dir(&dir_m3u);
+        rom_inspect::scan_folder_for_roms(&dir, 4)
+    })
+    .await
+    .map_err(|e| format!("ROM folder scanner failed: {}", e))?;
 
     if detected.is_empty() {
         let library = load_library_from_disk(&app).unwrap_or_default();
@@ -11997,6 +12407,23 @@ pub(crate) async fn ingest_dropped_paths_core(
     ingest_dropped_paths(app, paths).await
 }
 
+/// Canonicalizes a filesystem path while stripping Windows `\\?\` verbatim prefixes so duplicate
+/// drops, symlinks, casing variations, and relative segments resolve to one stable key.
+fn canonicalize_drop_path(path: &Path) -> PathBuf {
+    let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(target_os = "windows")]
+    {
+        let s = resolved.to_string_lossy();
+        if let Some(unc) = s.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{}", unc));
+        }
+        if let Some(plain) = s.strip_prefix(r"\\?\") {
+            return PathBuf::from(plain);
+        }
+    }
+    resolved
+}
+
 #[tauri::command]
 async fn ingest_dropped_paths(
     app: AppHandle,
@@ -12011,14 +12438,14 @@ async fn ingest_dropped_paths(
         if trimmed.is_empty() {
             continue;
         }
-        let norm_key = trimmed.to_lowercase();
-        if !seen.insert(norm_key) {
+        let raw_path = PathBuf::from(&trimmed);
+        if !raw_path.exists() {
+            skipped_reasons.push(format!("Skipped '{}': path no longer exists.", trimmed));
             continue;
         }
-
-        let path = PathBuf::from(&trimmed);
-        if !path.exists() {
-            skipped_reasons.push(format!("Skipped '{}': path no longer exists.", trimmed));
+        let path = canonicalize_drop_path(&raw_path);
+        let norm_key = path.to_string_lossy().to_lowercase();
+        if !seen.insert(norm_key) {
             continue;
         }
 
@@ -12168,7 +12595,6 @@ async fn ingest_dropped_paths(
                 continue;
             }
             let game_root = resolve_game_root_dir(&target_path);
-            unblock_ntfs_zone_identifier(&game_root);
             let lnk_title = path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -12204,7 +12630,6 @@ async fn ingest_dropped_paths(
 
         if ext == "exe" {
             let game_root = resolve_game_root_dir(&path);
-            unblock_ntfs_zone_identifier(&game_root);
             let fallback_name = game_root
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -12734,7 +13159,7 @@ async fn auto_fix_game(app: AppHandle, game_id: String) -> Result<AutoFixReport,
 }
 
 #[cfg(target_os = "windows")]
-fn query_disk_free_space_sync(target_dir: &Path) -> Result<(u64, u64), String> {
+pub(crate) fn query_disk_free_space_sync(target_dir: &Path) -> Result<(u64, u64), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
@@ -12771,7 +13196,7 @@ fn query_disk_free_space_sync(target_dir: &Path) -> Result<(u64, u64), String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn query_disk_free_space_sync(_target_dir: &Path) -> Result<(u64, u64), String> {
+pub(crate) fn query_disk_free_space_sync(_target_dir: &Path) -> Result<(u64, u64), String> {
     Ok((0, 0))
 }
 
@@ -14413,7 +14838,45 @@ fn main() {
             duke_capsule::export_game_capsule,
             duke_capsule::inspect_game_capsule,
             duke_pilot::plan_duke_pilot_command,
-            duke_pilot::execute_duke_pilot_plan
+            duke_pilot::execute_duke_pilot_plan,
+            duke_jail::get_game_jail_status,
+            duke_jail::set_game_jail_policy,
+            duke_jail::cleanup_game_jail_profile,
+            privacy_vault::get_privacy_vault_status,
+            privacy_vault::set_vault_api_key,
+            privacy_vault::apply_anonymity_network_preset,
+            fix_finder::analyze_game_crash_or_preflight,
+            fix_finder::apply_one_click_game_fixes,
+            fix_finder::fetch_pcgamingwiki_fixes,
+            pe_inspect::check_sha256_threat_feed,
+            unblock_motw_for_path,
+            bios_vault::get_bios_vault_status,
+            bios_vault::scan_and_install_bios_sources,
+            retro_achievements::fetch_retro_achievements_progress,
+            rom_patcher::group_multi_disc_library,
+            rom_patcher::apply_rom_patch_and_create_profile,
+            uninstaller::preview_clean_uninstall,
+            uninstaller::execute_clean_uninstall,
+            mod_dropper::install_mod_archive_or_workshop,
+            duke_verified::get_duke_verified_status,
+            duke_verified::record_duke_verified_feedback,
+            duke_verified::export_duke_verified_matrix,
+            duke_verified::import_duke_verified_matrix,
+            deep_shrink::evaluate_disk_pressure_autopilot,
+            deep_shrink::execute_disk_pressure_autopilot,
+            duke_ghost::list_game_ghosts,
+            duke_ghost::get_ghost_status,
+            duke_ghost::start_ghost_recording,
+            duke_ghost::stop_ghost_recording,
+            duke_ghost::start_ghost_playback,
+            duke_ghost::stop_ghost_playback,
+            duke_ghost::import_ghost_file,
+            duke_ghost::export_ghost_file,
+            duke_ghost::delete_ghost_recording,
+            duke_sandbox::get_sandbox_trainer_status,
+            duke_sandbox::sandbox_scan_memory,
+            duke_sandbox::sandbox_write_memory_value,
+            duke_sandbox::sandbox_set_speedhack_scale
         ])
         .build(tauri::generate_context!())
     {
@@ -15117,9 +15580,9 @@ mod tests {
     }
 
     #[test]
-    fn launcher_settings_zoom_clamps_and_migrates_frosted_obsidian() {
+    fn launcher_settings_zoom_clamps_and_normalizes_unknown_themes() {
         let raw = r#"{
-            "theme": "frosted-obsidian",
+            "theme": "legacy-unknown-theme",
             "cardZoomPx": 999
         }"#;
         let (parsed, migrated) = normalize_loaded_settings(raw);

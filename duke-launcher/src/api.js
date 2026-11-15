@@ -1728,5 +1728,286 @@ export function listenPilotPlayTonight(callback) {
   return listenEvent("duke-pilot-open-play-tonight", callback);
 }
 
+// ---------- Phase 2: AppContainer Jail, Privacy Vault, Fix Finder & Shield v2 ----------
+
+export async function getGameJailStatus(gameId) {
+  return invokeCommand("get_game_jail_status", { gameId: String(gameId || "") });
+}
+
+export async function setGameJailPolicy(gameId, jailEnabled, offlineMode) {
+  return invokeCommand("set_game_jail_policy", {
+    gameId: String(gameId || ""),
+    jailEnabled: Boolean(jailEnabled),
+    offlineMode: Boolean(offlineMode)
+  });
+}
+
+export async function cleanupGameJailProfile(gameId) {
+  return invokeCommand("cleanup_game_jail_profile", { gameId: String(gameId || "") });
+}
+
+export async function getPrivacyVaultStatus() {
+  return invokeCommand("get_privacy_vault_status");
+}
+
+export async function setVaultApiKey(slot, apiKey, username = null) {
+  return invokeCommand("set_vault_api_key", {
+    slot: String(slot || ""),
+    apiKey: String(apiKey || ""),
+    username: username ? String(username) : null
+  });
+}
+
+export async function applyAnonymityNetworkPreset(dohProvider, proxyPreset, customProxyUrl = null) {
+  return invokeCommand("apply_anonymity_network_preset", {
+    dohProvider: String(dohProvider || "auto"),
+    proxyPreset: String(proxyPreset || "direct"),
+    customProxyUrl: customProxyUrl ? String(customProxyUrl) : null
+  });
+}
+
+export async function analyzeGameCrashOrPreflight(gameId, exitCode = null, elapsedMs = null) {
+  return invokeCommand("analyze_game_crash_or_preflight", {
+    gameId: String(gameId || ""),
+    exitCode: typeof exitCode === "number" ? exitCode : null,
+    elapsedMs: typeof elapsedMs === "number" ? elapsedMs : null
+  });
+}
+
+export async function applyOneClickGameFixes(gameId, request) {
+  return invokeCommand("apply_one_click_game_fixes", {
+    gameId: String(gameId || ""),
+    request: request || {}
+  });
+}
+
+export async function fetchPcgwFixes(gameId, title, appId = null, forceRefresh = false) {
+  return invokeCommand("fetch_pcgamingwiki_fixes", {
+    gameId: String(gameId || ""),
+    title: String(title || ""),
+    appId: typeof appId === "number" && appId > 0 ? appId : null,
+    forceRefresh: Boolean(forceRefresh)
+  });
+}
+
+export async function checkSha256ThreatFeed(sha256) {
+  return invokeCommand("check_sha256_threat_feed", { sha256: String(sha256 || "") });
+}
+
+export async function unblockMotwPath(path) {
+  return invokeCommand("unblock_motw_for_path", { path: String(path || "") });
+}
+
+// ---------- Phase 3: BIOS Vault, RetroAchievements, ROM Patcher, Uninstaller, Mod Dropper ----------
+
+export async function getBiosVaultStatus() {
+  return invokeCommand("get_bios_vault_status");
+}
+
+export async function scanAndInstallBiosSources(sourcePaths) {
+  return invokeCommand("scan_and_install_bios_sources", {
+    sourcePaths: Array.isArray(sourcePaths) ? sourcePaths.map(String) : []
+  });
+}
+
+export async function fetchRetroAchievementsProgress(gameId, forceRefresh = false) {
+  return invokeCommand("fetch_retro_achievements_progress", {
+    gameId: String(gameId || ""),
+    forceRefresh: Boolean(forceRefresh)
+  });
+}
+
+export async function groupMultiDiscLibrary() {
+  return invokeCommand("group_multi_disc_library");
+}
+
+export async function applyRomPatchAndCreateProfile(
+  gameId,
+  patchPath,
+  expectedSourceCrc32 = null,
+  expectedSourceSha1 = null
+) {
+  return invokeCommand("apply_rom_patch_and_create_profile", {
+    gameId: String(gameId || ""),
+    patchPath: String(patchPath || ""),
+    expectedSourceCrc32: expectedSourceCrc32 ? String(expectedSourceCrc32) : null,
+    expectedSourceSha1: expectedSourceSha1 ? String(expectedSourceSha1) : null
+  });
+}
+
+export async function previewCleanUninstall(gameId) {
+  return invokeCommand("preview_clean_uninstall", { gameId: String(gameId || "") });
+}
+
+export async function executeCleanUninstall(gameId, keepSavesZstd = true, removeOrphans = true) {
+  return invokeCommand("execute_clean_uninstall", {
+    gameId: String(gameId || ""),
+    keepSavesZstd: Boolean(keepSavesZstd),
+    removeOrphans: Boolean(removeOrphans)
+  });
+}
+
+export async function installModArchiveOrWorkshop(gameId, sourceInput) {
+  return invokeCommand("install_mod_archive_or_workshop", {
+    gameId: String(gameId || ""),
+    sourceInput: String(sourceInput || "")
+  });
+}
+
+export async function pickBiosOrPatchFile(filters = []) {
+  if (window.__TAURI__?.dialog?.open) {
+    const selected = await window.__TAURI__.dialog.open({
+      multiple: false,
+      directory: false,
+      filters: Array.isArray(filters) ? filters : []
+    });
+    return Array.isArray(selected) ? selected[0] || null : selected || null;
+  }
+  return null;
+}
+
+export async function pickSaveFilePath(defaultPath = "ghost.dkghost", filters = []) {
+  if (window.__TAURI__?.dialog?.save) {
+    const selected = await window.__TAURI__.dialog.save({
+      defaultPath: String(defaultPath || "ghost.dkghost"),
+      filters: Array.isArray(filters) ? filters : []
+    });
+    return selected || null;
+  }
+  return null;
+}
+
+// ---------- Phase 4: Duke Verified Matrix + Disk-Space Pressure Autopilot ----------
+
+export async function getDukeVerifiedStatus(gameId) {
+  return invokeCommand("get_duke_verified_status", { gameId: String(gameId || "") });
+}
+
+export async function recordDukeVerifiedFeedback(payload) {
+  return invokeCommand("record_duke_verified_feedback", {
+    gameId: String(payload?.gameId || ""),
+    bootOk: Boolean(payload?.bootOk ?? true),
+    crashCode: payload?.crashCode || null,
+    avgFps: typeof payload?.avgFps === "number" ? payload.avgFps : null,
+    needsDxvk: typeof payload?.needsDxvk === "boolean" ? payload.needsDxvk : null,
+    needs4gbLaa: typeof payload?.needs4gbLaa === "boolean" ? payload.needs4gbLaa : null,
+    bestEmulatorCore: payload?.bestEmulatorCore || null
+  });
+}
+
+export async function evaluateDiskPressureAutopilot(
+  thresholdGb = null,
+  minUntouchedDays = null,
+  forcePreview = false
+) {
+  return invokeCommand("evaluate_disk_pressure_autopilot", {
+    thresholdGb: typeof thresholdGb === "number" ? thresholdGb : null,
+    minUntouchedDays: typeof minUntouchedDays === "number" ? minUntouchedDays : null,
+    forcePreview: Boolean(forcePreview)
+  });
+}
+
+export async function executeDiskPressureAutopilot(gameIds, keepLanguages = ["english"]) {
+  return invokeCommand("execute_disk_pressure_autopilot", {
+    gameIds: Array.isArray(gameIds) ? gameIds.map(String) : [],
+    keepLanguages: Array.isArray(keepLanguages) ? keepLanguages.map(String) : ["english"]
+  });
+}
+
+// ---------- Phase 5: Input Ghost & Anti-Cheat-Safe Memory Trainer / Speedhack ----------
+
+export async function listGameGhosts(gameId) {
+  return invokeCommand("list_game_ghosts", { gameId: String(gameId || "") });
+}
+
+export async function getGhostStatus(gameId) {
+  return invokeCommand("get_ghost_status", { gameId: String(gameId || "") });
+}
+
+export async function startGhostRecording(gameId, label = null, syncTimeMachine = true) {
+  return invokeCommand("start_ghost_recording", {
+    gameId: String(gameId || ""),
+    label: label ? String(label) : null,
+    syncTimeMachine: Boolean(syncTimeMachine)
+  });
+}
+
+export async function stopGhostRecording(gameId) {
+  return invokeCommand("stop_ghost_recording", { gameId: String(gameId || "") });
+}
+
+export async function startGhostPlayback(
+  gameId,
+  ghostId,
+  loopMode = false,
+  restoreTimeMachine = true
+) {
+  return invokeCommand("start_ghost_playback", {
+    gameId: String(gameId || ""),
+    ghostId: String(ghostId || ""),
+    loopMode: Boolean(loopMode),
+    restoreTimeMachine: Boolean(restoreTimeMachine)
+  });
+}
+
+export async function stopGhostPlayback(gameId) {
+  return invokeCommand("stop_ghost_playback", { gameId: String(gameId || "") });
+}
+
+export async function importGhostFile(gameId, srcPath) {
+  return invokeCommand("import_ghost_file", {
+    gameId: String(gameId || ""),
+    srcPath: String(srcPath || "")
+  });
+}
+
+export async function exportGhostFile(gameId, ghostId, destPath) {
+  return invokeCommand("export_ghost_file", {
+    gameId: String(gameId || ""),
+    ghostId: String(ghostId || ""),
+    destPath: String(destPath || "")
+  });
+}
+
+export async function deleteGhostRecording(gameId, ghostId) {
+  return invokeCommand("delete_ghost_recording", {
+    gameId: String(gameId || ""),
+    ghostId: String(ghostId || "")
+  });
+}
+
+export async function getSandboxTrainerStatus(pid = null, exePath = null) {
+  return invokeCommand("get_sandbox_trainer_status", {
+    pid: typeof pid === "number" && pid > 0 ? pid : null,
+    exePath: exePath ? String(exePath) : null
+  });
+}
+
+export async function sandboxScanMemory(pid, valueType, valueStr, resetScan = true) {
+  return invokeCommand("sandbox_scan_memory", {
+    pid: Number(pid || 0),
+    valueType: String(valueType || "i32"),
+    valueStr: String(valueStr ?? ""),
+    resetScan: Boolean(resetScan)
+  });
+}
+
+export async function sandboxWriteMemoryValue(pid, addressHex, valueType, newValue) {
+  return invokeCommand("sandbox_write_memory_value", {
+    pid: Number(pid || 0),
+    addressHex: String(addressHex || ""),
+    valueType: String(valueType || "i32"),
+    newValue: String(newValue ?? "")
+  });
+}
+
+export async function sandboxSetSpeedhackScale(pid = null, scale = 1.0) {
+  return invokeCommand("sandbox_set_speedhack_scale", {
+    pid: typeof pid === "number" && pid > 0 ? pid : null,
+    scale: Number(scale || 1.0)
+  });
+}
+
+
 
 

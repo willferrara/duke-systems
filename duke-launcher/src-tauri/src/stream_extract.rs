@@ -393,7 +393,7 @@ impl InFlightZstPipeline {
         let failed = Arc::new(Mutex::new(None::<String>));
         let failed_clone = Arc::clone(&failed);
 
-        let handle = std::thread::Builder::new()
+        let (sender, handle) = match std::thread::Builder::new()
             .name("duke-zstd-inflight".to_string())
             .spawn(move || {
                 let started = Instant::now();
@@ -487,31 +487,40 @@ impl InFlightZstPipeline {
                 })();
 
                 if let Err(ref err) = res {
-                    *failed_clone.lock().unwrap() = Some(err.clone());
+                    *failed_clone.lock().unwrap_or_else(|e| e.into_inner()) = Some(err.clone());
                 }
                 res
-            })
-            .expect("spawn in-flight zstd decoder thread");
+            }) {
+            Ok(h) => (Some(tx), Some(h)),
+            Err(err) => {
+                *failed.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(format!("Failed spawning in-flight zstd decoder thread: {err}"));
+                (None, None)
+            }
+        };
 
         Self {
-            sender: Some(tx),
+            sender,
             reorder: Mutex::new(ContiguousReorderState {
                 next_offset: 0,
                 pending: BTreeMap::new(),
                 buffered_bytes: 0,
                 total_streamed: 0,
             }),
-            handle: Some(handle),
+            handle,
             failed,
         }
     }
 
     pub fn next_contiguous_offset(&self) -> u64 {
-        self.reorder.lock().unwrap().next_offset
+        self.reorder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .next_offset
     }
 
     pub fn submit_range(&self, start_offset: u64, data: &[u8]) -> Result<(), String> {
-        if let Some(err) = self.failed.lock().unwrap().clone() {
+        if let Some(err) = self.failed.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             return Err(err);
         }
         if data.is_empty() {
@@ -525,7 +534,7 @@ impl InFlightZstPipeline {
 
         let mut ready_to_send = Vec::<Vec<u8>>::new();
         {
-            let mut state = self.reorder.lock().unwrap();
+            let mut state = self.reorder.lock().unwrap_or_else(|e| e.into_inner());
             let end_offset = start_offset + data.len() as u64;
             if end_offset <= state.next_offset {
                 return Ok(());
@@ -572,7 +581,15 @@ impl InFlightZstPipeline {
     }
 
     pub fn finish(mut self) -> Result<InFlightExtractStats, String> {
-        let remaining_unflushed = !self.reorder.lock().unwrap().pending.is_empty();
+        if let Some(err) = self.failed.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            return Err(err);
+        }
+        let remaining_unflushed = !self
+            .reorder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .is_empty();
         drop(self.sender.take());
         let handle = self
             .handle
@@ -584,7 +601,11 @@ impl InFlightZstPipeline {
         if remaining_unflushed {
             return Err("Archive stream ended with unjoined byte gaps".to_string());
         }
-        stats.compressed_bytes_streamed = self.reorder.lock().unwrap().total_streamed;
+        stats.compressed_bytes_streamed = self
+            .reorder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .total_streamed;
         Ok(stats)
     }
 }
@@ -636,12 +657,24 @@ pub fn parse_zip_central_directory_from_tail(
     if (cd_offset == 0xFFFF_FFFF || cd_size == 0xFFFF_FFFF) && eocd_pos >= 20 {
         let loc = eocd_pos - 20;
         if tail_bytes[loc..loc + 4] == [0x50, 0x4B, 0x06, 0x07] {
-            let zip64_eocd_off = u64::from_le_bytes(tail_bytes[loc + 8..loc + 16].try_into().unwrap());
+            let zip64_eocd_off = u64::from_le_bytes(
+                tail_bytes[loc + 8..loc + 16]
+                    .try_into()
+                    .map_err(|_| "Truncated Zip64 EOCD offset".to_string())?,
+            );
             if zip64_eocd_off >= tail_start_offset {
                 let rel = (zip64_eocd_off - tail_start_offset) as usize;
                 if rel + 56 <= tail_bytes.len() && tail_bytes[rel..rel + 4] == [0x50, 0x4B, 0x06, 0x06] {
-                    cd_size = u64::from_le_bytes(tail_bytes[rel + 40..rel + 48].try_into().unwrap());
-                    cd_offset = u64::from_le_bytes(tail_bytes[rel + 48..rel + 56].try_into().unwrap());
+                    cd_size = u64::from_le_bytes(
+                        tail_bytes[rel + 40..rel + 48]
+                            .try_into()
+                            .map_err(|_| "Truncated Zip64 CD size".to_string())?,
+                    );
+                    cd_offset = u64::from_le_bytes(
+                        tail_bytes[rel + 48..rel + 56]
+                            .try_into()
+                            .map_err(|_| "Truncated Zip64 CD offset".to_string())?,
+                    );
                 }
             }
         }
@@ -674,17 +707,30 @@ pub fn parse_zip_central_directory_entries(cd_bytes: &[u8], cd_offset: u64) -> R
             break;
         }
         let method = u16::from_le_bytes([cd_bytes[cursor + 10], cd_bytes[cursor + 11]]);
-        let crc32 = u32::from_le_bytes(cd_bytes[cursor + 16..cursor + 20].try_into().unwrap());
-        let mut comp_size =
-            u32::from_le_bytes(cd_bytes[cursor + 20..cursor + 24].try_into().unwrap()) as u64;
-        let mut uncomp_size =
-            u32::from_le_bytes(cd_bytes[cursor + 24..cursor + 28].try_into().unwrap()) as u64;
+        let crc32 = u32::from_le_bytes(
+            cd_bytes[cursor + 16..cursor + 20]
+                .try_into()
+                .map_err(|_| "Truncated ZIP CD CRC32".to_string())?,
+        );
+        let mut comp_size = u32::from_le_bytes(
+            cd_bytes[cursor + 20..cursor + 24]
+                .try_into()
+                .map_err(|_| "Truncated ZIP CD compressed size".to_string())?,
+        ) as u64;
+        let mut uncomp_size = u32::from_le_bytes(
+            cd_bytes[cursor + 24..cursor + 28]
+                .try_into()
+                .map_err(|_| "Truncated ZIP CD uncompressed size".to_string())?,
+        ) as u64;
         let fname_len = u16::from_le_bytes([cd_bytes[cursor + 28], cd_bytes[cursor + 29]]) as usize;
         let extra_len = u16::from_le_bytes([cd_bytes[cursor + 30], cd_bytes[cursor + 31]]) as usize;
         let comment_len =
             u16::from_le_bytes([cd_bytes[cursor + 32], cd_bytes[cursor + 33]]) as usize;
-        let mut local_off =
-            u32::from_le_bytes(cd_bytes[cursor + 42..cursor + 46].try_into().unwrap()) as u64;
+        let mut local_off = u32::from_le_bytes(
+            cd_bytes[cursor + 42..cursor + 46]
+                .try_into()
+                .map_err(|_| "Truncated ZIP CD local header offset".to_string())?,
+        ) as u64;
 
         let rec_end = cursor + 46 + fname_len + extra_len + comment_len;
         if rec_end > cd_bytes.len() {
@@ -704,15 +750,27 @@ pub fn parse_zip_central_directory_entries(cd_bytes: &[u8], cd_offset: u64) -> R
             if tag == 0x0001 {
                 let mut vp = val_start;
                 if uncomp_size == 0xFFFF_FFFF && vp + 8 <= val_end {
-                    uncomp_size = u64::from_le_bytes(cd_bytes[vp..vp + 8].try_into().unwrap());
+                    uncomp_size = u64::from_le_bytes(
+                        cd_bytes[vp..vp + 8]
+                            .try_into()
+                            .map_err(|_| "Truncated Zip64 uncompressed size".to_string())?,
+                    );
                     vp += 8;
                 }
                 if comp_size == 0xFFFF_FFFF && vp + 8 <= val_end {
-                    comp_size = u64::from_le_bytes(cd_bytes[vp..vp + 8].try_into().unwrap());
+                    comp_size = u64::from_le_bytes(
+                        cd_bytes[vp..vp + 8]
+                            .try_into()
+                            .map_err(|_| "Truncated Zip64 compressed size".to_string())?,
+                    );
                     vp += 8;
                 }
                 if local_off == 0xFFFF_FFFF && vp + 8 <= val_end {
-                    local_off = u64::from_le_bytes(cd_bytes[vp..vp + 8].try_into().unwrap());
+                    local_off = u64::from_le_bytes(
+                        cd_bytes[vp..vp + 8]
+                            .try_into()
+                            .map_err(|_| "Truncated Zip64 local header offset".to_string())?,
+                    );
                 }
             }
             ex = ex + 4 + sz;
@@ -947,20 +1005,20 @@ pub fn dispatch_ready_zip_entries(
             let bytes = Arc::clone(&bytes);
             let err_slot = Arc::clone(&err_slot);
             scope.spawn(move || loop {
-                if err_slot.lock().unwrap().is_some() {
+                if err_slot.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
                     break;
                 }
-                let next = { queue.lock().unwrap().pop() };
+                let next = { queue.lock().unwrap_or_else(|e| e.into_inner()).pop() };
                 let Some(entry) = next else {
                     break;
                 };
                 match extract_ready_zip_entry_from_file(archive_file, &entry, dest_dir) {
                     Ok(sz) => {
-                        *count.lock().unwrap() += 1;
-                        *bytes.lock().unwrap() += sz;
+                        *count.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+                        *bytes.lock().unwrap_or_else(|e| e.into_inner()) += sz;
                     }
                     Err(e) => {
-                        *err_slot.lock().unwrap() = Some(e);
+                        *err_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(e);
                         break;
                     }
                 }
@@ -968,11 +1026,11 @@ pub fn dispatch_ready_zip_entries(
         }
     });
 
-    if let Some(err) = err_slot.lock().unwrap().take() {
+    if let Some(err) = err_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
         return Err(err);
     }
-    let out_count = *count.lock().unwrap();
-    let out_bytes = *bytes.lock().unwrap();
+    let out_count = *count.lock().unwrap_or_else(|e| e.into_inner());
+    let out_bytes = *bytes.lock().unwrap_or_else(|e| e.into_inner());
     Ok((out_count, out_bytes))
 }
 

@@ -201,7 +201,7 @@ async fn run_multicast_beacon_loop(
 
     let rx_storage = storage.clone();
     tokio::spawn(async move {
-        let mut buf = [0u8; 65_535];
+        let mut buf = vec![0u8; 65_535];
         let (local_id, _) = rx_storage.node_identity();
         while let Ok((len, src)) = recv_sock.recv_from(&mut buf).await {
             if let Ok(beacon) = serde_json::from_slice::<SwarmBeacon>(&buf[..len]) {

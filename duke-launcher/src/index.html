@@ -70,6 +70,9 @@
     <symbol id="icon-cpu-ai" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 12h6"/><path d="M12 9v6"/><path d="M9 2v3"/><path d="M15 2v3"/><path d="M9 19v3"/><path d="M15 19v3"/><path d="M2 9h3"/><path d="M2 15h3"/><path d="M19 9h3"/><path d="M19 15h3"/></symbol>
     <symbol id="icon-archive" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></symbol>
     <symbol id="icon-keyboard" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.001"/><path d="M10 8h.001"/><path d="M14 8h.001"/><path d="M18 8h.001"/><path d="M8 12h.001"/><path d="M12 12h.001"/><path d="M16 12h.001"/><path d="M7 16h10"/></symbol>
+    <symbol id="icon-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+    <symbol id="icon-wifi-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h.01"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/><path d="M5 12.859a10 10 0 0 1 5.17-2.69"/><path d="M19 12.859a10 10 0 0 0-2.007-1.523"/><path d="M2 8.82a15 15 0 0 1 4.177-2.643"/><path d="M22 8.82a15 15 0 0 0-11.288-3.764"/><path d="m2 2 20 20"/></symbol>
+    <symbol id="icon-shield-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/></symbol>
   </svg>
 
   <div class="window-shell">
@@ -81,7 +84,7 @@
         </button>
         <img src="assets/dukeflaglogo.png" alt="Duke Launcher" class="titlebar-emblem" />
         <span class="titlebar-title">Duke Launcher</span>
-        <span class="titlebar-version mono-num" id="app-version-pill">v0.9.0</span>
+        <span class="titlebar-version mono-num" id="app-version-pill">v1.0.0</span>
       </div>
 
       <div class="titlebar-center">
@@ -112,7 +115,8 @@
                 </button>
               </div>
             </div>
-            <div id="pilot-headline" class="duke-pilot-headline">Type a command or natural-language search...</div>
+            <div id="pilot-headline" class="duke-pilot-headline">Type a command or search everything (games, friends, actions, slots, saves)...</div>
+            <div id="pilot-everything-list" class="pilot-everything-list"></div>
             <div id="pilot-steps-list" class="duke-pilot-steps"></div>
             <div id="pilot-semantic-list" class="duke-pilot-semantic hidden"></div>
             <div class="duke-pilot-foot">
@@ -286,6 +290,25 @@
               <span>Repaired — Relaunch Game</span>
             </button>
             <button type="button" class="btn btn-secondary btn-sm" id="btn-crash-dismiss">
+              <svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg>
+              <span>Dismiss</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Smart Disk-Space Pressure Autopilot Banner (< 50 GB default) -->
+        <div class="crash-heal-banner hidden" id="disk-pressure-banner" role="region" aria-label="Low Drive Space Autopilot">
+          <div class="clipboard-banner-info">
+            <svg class="icon" aria-hidden="true"><use href="#icon-hard-drive"/></svg>
+            <span class="clipboard-banner-label">Disk-Space Pressure Autopilot:</span>
+            <span class="clipboard-banner-url" id="disk-pressure-summary">Evaluating untouched 60+ day games...</span>
+          </div>
+          <div class="clipboard-banner-actions">
+            <button type="button" class="btn btn-steam-green btn-sm" id="btn-run-disk-pressure">
+              <svg class="icon" aria-hidden="true"><use href="#icon-zap"/></svg>
+              <span>Reclaim Space Now</span>
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-dismiss-disk-pressure">
               <svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg>
               <span>Dismiss</span>
             </button>
@@ -552,6 +575,10 @@
                   <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
                   <span>Remove</span>
                 </button>
+                <button type="button" class="btn btn-danger-ghost btn-sm" id="btn-detail-clean-uninstall" title="Deep Clean Uninstall + optional <5 MB Zstd Save Backup + AppData &amp; Registry Cleanup">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
+                  <span>Clean Uninstall</span>
+                </button>
               </div>
               <div class="detail-steam-links">
                 <button type="button" class="link-btn" id="btn-subnav-store">Steam Store</button>
@@ -599,6 +626,10 @@
                 </div>
 
                 <div class="detail-field-block detail-runtime-profile">
+                  <div class="detail-field-head">
+                    <span class="field-label">Security &amp; Privacy Sandbox</span>
+                    <span class="pill mono-num" id="detail-jail-status-pill">Normal Windows</span>
+                  </div>
                   <label class="detail-toggle-row" for="detail-toggle-sandbox">
                     <div class="setting-toggle-copy">
                       <div class="setting-toggle-title">Keep Game Saves Private (.duke-profile)</div>
@@ -606,6 +637,21 @@
                     </div>
                     <input type="checkbox" id="detail-toggle-sandbox" class="setting-checkbox" />
                   </label>
+                  <label class="detail-toggle-row" for="detail-toggle-appcontainer-jail" title="Runs the game inside an OS-enforced Windows AppContainer with filesystem ACL isolation">
+                    <div class="setting-toggle-copy">
+                      <div class="setting-toggle-title">AppContainer Security Jail</div>
+                      <div class="setting-toggle-desc">Isolates untrusted binaries from your personal folders, browsers, and Windows credentials.</div>
+                    </div>
+                    <input type="checkbox" id="detail-toggle-appcontainer-jail" class="setting-checkbox" />
+                  </label>
+                  <label class="detail-toggle-row" for="detail-toggle-offline-lock" title="Blocks internet access for this executable using AppContainer capabilities &amp; firewall rules">
+                    <div class="setting-toggle-copy">
+                      <div class="setting-toggle-title">Offline Mode (Block Internet Access)</div>
+                      <div class="setting-toggle-desc">Stops single-player games from phoning home or sending network telemetry.</div>
+                    </div>
+                    <input type="checkbox" id="detail-toggle-offline-lock" class="setting-checkbox" />
+                  </label>
+                  <p class="panel-sub mono-num" id="detail-jail-profile-caption">ACL scope restricted to game folder when AppContainer is active.</p>
                   <div class="detail-field-head detail-prefetch-row">
                     <div>
                       <label for="detail-prefetch-mode">Fast Startup Pre-Loader</label>
@@ -625,6 +671,19 @@
                     <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-inline-exe">Change Exe</button>
                   </div>
                   <code class="path-code mono-num" id="detail-exe-path">--</code>
+                </div>
+
+                <div class="detail-field-block hidden" id="detail-rom-patcher-block">
+                  <div class="detail-field-head">
+                    <span class="field-label">Pure-Rust ROM Patcher (.ips / .bps / .ups / .xdelta)</span>
+                    <button type="button" class="btn btn-primary btn-xs" id="btn-detail-apply-rom-patch">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-layers"/></svg>
+                      <span>Apply ROM Patch</span>
+                    </button>
+                  </div>
+                  <div class="detail-micro-caption">Creates a .duke-cas restore point and launches patched hacks as a separate 1-click profile while preserving your clean base ROM.</div>
+                  <input type="text" id="input-rom-patch-hash" class="input-control mono-num" placeholder="Optional source CRC32 (8 hex) or SHA-1 verification..." />
+                  <p class="panel-sub mono-num hidden" id="detail-rom-patch-status"></p>
                 </div>
 
                 <div class="detail-field-block">
@@ -726,6 +785,16 @@
                 <div id="detail-ach-recent-list" class="ach-recent-list">
                   <div class="panel-sub">Scanning local achievements.json / stats.ini &amp; connected storefronts...</div>
                 </div>
+                <div class="detail-field-block hidden" id="detail-ra-progress-box">
+                  <div class="detail-field-head">
+                    <span class="field-label">RetroAchievements Live Sync (rcheevos MD5)</span>
+                    <div class="detail-head-actions-inline">
+                      <span class="pill mono-num" id="detail-ra-hardcore-pill">Hardcore 0</span>
+                      <button type="button" class="btn btn-secondary btn-xs" id="btn-sync-retro-achievements">Sync RA</button>
+                    </div>
+                  </div>
+                  <p class="panel-sub mono-num" id="detail-ra-summary">Computing rcheevos console hash...</p>
+                </div>
                 <div class="detail-field-block">
                   <div class="detail-field-head">
                     <span class="field-label">Custom Telemetry File / Folder</span>
@@ -768,12 +837,28 @@
 
               <div class="panel-card" id="detail-compat-card">
                 <div class="panel-head">
-                  <h3>Older Game Fixes &amp; Graphics</h3>
+                  <h3>Crash-to-Fix &amp; Older Game Repairs</h3>
                   <span class="pill mono-num" id="detail-compat-arch-pill">Windows App</span>
+                </div>
+                <div class="detail-field-head" id="detail-verified-badge-row">
+                  <span class="pill mono-num" id="detail-duke-verified-pill">Duke Verified · Checking...</span>
+                  <span class="panel-sub mono-num" id="detail-duke-verified-summary">Checking anonymous BLAKE3 compatibility matrix...</span>
                 </div>
                 <p class="panel-sub" id="detail-compat-status">Checking if this game benefits from extra memory or graphics fixes...</p>
                 <div class="compat-badge-strip" id="detail-compat-dx-list"></div>
+                <div id="detail-crash-diagnosis-box" class="crash-diagnosis-box hidden">
+                  <div class="detail-field-head">
+                    <strong id="detail-crash-fault-title">Crash Diagnosis</strong>
+                    <span class="pill danger mono-num" id="detail-crash-code-pill">0x0</span>
+                  </div>
+                  <p class="panel-sub" id="detail-crash-plain-cause"></p>
+                  <ul id="detail-crash-actions-list" class="fix-bullet-list"></ul>
+                </div>
                 <div class="detail-save-actions">
+                  <button type="button" class="btn btn-primary btn-xs" id="btn-apply-auto-fixes" title="Applies safe repairs with an automatic .duke-cas restore point">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-shield-check"/></svg>
+                    <span>1-Click Auto-Fix (.duke-cas)</span>
+                  </button>
                   <button type="button" class="btn btn-secondary btn-xs" id="btn-toggle-laa" title="Helps 32-bit games use more than 2 GB RAM without crashing">
                     <svg class="icon" aria-hidden="true"><use href="#icon-wrench"/></svg>
                     <span>Unlock 4 GB Memory</span>
@@ -781,6 +866,40 @@
                   <button type="button" class="btn btn-secondary btn-xs" id="btn-toggle-dxvk" title="Translates DirectX to Vulkan for smoother frame rates on older games">
                     <svg class="icon" aria-hidden="true"><use href="#icon-layers"/></svg>
                     <span>Graphics Fix (DXVK)</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-fetch-pcgw-fixes" title="Fetches known fixes, crash workarounds, and FOV patches from PCGamingWiki">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                    <span>Load Fixes</span>
+                  </button>
+                </div>
+                <div class="detail-field-head detail-prefetch-row">
+                  <label class="field-label" for="select-fix-compat-shim">Windows Compatibility Shim &amp; High-DPI</label>
+                  <select id="select-fix-compat-shim" class="select-control select-compact">
+                    <option value="">Default Windows</option>
+                    <option value="WIN8RTM">Windows 8 + High DPI</option>
+                    <option value="WIN7RTM">Windows 7 + High DPI</option>
+                    <option value="HIGHDPIAWARE">High-DPI Aware Only</option>
+                  </select>
+                </div>
+                <div id="detail-pcgw-fix-sections" class="pcgw-fix-sections">
+                  <div class="panel-sub">Click <strong>Load Fixes</strong> to inspect community fixes, crash workarounds, ultrawide/FOV patches, and controller notes.</div>
+                </div>
+                <div class="detail-save-actions" id="detail-fix-links-row">
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-fix-link-pcgw">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-external-link"/></svg>
+                    <span>PCGamingWiki</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-fix-link-protondb">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-external-link"/></svg>
+                    <span>ProtonDB</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-fix-link-steam">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-external-link"/></svg>
+                    <span>Steam Discussions</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-fix-link-github">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-external-link"/></svg>
+                    <span>GitHub Issues</span>
                   </button>
                 </div>
               </div>
@@ -853,6 +972,18 @@
                     <span>Save Selected Pack Loadout</span>
                   </button>
                 </div>
+                <div class="mod-loadout-create-row" id="detail-mod-dropper-row">
+                  <input type="text" id="input-mod-workshop-url" class="input-control mono-num" placeholder="Paste Steam Workshop URL (https://steamcommunity.com/sharedfiles/filedetails/?id=...)..." />
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-install-workshop-mod">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
+                    <span>Fetch Workshop</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-drop-mod-archive">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-shield-check"/></svg>
+                    <span>Drop/Scan Mod .zip/.7z</span>
+                  </button>
+                </div>
+                <p class="panel-sub hidden" id="detail-moddrop-security-summary"></p>
                 <div class="detail-compat-dx-list" id="detail-mods-collisions"></div>
                 <div class="mod-packs-grid" id="detail-mods-packs-list">
                   <div class="panel-sub">No mod frameworks detected yet in this game folder.</div>
@@ -896,6 +1027,45 @@
                   <div class="panel-sub">No save checkpoints recorded yet. Play this game or click Create Checkpoint to start your timeline.</div>
                 </div>
                 <div id="detail-tm-timeline-list" class="tm-timeline-strip"></div>
+              </div>
+
+              <!-- Deterministic Input Ghost & Time-Machine Macro Recorder (~10 KB/min) -->
+              <div class="panel-card detail-card-span2" id="detail-ghost-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>Deterministic Input Ghost &amp; Macro Recorder</h3>
+                    <p class="panel-sub" id="detail-ghost-status">Compact (~10 KB/min) XInput/HID stream synced with Time-Machine save states · auto-pauses when game loses focus.</p>
+                  </div>
+                  <div class="detail-save-actions">
+                    <span class="pill mono-num" id="detail-ghost-mode-pill">Idle</span>
+                    <button type="button" class="btn btn-primary btn-xs" id="btn-detail-ghost-record">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-gamepad-2"/></svg>
+                      <span>Record Ghost</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-xs hidden" id="btn-detail-ghost-stop">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-pause"/></svg>
+                      <span>Stop</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-ghost-import" title="Import shareable .dkghost file">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-upload"/></svg>
+                      <span>Import .dkghost</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="tm-branch-row">
+                  <input type="text" id="input-detail-ghost-label" class="input-control" placeholder="Ghost run label (e.g. Any% Boss Skip)..." />
+                  <label class="wave2-check-chip" title="Create a synced Time-Machine save checkpoint at recording start & restore before playback">
+                    <input type="checkbox" id="chk-detail-ghost-sync-tm" checked />
+                    <span>Sync Time-Machine Save</span>
+                  </label>
+                  <label class="wave2-check-chip" title="Loop ghost playback continuously for practice/farming macros">
+                    <input type="checkbox" id="chk-detail-ghost-loop" />
+                    <span>Loop Macro</span>
+                  </label>
+                </div>
+                <div class="wave2-history-list" id="detail-ghost-list">
+                  <div class="panel-sub">No .dkghost recordings saved for this game yet.</div>
+                </div>
               </div>
 
               <!-- ETW Frame-Time & Bottleneck X-Ray Session Scorecard -->
@@ -944,6 +1114,8 @@
                     <div class="wave2-ratio-gpu" id="detail-xray-gpu-bar" style="width:50%"></div>
                   </div>
                 </div>
+                <div class="panel-sub mono-num" id="detail-xray-correlations"></div>
+                <div class="wave2-xray-suggestions" id="detail-xray-suggestions"></div>
                 <div class="wave2-history-list mono-num" id="detail-xray-history-list"></div>
               </div>
 
@@ -1963,22 +2135,46 @@
                 </div>
               </div>
 
-              <!-- Card 3: Network, Privacy DNS & Proxy Routing -->
+              <!-- Card 3: Network, Privacy Vault & Anonymity Routing -->
               <div class="panel-card">
                 <div class="panel-head">
                   <div>
-                    <h3>3. Network, Privacy DNS &amp; Proxy Routing</h3>
-                    <p class="panel-sub">Encrypted DNS-over-HTTPS resolution, custom HTTP/SOCKS5 proxies, bandwidth caps, and automated MOTW unblocking.</p>
+                    <h3>3. Privacy Vault, Encrypted DNS &amp; Anonymity Routing</h3>
+                    <p class="panel-sub">Windows DPAPI secret vault, Cloudflare/Quad9 DNS-over-HTTPS, Tor/SOCKS5/WireGuard presets, and MOTW safety.</p>
                   </div>
+                  <span class="pill emerald mono-num" id="setting-vault-status-pill">DPAPI Vault Active</span>
                 </div>
 
                 <label class="setting-toggle-row" for="setting-doh-enabled">
                   <div class="setting-toggle-copy">
                     <div class="setting-toggle-title">Encrypted DNS-over-HTTPS (<code>1.1.1.1</code> / <code>9.9.9.9</code>)</div>
-                    <div class="setting-toggle-desc">Routes catalog, artwork, and downloader host resolution over encrypted HTTPS DNS queries.</div>
+                    <div class="setting-toggle-desc">Routes catalog, artwork, PCGamingWiki, and downloader host resolution over encrypted HTTPS DNS queries.</div>
                   </div>
                   <input type="checkbox" id="setting-doh-enabled" class="setting-checkbox" checked />
                 </label>
+
+                <div class="settings-input-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">DoH Resolver Provider &amp; Anonymity Network Preset</div>
+                    <div class="setting-toggle-desc" id="setting-vault-proxy-readout">Direct Encrypted DoH (No Proxy)</div>
+                  </div>
+                  <div class="settings-inline-form">
+                    <select id="setting-doh-provider" class="select-control select-compact" aria-label="DNS-over-HTTPS Provider">
+                      <option value="auto" selected>Auto Race (1.1.1.1 + 9.9.9.9)</option>
+                      <option value="cloudflare">Cloudflare (1.1.1.1)</option>
+                      <option value="quad9">Quad9 (9.9.9.9)</option>
+                      <option value="disabled">System DNS</option>
+                    </select>
+                    <select id="setting-proxy-preset" class="select-control select-compact" aria-label="Anonymity Network Preset">
+                      <option value="direct" selected>Direct Encrypted DoH</option>
+                      <option value="tor_daemon">Tor Daemon (socks5h://127.0.0.1:9050)</option>
+                      <option value="tor_browser">Tor Browser (socks5h://127.0.0.1:9150)</option>
+                      <option value="socks5_local">Local SOCKS5 (127.0.0.1:1080)</option>
+                      <option value="wireguard_custom">WireGuard / Custom Proxy</option>
+                    </select>
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-apply-anonymity-preset">Apply Network</button>
+                  </div>
+                </div>
 
                 <div class="settings-input-row">
                   <div class="setting-toggle-copy">
@@ -2196,14 +2392,16 @@
                 <div id="settings-sources-list" class="settings-sources-list"></div>
 
                 <div class="setting-integration-group">
-                  <div class="settings-input-row">
+                  <div class="setting-toggle-row">
                     <div class="setting-toggle-copy">
                       <div class="setting-toggle-title">SteamGridDB API Key</div>
-                      <div class="setting-toggle-desc">Optional free v2 bearer key for 600x900 grids, hero banners, and Windows <code>.ico</code> icons.</div>
+                      <div class="setting-toggle-desc">Optional free v2 bearer key for 600x900 grids, hero banners, and Windows <code>.ico</code> icons (DPAPI encrypted).</div>
                     </div>
-                    <div class="settings-inline-form">
+                    <div class="setting-inline-controls">
+                      <span class="pill mono-num" id="setting-sgdb-key-status">Not Set</span>
                       <input type="password" id="setting-steamgriddb-key" class="input-control mono-num" placeholder="Paste SteamGridDB API key..." autocomplete="off" />
                       <button type="button" class="btn btn-secondary btn-sm" id="btn-save-sgdb-key">Save Key</button>
+                      <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-clear-sgdb-key">Clear</button>
                     </div>
                   </div>
 
@@ -2254,6 +2452,20 @@
                       <input type="password" id="setting-psn-npsso" class="input-control mono-num" placeholder="Paste 64-char NPSSO token..." autocomplete="off" />
                       <button type="button" class="btn btn-secondary btn-sm" id="btn-save-psn-npsso">Save Token</button>
                       <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-clear-psn-npsso">Clear</button>
+                    </div>
+                  </div>
+
+                  <div class="setting-toggle-row">
+                    <div class="setting-toggle-copy">
+                      <div class="setting-toggle-title">RetroAchievements API Key (DPAPI Vault)</div>
+                      <div class="setting-toggle-desc">Read-only Web API key encrypted via Windows DPAPI for live console achievement tracking &amp; Hardcore badges.</div>
+                    </div>
+                    <div class="setting-inline-controls">
+                      <span class="pill mono-num" id="setting-ra-key-status">Not Set</span>
+                      <input type="text" id="setting-ra-username" class="input-control mono-num input-compact-num" placeholder="Username..." autocomplete="off" />
+                      <input type="password" id="setting-ra-api-key" class="input-control mono-num" placeholder="Paste RetroAchievements Web API key..." autocomplete="off" />
+                      <button type="button" class="btn btn-secondary btn-sm" id="btn-save-ra-key">Save Key</button>
+                      <button type="button" class="btn btn-secondary btn-sm hidden" id="btn-clear-ra-key">Clear</button>
                     </div>
                   </div>
                 </div>
@@ -2614,6 +2826,10 @@
                       <svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg>
                       <span>Scan ROM Folder</span>
                     </button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-settings-group-multidisc" title="Automatically collapse (Disc 1)/(Disc 2) files into unified .m3u playlists">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-layers"/></svg>
+                      <span>Group Multi-Disc (.m3u)</span>
+                    </button>
                     <button type="button" class="btn btn-secondary btn-sm" id="btn-settings-sync-retro-catalog">
                       <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
                       <span>Sync Console Catalog</span>
@@ -2626,6 +2842,26 @@
                 </div>
                 <p class="panel-sub mono-num" id="settings-retro-sync-status">Checking portable console players...</p>
                 <div id="settings-emulators-list" class="emu-settings-grid"></div>
+                <div class="bios-vault-section">
+                  <div class="panel-head">
+                    <div>
+                      <h4>1-Click BIOS &amp; Firmware Vault (Libretro MD5/SHA-1 Validator)</h4>
+                      <p class="panel-sub mono-num" id="settings-bios-summary">Checking DuckStation, PCSX2, melonDS, Azahar &amp; RetroArch BIOS readiness...</p>
+                    </div>
+                    <div class="settings-btn-group">
+                      <button type="button" class="btn btn-primary btn-xs" id="btn-scan-bios-folder">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg>
+                        <span>Scan BIOS Folder</span>
+                      </button>
+                      <button type="button" class="btn btn-secondary btn-xs" id="btn-scan-bios-archive">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-archive"/></svg>
+                        <span>Import BIOS .zip/.7z</span>
+                      </button>
+                      <button type="button" class="btn btn-secondary btn-xs" id="btn-refresh-bios-vault">Verify</button>
+                    </div>
+                  </div>
+                  <div id="settings-bios-grid" class="bios-readiness-grid"></div>
+                </div>
               </div>
             </div>
           </section>
@@ -2974,6 +3210,43 @@
     </div>
   </div>
 
+  <!-- MODAL: DEEP CLEAN GAME UNINSTALL & ORPHAN APPDATA SWEEPER -->
+  <div id="clean-uninstall-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="clean-uninstall-title">
+    <div class="modal-card modal-card-narrow">
+      <div class="modal-head">
+        <h3 id="clean-uninstall-title">Clean Uninstall Game</h3>
+        <button type="button" class="win-btn modal-close" id="btn-close-clean-uninstall-modal" aria-label="Close">
+          <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p class="panel-sub" id="uninstall-modal-summary">Inspecting game directory, saves &amp; orphaned AppData traces...</p>
+        <div id="uninstall-modal-paths" class="kv-rows mono-num"></div>
+        <label class="setting-toggle-row" for="chk-uninstall-keep-saves">
+          <div class="setting-toggle-copy">
+            <div class="setting-toggle-title">Keep Saves Before Uninstalling?</div>
+            <div class="setting-toggle-desc">Archives discovered saves into a compact &lt;5 MB Zstd bundle in Duke_Save_Backups before deleting.</div>
+          </div>
+          <input type="checkbox" id="chk-uninstall-keep-saves" class="setting-checkbox" checked />
+        </label>
+        <label class="setting-toggle-row" for="chk-uninstall-orphans">
+          <div class="setting-toggle-copy">
+            <div class="setting-toggle-title">Sweep Orphaned AppData &amp; Registry Keys</div>
+            <div class="setting-toggle-desc">Removes leftover LocalAppData/My Games folders, dead HKCU Uninstall keys, UserGpuPreferences &amp; firewall locks.</div>
+          </div>
+          <input type="checkbox" id="chk-uninstall-orphans" class="setting-checkbox" checked />
+        </label>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-danger-ghost btn-sm" id="btn-confirm-clean-uninstall">
+          <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
+          <span>Clean Uninstall Now</span>
+        </button>
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-cancel-clean-uninstall">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <!-- MODAL: DUKE LINK — ZERO-LATENCY COUCH CO-OP STREAM & VIRTUAL P2 -->
   <div id="coop-stream-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="coop-stream-modal-title">
     <div class="modal-card modal-card-wide">
@@ -3050,6 +3323,10 @@
       <button type="button" class="overlay-tab-btn" data-overlay-tab="acoustics" id="btn-overlay-tab-acoustics">
         <svg class="icon" aria-hidden="true"><use href="#icon-volume-2"/></svg>
         <span>Acoustics</span>
+      </button>
+      <button type="button" class="overlay-tab-btn" data-overlay-tab="sandbox" id="btn-overlay-tab-sandbox">
+        <svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>
+        <span>Trainer</span>
       </button>
     </div>
 
@@ -3196,6 +3473,39 @@
       <div class="overlay-ai-row">
         <button type="button" class="btn btn-primary btn-xs" id="btn-overlay-acoustics-save">Save EQ &amp; Denoise</button>
         <button type="button" class="btn btn-secondary btn-xs" id="btn-overlay-denoise-bench">Bench Denoiser</button>
+      </div>
+    </div>
+
+    <!-- Tab 5: Single-Player Memory Trainer & NtSetTimerResolution Speedhack (Anti-Cheat Guarded) -->
+    <div class="overlay-tab-pane hidden" id="overlay-tab-sandbox">
+      <div class="overlay-ai-row">
+        <span class="overlay-section-label">Single-Player Sandbox Trainer</span>
+        <span class="pill mono-num" id="overlay-sandbox-guard-pill">Checking AC...</span>
+      </div>
+      <div class="panel-sub mono-num" id="overlay-sandbox-status">Checking anti-cheat drivers (EasyAntiCheat, BattlEye, Vanguard, FACEIT)...</div>
+      <div class="overlay-ai-row">
+        <span class="overlay-section-label">Speedhack Scale</span>
+        <span class="pill mono-num" id="overlay-sandbox-speed-pill">1.00x</span>
+      </div>
+      <div class="overlay-ai-row">
+        <input type="range" id="range-overlay-speedhack" min="0.25" max="4.0" step="0.25" value="1.0" aria-label="Speedhack Scale Multiplier" />
+        <button type="button" class="btn btn-primary btn-xs" id="btn-overlay-apply-speed">Apply Timer</button>
+        <button type="button" class="btn btn-secondary btn-xs" id="btn-overlay-reset-speed">1.0x</button>
+      </div>
+      <div class="overlay-ai-row">
+        <select id="select-overlay-scan-type" aria-label="Memory Value Type">
+          <option value="i32" selected>Int32</option>
+          <option value="f32">Float</option>
+          <option value="f64">Double</option>
+          <option value="u32">UInt32</option>
+          <option value="i64">Int64</option>
+        </select>
+        <input type="text" id="input-overlay-scan-val" placeholder="Exact value (e.g. 100)..." />
+        <button type="button" class="btn btn-primary btn-xs" id="btn-overlay-scan-new">New Scan</button>
+        <button type="button" class="btn btn-secondary btn-xs" id="btn-overlay-scan-next">Refine</button>
+      </div>
+      <div class="overlay-acoustics-sessions mono-num" id="overlay-sandbox-matches">
+        <div class="panel-sub">No memory scan run yet.</div>
       </div>
     </div>
 

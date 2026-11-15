@@ -9,7 +9,7 @@ use reqwest::{Client, ClientBuilder, Proxy};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -22,6 +22,7 @@ static DOH_BOOTSTRAP_CLIENT: OnceLock<Client> = OnceLock::new();
 static DOH_CACHE: OnceLock<Mutex<HashMap<String, Vec<SocketAddr>>>> = OnceLock::new();
 static SESSION_UA_CURSOR: AtomicU64 = AtomicU64::new(0);
 static DOH_ENABLED: AtomicBool = AtomicBool::new(true);
+static DOH_PROVIDER_MODE: AtomicU8 = AtomicU8::new(0); // 0 = auto race, 1 = cloudflare, 2 = quad9
 static CUSTOM_PROXY_URL: OnceLock<RwLock<Option<String>>> = OnceLock::new();
 static EFFECTIVE_HTTP_CLIENT: OnceLock<Mutex<(u64, Client)>> = OnceLock::new();
 static PROXY_CONFIG_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -122,6 +123,21 @@ pub fn set_network_privacy_config(doh_enabled: bool, proxy_url: Option<&str>) ->
 
 pub fn is_doh_enabled() -> bool {
     DOH_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Sets preferred DoH upstream provider (`"auto"`, `"cloudflare"`, `"quad9"`).
+pub fn set_doh_provider_mode(provider: &str) {
+    let mode = match provider.trim().to_ascii_lowercase().as_str() {
+        "cloudflare" | "1.1.1.1" => 1,
+        "quad9" | "9.9.9.9" => 2,
+        _ => 0,
+    };
+    let prev = DOH_PROVIDER_MODE.swap(mode, Ordering::Relaxed);
+    if prev != mode
+        && let Ok(mut cache) = get_doh_cache().lock()
+    {
+        cache.clear();
+    }
 }
 
 pub fn get_custom_proxy_url() -> Option<String> {
@@ -607,11 +623,26 @@ pub async fn resolve_domain_doh(domain: &str, port: u16) -> Vec<SocketAddr> {
         addrs
     };
 
-    let (ips_cf1, ips_cf2, ips_q9) = tokio::join!(
-        fetch_provider_ips(cf_primary),
-        fetch_provider_ips(cf_secondary),
-        fetch_provider_ips(quad9_primary)
-    );
+    let (ips_cf1, ips_cf2, ips_q9) = match DOH_PROVIDER_MODE.load(Ordering::Relaxed) {
+        1 => {
+            let (a, b) = tokio::join!(
+                fetch_provider_ips(cf_primary),
+                fetch_provider_ips(cf_secondary)
+            );
+            (a, b, Vec::new())
+        }
+        2 => {
+            let q = fetch_provider_ips(quad9_primary).await;
+            (Vec::new(), Vec::new(), q)
+        }
+        _ => {
+            tokio::join!(
+                fetch_provider_ips(cf_primary),
+                fetch_provider_ips(cf_secondary),
+                fetch_provider_ips(quad9_primary)
+            )
+        }
+    };
 
     let mut resolved_addrs: Vec<SocketAddr> = Vec::new();
     for ipv4 in ips_cf1.into_iter().chain(ips_cf2).chain(ips_q9) {

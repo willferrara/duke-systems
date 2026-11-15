@@ -219,24 +219,27 @@ pub fn build_dkmanifest_from_dir(root_dir: &Path, label: &str) -> Result<DkManif
             let out_files = Arc::clone(&out_files);
             let error_slot = Arc::clone(&error_slot);
             scope.spawn(move || loop {
-                if error_slot.lock().unwrap().is_some() {
+                if error_slot.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
                     break;
                 }
-                let item = { queue.lock().unwrap().pop() };
+                let item = { queue.lock().unwrap_or_else(|e| e.into_inner()).pop() };
                 let Some((full_path, rel_path)) = item else {
                     break;
                 };
                 match chunk_single_file(&full_path) {
                     Ok((size_bytes, blake3, chunks)) => {
-                        out_files.lock().unwrap().push(ManifestFileEntry {
-                            rel_path,
-                            size_bytes,
-                            blake3,
-                            chunks,
-                        });
+                        out_files
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(ManifestFileEntry {
+                                rel_path,
+                                size_bytes,
+                                blake3,
+                                chunks,
+                            });
                     }
                     Err(err) => {
-                        *error_slot.lock().unwrap() = Some(err);
+                        *error_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(err);
                         break;
                     }
                 }
@@ -244,11 +247,11 @@ pub fn build_dkmanifest_from_dir(root_dir: &Path, label: &str) -> Result<DkManif
         }
     });
 
-    if let Some(err) = error_slot.lock().unwrap().take() {
+    if let Some(err) = error_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
         return Err(err);
     }
 
-    let mut files = std::mem::take(&mut *out_files.lock().unwrap());
+    let mut files = std::mem::take(&mut *out_files.lock().unwrap_or_else(|e| e.into_inner()));
     files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     let total_bytes = files.iter().map(|f| f.size_bytes).sum();
 

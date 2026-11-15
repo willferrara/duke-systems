@@ -486,7 +486,7 @@ pub fn run_wof_operation_sync(
             scope.spawn(|| {
                 while !stop_flag.load(Ordering::Relaxed) {
                     let next = {
-                        let mut guard = queue.lock().unwrap();
+                        let mut guard = queue.lock().unwrap_or_else(|e| e.into_inner());
                         guard.pop()
                     };
                     let Some((path, logical)) = next else {

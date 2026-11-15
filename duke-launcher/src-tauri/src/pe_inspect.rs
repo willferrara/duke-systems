@@ -95,6 +95,16 @@ fn read_u32_le(bytes: &[u8], off: usize) -> Result<u32, String> {
     Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
 
+#[inline]
+fn read_u64_le(bytes: &[u8], off: usize) -> Result<u64, String> {
+    let slice = bytes
+        .get(off..off + 8)
+        .ok_or_else(|| "Truncated PE u64 field".to_string())?;
+    Ok(u64::from_le_bytes([
+        slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
+    ]))
+}
+
 fn read_c_string(bytes: &[u8], off: usize) -> Option<String> {
     if off >= bytes.len() {
         return None;
@@ -359,6 +369,860 @@ pub fn parse_pe_exports_file(path: &Path) -> Result<PeExportInfo, String> {
 pub fn parse_pe_machine_and_imports(bytes: &[u8]) -> Result<(u16, bool, Vec<String>), String> {
     let (machine, _, is_32bit, dlls) = parse_pe_header_and_imports(bytes)?;
     Ok((machine, is_32bit, dlls))
+}
+
+/// Parses imported DLLs and imported Win32/native API function names (`IMAGE_IMPORT_BY_NAME`) for PE32/PE32+.
+pub fn parse_pe_import_functions(
+    bytes: &[u8],
+) -> Result<(u16, bool, Vec<String>, Vec<String>), String> {
+    let tables = parse_pe_tables(bytes)?;
+    let mut dlls = Vec::new();
+    let mut seen_dlls = HashSet::new();
+    let mut funcs = Vec::new();
+    let mut seen_funcs = HashSet::new();
+
+    if tables.rva_count >= 2 && tables.dd_base + 16 <= tables.opt_end {
+        let import_rva = read_u32_le(bytes, tables.dd_base + 8)?;
+        let import_size = read_u32_le(bytes, tables.dd_base + 12)?;
+        if import_rva != 0 && import_size != 0 {
+            if let Some(mut desc_off) = rva_to_file_offset(import_rva, &tables.sections) {
+                for _ in 0..2048 {
+                    if desc_off + 20 > bytes.len() {
+                        break;
+                    }
+                    let orig_first_thunk = read_u32_le(bytes, desc_off)?;
+                    let name_rva = read_u32_le(bytes, desc_off + 12)?;
+                    let first_thunk = read_u32_le(bytes, desc_off + 16)?;
+                    if orig_first_thunk == 0 && name_rva == 0 && first_thunk == 0 {
+                        break;
+                    }
+                    if name_rva != 0 {
+                        if let Some(name_off) = rva_to_file_offset(name_rva, &tables.sections) {
+                            if let Some(name) = read_c_string(bytes, name_off) {
+                                if seen_dlls.insert(name.to_ascii_lowercase()) {
+                                    dlls.push(name);
+                                }
+                            }
+                        }
+                    }
+
+                    let thunk_rva = if orig_first_thunk != 0 {
+                        orig_first_thunk
+                    } else {
+                        first_thunk
+                    };
+                    if thunk_rva != 0 && funcs.len() < 4096 {
+                        if let Some(mut t_off) = rva_to_file_offset(thunk_rva, &tables.sections) {
+                            let step = if tables.is_32bit { 4usize } else { 8usize };
+                            for _ in 0..1024 {
+                                if t_off + step > bytes.len() || funcs.len() >= 4096 {
+                                    break;
+                                }
+                                let raw_entry = if tables.is_32bit {
+                                    read_u32_le(bytes, t_off)? as u64
+                                } else {
+                                    read_u64_le(bytes, t_off)?
+                                };
+                                if raw_entry == 0 {
+                                    break;
+                                }
+                                let is_ordinal = if tables.is_32bit {
+                                    (raw_entry & 0x8000_0000) != 0
+                                } else {
+                                    (raw_entry & 0x8000_0000_0000_0000) != 0
+                                };
+                                if !is_ordinal {
+                                    let hint_name_rva = (raw_entry & 0x7FFF_FFFF) as u32;
+                                    if let Some(hn_off) =
+                                        rva_to_file_offset(hint_name_rva, &tables.sections)
+                                    {
+                                        if hn_off + 2 < bytes.len() {
+                                            if let Some(fn_name) = read_c_string(bytes, hn_off + 2) {
+                                                if seen_funcs.insert(fn_name.to_ascii_lowercase()) {
+                                                    funcs.push(fn_name);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                t_off += step;
+                            }
+                        }
+                    }
+                    desc_off += 20;
+                }
+            }
+        }
+    }
+
+    Ok((tables.machine, tables.is_32bit, dlls, funcs))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeSecurityFinding {
+    pub code: String,
+    pub severity: String,
+    pub title: String,
+    pub explanation: String,
+    pub indicators: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PeSecurityShieldResult {
+    pub shield_badge: String,
+    pub authenticode_status: String,
+    pub authenticode_detail: String,
+    pub imported_api_hits: Vec<String>,
+    pub suspicious_behaviors: Vec<PeSecurityFinding>,
+    pub quarantine_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreatFeedLookupResult {
+    pub sha256: String,
+    pub provider: String,
+    pub matched: bool,
+    pub classification: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryShieldSummary {
+    pub scanned_files: usize,
+    pub clean_files: Vec<PathBuf>,
+    pub warning_files: Vec<PathBuf>,
+    pub blocked_files: Vec<(PathBuf, String, Option<PathBuf>)>,
+}
+
+#[derive(Default)]
+struct BinaryStringIndicators {
+    has_virtual_alloc_ex: bool,
+    has_write_process_memory: bool,
+    has_create_remote_thread: bool,
+    has_crypt_unprotect: bool,
+    has_lsass_or_credential_theft: bool,
+    has_hidden_script_dropper: bool,
+    has_reg_persistence: bool,
+    has_shell_exec_or_proc: bool,
+}
+
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+fn scan_binary_string_indicators(
+    bytes: &[u8],
+    imported_funcs_lower: &[String],
+) -> BinaryStringIndicators {
+    let mut flags = BinaryStringIndicators::default();
+    let has_imp = |needle: &str| imported_funcs_lower.iter().any(|f| f == needle);
+    let has_imp_prefix = |prefix: &str| imported_funcs_lower.iter().any(|f| f.starts_with(prefix));
+
+    if has_imp("virtualallocex") {
+        flags.has_virtual_alloc_ex = true;
+    }
+    if has_imp("writeprocessmemory") {
+        flags.has_write_process_memory = true;
+    }
+    if has_imp("createremotethread")
+        || has_imp("createremotethreadex")
+        || has_imp("ntcreatethreadex")
+        || has_imp("queueuserapc")
+    {
+        flags.has_create_remote_thread = true;
+    }
+    if has_imp("cryptunprotectdata") {
+        flags.has_crypt_unprotect = true;
+    }
+    if has_imp_prefix("shellexecute") || has_imp_prefix("createprocess") || has_imp("winexec") {
+        flags.has_shell_exec_or_proc = true;
+    }
+    let has_reg_write_import = has_imp_prefix("regsetvalue") || has_imp_prefix("regcreatekey");
+
+    const MAX_SCAN_BYTES: usize = 24 * 1024 * 1024;
+    const CHUNK_LEN: usize = 64 * 1024;
+    const OVERLAP: usize = 128;
+    let slice = &bytes[..bytes.len().min(MAX_SCAN_BYTES)];
+    let mut ascii_buf = Vec::with_capacity(CHUNK_LEN + OVERLAP * 2);
+    let mut utf16_buf = Vec::with_capacity(CHUNK_LEN + OVERLAP * 2);
+    let mut start = 0usize;
+    let mut has_run_key_str = false;
+
+    while start < slice.len() {
+        let win_start = start.saturating_sub(OVERLAP);
+        let end = (start + CHUNK_LEN).min(slice.len());
+        let chunk = &slice[win_start..end];
+
+        ascii_buf.clear();
+        for &b in chunk {
+            ascii_buf.push(if b.is_ascii_graphic() || b == b' ' {
+                b.to_ascii_lowercase()
+            } else {
+                b' '
+            });
+        }
+
+        utf16_buf.clear();
+        let mut idx = 0usize;
+        while idx + 1 < chunk.len() {
+            let b0 = chunk[idx];
+            let b1 = chunk[idx + 1];
+            if (b0.is_ascii_graphic() || b0 == b' ') && b1 == 0 {
+                utf16_buf.push(b0.to_ascii_lowercase());
+                idx += 2;
+            } else {
+                utf16_buf.push(b' ');
+                idx += 1;
+            }
+        }
+
+        for view in [&ascii_buf, &utf16_buf] {
+            if !flags.has_virtual_alloc_ex && contains_subslice(view, b"virtualallocex") {
+                flags.has_virtual_alloc_ex = true;
+            }
+            if !flags.has_write_process_memory && contains_subslice(view, b"writeprocessmemory") {
+                flags.has_write_process_memory = true;
+            }
+            if !flags.has_create_remote_thread
+                && (contains_subslice(view, b"createremotethread")
+                    || contains_subslice(view, b"ntcreatethreadex"))
+            {
+                flags.has_create_remote_thread = true;
+            }
+            if !flags.has_crypt_unprotect && contains_subslice(view, b"cryptunprotectdata") {
+                flags.has_crypt_unprotect = true;
+            }
+            if !flags.has_lsass_or_credential_theft
+                && (contains_subslice(view, b"lsass.exe")
+                    || contains_subslice(view, b"minidumpwritedump")
+                    || contains_subslice(view, b"chrome\\user data")
+                    || contains_subslice(view, b"login data")
+                    || contains_subslice(view, b"cookies.sqlite")
+                    || contains_subslice(view, b"local state")
+                    || contains_subslice(view, b"vaultcli.dll"))
+            {
+                flags.has_lsass_or_credential_theft = true;
+            }
+            if !flags.has_hidden_script_dropper
+                && (contains_subslice(view, b"powershell -enc")
+                    || contains_subslice(view, b"-encodedcommand")
+                    || contains_subslice(view, b"powershell -w hidden")
+                    || contains_subslice(view, b"-windowstyle hidden")
+                    || contains_subslice(view, b"cmd /c powershell")
+                    || contains_subslice(view, b"cmd.exe /c powershell")
+                    || contains_subslice(view, b"certutil -urlcache")
+                    || contains_subslice(view, b"bitsadmin /transfer")
+                    || contains_subslice(view, b"mshta http"))
+            {
+                flags.has_hidden_script_dropper = true;
+            }
+            if !has_run_key_str
+                && (contains_subslice(view, b"currentversion\\run")
+                    || contains_subslice(view, b"currentversion\\runonce"))
+            {
+                has_run_key_str = true;
+            }
+            if !flags.has_shell_exec_or_proc
+                && (contains_subslice(view, b"shellexecute")
+                    || contains_subslice(view, b"createprocess"))
+            {
+                flags.has_shell_exec_or_proc = true;
+            }
+        }
+
+        if end == slice.len() {
+            break;
+        }
+        start = end;
+    }
+
+    flags.has_reg_persistence =
+        has_run_key_str && (has_reg_write_import || flags.has_shell_exec_or_proc);
+    flags
+}
+
+/// Evaluates static PE security findings cleanly without filesystem/Win32 side effects (unit-testable).
+pub fn evaluate_pe_security_shield_bytes(
+    bytes: &[u8],
+    authenticode_status: &str,
+    authenticode_detail: &str,
+    shannon_entropy: f64,
+    is_whitelisted_game_wrapper: bool,
+) -> PeSecurityShieldResult {
+    let parsed_funcs = parse_pe_import_functions(bytes)
+        .map(|(_, _, _, f)| f)
+        .unwrap_or_default();
+    let imported_lower: Vec<String> = parsed_funcs
+        .iter()
+        .map(|f| f.to_ascii_lowercase())
+        .collect();
+    let flags = scan_binary_string_indicators(bytes, &imported_lower);
+
+    let interesting = [
+        "virtualallocex",
+        "writeprocessmemory",
+        "createremotethread",
+        "createremotethreadex",
+        "ntcreatethreadex",
+        "cryptunprotectdata",
+        "regsetvalueex",
+        "shellexecute",
+        "createprocess",
+    ];
+    let mut imported_api_hits = Vec::new();
+    for fn_name in &parsed_funcs {
+        let lower = fn_name.to_ascii_lowercase();
+        if interesting.iter().any(|k| lower.starts_with(k)) && imported_api_hits.len() < 16 {
+            imported_api_hits.push(fn_name.clone());
+        }
+    }
+
+    let is_signed_valid = authenticode_status == "SignedVerified";
+    let mut findings = Vec::new();
+    let mut blocked_score = 0u32;
+    let mut warning_score = 0u32;
+
+    if flags.has_virtual_alloc_ex && flags.has_write_process_memory && flags.has_create_remote_thread
+    {
+        if is_signed_valid {
+            warning_score += 1;
+            findings.push(PeSecurityFinding {
+                code: "PROCESS_INJECTION_SIGNED".to_string(),
+                severity: "Warning".to_string(),
+                title: "Remote Process Memory/Thread APIs (Signed Binary)".to_string(),
+                explanation: "This binary imports VirtualAllocEx, WriteProcessMemory, and CreateRemoteThread, typically used by overlays or anti-cheat/mod loaders, but carries a valid Authenticode signature.".to_string(),
+                indicators: vec![
+                    "VirtualAllocEx".to_string(),
+                    "WriteProcessMemory".to_string(),
+                    "CreateRemoteThread".to_string(),
+                ],
+            });
+        } else {
+            blocked_score += 2;
+            findings.push(PeSecurityFinding {
+                code: "PROCESS_INJECTION_TRIAD".to_string(),
+                severity: "Blocked".to_string(),
+                title: "Process Hollowing / Remote Code Injection Triad".to_string(),
+                explanation: "Imports the classic VirtualAllocEx + WriteProcessMemory + CreateRemoteThread injection combination in an unsigned PE binary.".to_string(),
+                indicators: vec![
+                    "VirtualAllocEx".to_string(),
+                    "WriteProcessMemory".to_string(),
+                    "CreateRemoteThread".to_string(),
+                ],
+            });
+        }
+    } else if flags.has_virtual_alloc_ex && flags.has_write_process_memory && !is_signed_valid {
+        warning_score += 1;
+        findings.push(PeSecurityFinding {
+            code: "MEMORY_WRITE_PAIR".to_string(),
+            severity: "Warning".to_string(),
+            title: "Cross-Process Memory Allocation & Write APIs".to_string(),
+            explanation: "Unsigned binary contains VirtualAllocEx and WriteProcessMemory imports; treat unknown trainers/mods carefully.".to_string(),
+            indicators: vec!["VirtualAllocEx".to_string(), "WriteProcessMemory".to_string()],
+        });
+    }
+
+    if flags.has_crypt_unprotect && flags.has_lsass_or_credential_theft {
+        if !is_signed_valid {
+            blocked_score += 2;
+            findings.push(PeSecurityFinding {
+                code: "CREDENTIAL_LSASS_STEALER".to_string(),
+                severity: "Blocked".to_string(),
+                title: "Credential Store / LSASS Dump Risk".to_string(),
+                explanation: "Combines Windows DPAPI CryptUnprotectData with browser credential stores or LSASS dumping indicators.".to_string(),
+                indicators: vec![
+                    "CryptUnprotectData".to_string(),
+                    "Browser/LSASS Access".to_string(),
+                ],
+            });
+        } else {
+            warning_score += 1;
+            findings.push(PeSecurityFinding {
+                code: "DPAPI_SIGNED_WARNING".to_string(),
+                severity: "Warning".to_string(),
+                title: "DPAPI + Browser Engine References".to_string(),
+                explanation: "Signed executable references CryptUnprotectData and local storage databases.".to_string(),
+                indicators: vec!["CryptUnprotectData".to_string()],
+            });
+        }
+    } else if flags.has_lsass_or_credential_theft && !is_signed_valid && !is_whitelisted_game_wrapper
+    {
+        blocked_score += 2;
+        findings.push(PeSecurityFinding {
+            code: "CREDENTIAL_THEFT_STRINGS".to_string(),
+            severity: "Blocked".to_string(),
+            title: "Sensitive Credential Store / LSASS Indicator".to_string(),
+            explanation: "Unsigned binary references LSASS memory or browser credential store targets.".to_string(),
+            indicators: vec!["LSASS / Browser Profile Target".to_string()],
+        });
+    } else if flags.has_crypt_unprotect && !is_signed_valid && !is_whitelisted_game_wrapper {
+        warning_score += 1;
+        findings.push(PeSecurityFinding {
+            code: "DPAPI_UNPROTECT_UNSIGNED".to_string(),
+            severity: "Warning".to_string(),
+            title: "Uses DPAPI Secret Decryption (CryptUnprotectData)".to_string(),
+            explanation: "Games rarely decrypt OS user secrets directly; review unknown launchers or mods inside an AppContainer Jail.".to_string(),
+            indicators: vec!["CryptUnprotectData".to_string()],
+        });
+    }
+
+    if flags.has_hidden_script_dropper {
+        blocked_score += 2;
+        findings.push(PeSecurityFinding {
+            code: "HIDDEN_SCRIPT_DROPPER".to_string(),
+            severity: "Blocked".to_string(),
+            title: "Hidden PowerShell / Script Dropper Command".to_string(),
+            explanation: "Embedded hidden or Base64-encoded PowerShell/cmd/certutil execution patterns were found inside the binary.".to_string(),
+            indicators: vec!["Hidden/Encoded Script Dropper".to_string()],
+        });
+    }
+
+    if flags.has_reg_persistence {
+        if !is_signed_valid {
+            blocked_score += 2;
+            findings.push(PeSecurityFinding {
+                code: "REGISTRY_RUN_PERSISTENCE".to_string(),
+                severity: "Blocked".to_string(),
+                title: "Windows Startup Registry Run Persistence".to_string(),
+                explanation: "Unsigned binary modifies CurrentVersion\\Run startup keys combined with registry or process execution APIs.".to_string(),
+                indicators: vec!["CurrentVersion\\Run".to_string()],
+            });
+        } else {
+            warning_score += 1;
+            findings.push(PeSecurityFinding {
+                code: "REGISTRY_RUN_SIGNED".to_string(),
+                severity: "Warning".to_string(),
+                title: "Startup Registry Key Reference (Signed)".to_string(),
+                explanation: "Binary references CurrentVersion\\Run; typical only for updaters or background launchers.".to_string(),
+                indicators: vec!["CurrentVersion\\Run".to_string()],
+            });
+        }
+    }
+
+    if authenticode_status.starts_with("Invalid") {
+        blocked_score += 2;
+        findings.push(PeSecurityFinding {
+            code: "INVALID_AUTHENTICODE".to_string(),
+            severity: "Blocked".to_string(),
+            title: "Corrupted or Tampered Digital Signature".to_string(),
+            explanation: authenticode_detail.to_string(),
+            indicators: vec![authenticode_status.to_string()],
+        });
+    }
+
+    if shannon_entropy >= 7.50 && !is_signed_valid && !is_whitelisted_game_wrapper {
+        warning_score += 1;
+        findings.push(PeSecurityFinding {
+            code: "HIGH_ENTROPY_UNSIGNED".to_string(),
+            severity: "Warning".to_string(),
+            title: "Packed or Encrypted Binary Payload".to_string(),
+            explanation: format!(
+                "Unsigned binary exhibits high Shannon entropy ({:.2} b/B). Consider running in AppContainer Jail.",
+                shannon_entropy
+            ),
+            indicators: vec![format!("Entropy {:.2} b/B", shannon_entropy)],
+        });
+    }
+
+    let shield_badge = if blocked_score >= 2 {
+        "Blocked".to_string()
+    } else if warning_score > 0 || authenticode_status == "Unsigned" && !findings.is_empty() {
+        "Warning".to_string()
+    } else {
+        "Safe".to_string()
+    };
+
+    PeSecurityShieldResult {
+        shield_badge,
+        authenticode_status: authenticode_status.to_string(),
+        authenticode_detail: authenticode_detail.to_string(),
+        imported_api_hits,
+        suspicious_behaviors: findings,
+        quarantine_path: None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn verify_authenticode_winverifytrust(path: &Path) -> (String, String) {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct WinTrustGuid {
+        Data1: u32,
+        Data2: u16,
+        Data3: u16,
+        Data4: [u8; 8],
+    }
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct WINTRUST_FILE_INFO {
+        cbStruct: u32,
+        pcwszFilePath: *const u16,
+        hFile: *mut c_void,
+        pgKnownSubject: *const WinTrustGuid,
+    }
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct WINTRUST_DATA {
+        cbStruct: u32,
+        pPolicyCallbackData: *mut c_void,
+        pSIPClientData: *mut c_void,
+        dwUIChoice: u32,
+        fdwRevocationChecks: u32,
+        dwUnionChoice: u32,
+        pFile: *mut WINTRUST_FILE_INFO,
+        dwStateAction: u32,
+        hWVTStateData: *mut c_void,
+        pwszURLReference: *const u16,
+        dwProvFlags: u32,
+        dwUIContext: u32,
+        pSignatureSettings: *mut c_void,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn LoadLibraryW(lpLibFileName: *const u16) -> isize;
+        fn GetProcAddress(hModule: isize, lpProcName: *const u8) -> *const c_void;
+        fn FreeLibrary(hLibModule: isize) -> i32;
+    }
+
+    type FnWinVerifyTrust = unsafe extern "system" fn(
+        hwnd: *mut c_void,
+        pg_action_id: *const WinTrustGuid,
+        p_wvt_data: *mut WINTRUST_DATA,
+    ) -> i32;
+
+    let dll_w: Vec<u16> = std::ffi::OsStr::new("wintrust.dll\0")
+        .encode_wide()
+        .collect();
+    let hmod = unsafe { LoadLibraryW(dll_w.as_ptr()) };
+    if hmod == 0 {
+        return (
+            "CheckUnavailable".to_string(),
+            "wintrust.dll could not be loaded on this system".to_string(),
+        );
+    }
+
+    let proc_ptr = unsafe { GetProcAddress(hmod, c"WinVerifyTrust".as_ptr().cast::<u8>()) };
+    if proc_ptr.is_null() {
+        unsafe {
+            FreeLibrary(hmod);
+        }
+        return (
+            "CheckUnavailable".to_string(),
+            "WinVerifyTrust export unavailable in wintrust.dll".to_string(),
+        );
+    }
+
+    let win_verify_trust: FnWinVerifyTrust = unsafe { std::mem::transmute(proc_ptr) };
+    let file_w: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let action_guid = WinTrustGuid {
+        Data1: 0x00AA_C56B,
+        Data2: 0xCD44,
+        Data3: 0x11D0,
+        Data4: [0x8C, 0xC2, 0x00, 0xC0, 0x4F, 0xC2, 0x95, 0xEE],
+    };
+
+    let mut file_info = WINTRUST_FILE_INFO {
+        cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
+        pcwszFilePath: file_w.as_ptr(),
+        hFile: std::ptr::null_mut(),
+        pgKnownSubject: std::ptr::null(),
+    };
+
+    const WTD_UI_NONE: u32 = 2;
+    const WTD_REVOKE_NONE: u32 = 0;
+    const WTD_CHOICE_FILE: u32 = 1;
+    const WTD_STATEACTION_VERIFY: u32 = 1;
+    const WTD_STATEACTION_CLOSE: u32 = 2;
+    const WTD_CACHE_ONLY_URL_RETRIEVAL: u32 = 0x0000_1000;
+
+    let mut wvt_data = WINTRUST_DATA {
+        cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
+        pPolicyCallbackData: std::ptr::null_mut(),
+        pSIPClientData: std::ptr::null_mut(),
+        dwUIChoice: WTD_UI_NONE,
+        fdwRevocationChecks: WTD_REVOKE_NONE,
+        dwUnionChoice: WTD_CHOICE_FILE,
+        pFile: &mut file_info,
+        dwStateAction: WTD_STATEACTION_VERIFY,
+        hWVTStateData: std::ptr::null_mut(),
+        pwszURLReference: std::ptr::null(),
+        dwProvFlags: WTD_CACHE_ONLY_URL_RETRIEVAL,
+        dwUIContext: 0,
+        pSignatureSettings: std::ptr::null_mut(),
+    };
+
+    let status_i32 = unsafe {
+        win_verify_trust(
+            std::ptr::null_mut(),
+            &action_guid,
+            &mut wvt_data,
+        )
+    };
+    wvt_data.dwStateAction = WTD_STATEACTION_CLOSE;
+    let _ = unsafe { win_verify_trust(std::ptr::null_mut(), &action_guid, &mut wvt_data) };
+    unsafe {
+        FreeLibrary(hmod);
+    }
+
+    let status_u32 = status_i32 as u32;
+    match status_u32 {
+        0x0000_0000 => (
+            "SignedVerified".to_string(),
+            "Authenticode digital signature verified via WinVerifyTrust.".to_string(),
+        ),
+        0x800B_0100 => (
+            "Unsigned".to_string(),
+            "File has no embedded Authenticode digital signature.".to_string(),
+        ),
+        0x8009_6010 | 0x800B_0109 | 0x800B_0101 | 0x800B_010C => (
+            "InvalidSignature".to_string(),
+            format!("Authenticode signature check failed (0x{status_u32:08X})."),
+        ),
+        other => (
+            "Unsigned".to_string(),
+            format!("Authenticode unverified or untrusted root (0x{other:08X})."),
+        ),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn verify_authenticode_winverifytrust(_path: &Path) -> (String, String) {
+    (
+        "CheckUnavailable".to_string(),
+        "WinVerifyTrust Authenticode verification runs on Windows.".to_string(),
+    )
+}
+
+/// Inspects a PE file on disk with Security Shield v2 (import table APIs, droppers, Authenticode).
+pub fn inspect_pe_security_shield_file(
+    path: &Path,
+    is_whitelisted_game_wrapper: bool,
+    shannon_entropy: Option<f64>,
+) -> Result<PeSecurityShieldResult, String> {
+    if !path.is_file() {
+        return Err(format!("PE file does not exist: {}", path.display()));
+    }
+    let file = File::open(path).map_err(|e| format!("Failed opening PE {}: {e}", path.display()))?;
+    let mmap = unsafe { Mmap::map(&file) }
+        .map_err(|e| format!("Failed mapping PE {}: {e}", path.display()))?;
+    if mmap.len() < 64 || &mmap[0..2] != b"MZ" {
+        return Err("File is not a Windows PE executable/DLL.".to_string());
+    }
+    let (auth_status, auth_detail) = verify_authenticode_winverifytrust(path);
+    let entropy = shannon_entropy.unwrap_or_else(|| {
+        let sample = &mmap[..mmap.len().min(2 * 1024 * 1024)];
+        if sample.is_empty() {
+            return 0.0;
+        }
+        let mut counts = [0u64; 256];
+        for &b in sample {
+            counts[b as usize] += 1;
+        }
+        let total = sample.len() as f64;
+        counts
+            .iter()
+            .filter(|&&c| c > 0)
+            .map(|&c| {
+                let p = (c as f64) / total;
+                -p * p.log2()
+            })
+            .sum()
+    });
+    Ok(evaluate_pe_security_shield_bytes(
+        &mmap,
+        &auth_status,
+        &auth_detail,
+        entropy,
+        is_whitelisted_game_wrapper,
+    ))
+}
+
+/// Moves a high-risk binary into `<quarantine_dir>` with a sidecar metadata file.
+pub fn quarantine_high_risk_binary(
+    target: &Path,
+    quarantine_dir: &Path,
+    reasons: &[String],
+    sha256: Option<&str>,
+) -> Result<PathBuf, String> {
+    if !target.is_file() {
+        return Err(format!("Target missing for quarantine: {}", target.display()));
+    }
+    fs::create_dir_all(quarantine_dir)
+        .map_err(|e| format!("Failed creating quarantine dir {}: {e}", quarantine_dir.display()))?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let base_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("binary.bin");
+    let safe_name: String = base_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let dest = quarantine_dir.join(format!("{}_{}.quarantined", ts, safe_name));
+    if fs::rename(target, &dest).is_err() {
+        fs::copy(target, &dest)
+            .map_err(|e| format!("Failed copying threat to quarantine {}: {e}", dest.display()))?;
+        fs::remove_file(target)
+            .map_err(|e| format!("Failed removing original after quarantine copy: {e}"))?;
+    }
+    let meta = serde_json::json!({
+        "originalPath": target.to_string_lossy(),
+        "quarantinedPath": dest.to_string_lossy(),
+        "sha256": sha256.unwrap_or(""),
+        "quarantinedAt": ts,
+        "reasons": reasons,
+    });
+    if let Ok(json) = serde_json::to_string_pretty(&meta) {
+        let meta_path = quarantine_dir.join(format!("{}_{}.quarantined.json", ts, safe_name));
+        let _ = crate::atomic_write_string(&meta_path, &json);
+    }
+    Ok(dest)
+}
+
+/// Inspects extracted/dropped `.exe`, `.dll`, and `.asi` binaries before post-scan MOTW unblocking.
+pub fn gate_game_directory_pe_security(
+    root: &Path,
+    quarantine_dir: Option<&Path>,
+    max_files: usize,
+) -> DirectoryShieldSummary {
+    let mut summary = DirectoryShieldSummary::default();
+    if !root.exists() {
+        return summary;
+    }
+
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+        .filter(|e| e.file_type().is_file())
+    {
+        if summary.scanned_files >= max_files {
+            break;
+        }
+        let path = entry.path().to_path_buf();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .unwrap_or_default();
+        if !matches!(ext.as_str(), "exe" | "dll" | "asi") {
+            continue;
+        }
+        summary.scanned_files += 1;
+        let file_lower = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        let is_wrapper = matches!(
+            file_lower.as_str(),
+            "steam_api.dll" | "steam_api64.dll" | "winmm.dll" | "d3d9.dll" | "dxgi.dll" | "dinput8.dll" | "xinput1_3.dll"
+        );
+        match inspect_pe_security_shield_file(&path, is_wrapper, None) {
+            Ok(res) => match res.shield_badge.as_str() {
+                "Blocked" => {
+                    let reasons: Vec<String> = res
+                        .suspicious_behaviors
+                        .iter()
+                        .map(|f| format!("{}: {}", f.title, f.explanation))
+                        .collect();
+                    let quarantined = quarantine_dir
+                        .and_then(|qdir| quarantine_high_risk_binary(&path, qdir, &reasons, None).ok());
+                    let msg = reasons.join(" | ");
+                    summary.blocked_files.push((path, msg, quarantined));
+                }
+                "Warning" => summary.warning_files.push(path),
+                _ => summary.clean_files.push(path),
+            },
+            Err(_) => {
+                // Non-PE or zeroed stub files inside game folders are left untouched
+            }
+        }
+    }
+
+    summary
+}
+
+/// Optional privacy-safe read-only SHA-256 lookup against CIRCL hashLookup (never uploads file bytes).
+pub async fn query_sha256_threat_feed(sha256_hex: &str) -> Result<ThreatFeedLookupResult, String> {
+    let normalized = sha256_hex.trim().to_ascii_lowercase();
+    if normalized.len() != 64 || !normalized.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("Invalid 64-character SHA-256 hash".to_string());
+    }
+    let client = duke_core::net_doh::get_configured_http_client();
+    let url = format!("https://hashlookup.circl.lu/lookup/sha256/{}", normalized);
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(6))
+        .send()
+        .await
+        .map_err(|e| format!("Threat feed lookup failed: {e}"))?;
+
+    if resp.status().as_u16() == 404 {
+        return Ok(ThreatFeedLookupResult {
+            sha256: normalized,
+            provider: "CIRCL hashLookup (read-only SHA-256)".to_string(),
+            matched: false,
+            classification: "Not listed".to_string(),
+            detail: "Hash not present in known public threat or reference dataset.".to_string(),
+        });
+    }
+    if !resp.status().is_success() {
+        return Err(format!("Threat feed HTTP status {}", resp.status()));
+    }
+
+    let val: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Threat feed returned unreadable JSON: {e}"))?;
+    let known_malicious = val
+        .get("KnownMalicious")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let file_name = val
+        .get("FileName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown");
+    let product = val
+        .get("ProductName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Reference Dataset");
+    if let Some(mal) = known_malicious {
+        Ok(ThreatFeedLookupResult {
+            sha256: normalized,
+            provider: "CIRCL hashLookup (read-only SHA-256)".to_string(),
+            matched: true,
+            classification: format!("Malicious ({mal})"),
+            detail: format!("Matched threat source '{}' (file reference: {}).", mal, file_name),
+        })
+    } else {
+        Ok(ThreatFeedLookupResult {
+            sha256: normalized,
+            provider: "CIRCL hashLookup (read-only SHA-256)".to_string(),
+            matched: true,
+            classification: "Known Reference / NSRL".to_string(),
+            detail: format!("Known hash record: {} ({}).", file_name, product),
+        })
+    }
 }
 
 fn windows_system_dir(is_32bit: bool) -> PathBuf {
@@ -1014,6 +1878,32 @@ fn resolve_game_exe_and_dir(game_id: &str) -> Result<(crate::GameEntry, PathBuf,
     Ok((game, exe_path, game_dir))
 }
 
+pub fn quarantine_root_dir_standalone() -> Result<PathBuf, String> {
+    Ok(crate::resolve_data_root_dir_standalone()?.join(".duke-quarantine"))
+}
+
+pub fn inspect_exe_standalone(exe_path: &Path) -> Result<PePreflightReport, String> {
+    inspect_exe_with_dirs(exe_path, None, &[])
+}
+
+pub fn heal_dlls_standalone(exe_path: &Path, dll_names: &[String]) -> Result<DllHealReport, String> {
+    heal_missing_dlls_into_game_dir(exe_path, Some(dll_names), None, &[])
+}
+
+pub fn toggle_dxvk_standalone(
+    game_id: &str,
+    exe_path: &Path,
+    enable: bool,
+) -> Result<GameCompatStatus, String> {
+    let wrappers_root = crate::resolve_data_root_dir_standalone()?.join("wrappers");
+    deploy_or_remove_dxvk_in_dirs(game_id, exe_path, &wrappers_root, enable, None)
+}
+
+#[tauri::command]
+pub async fn check_sha256_threat_feed(sha256: String) -> Result<ThreatFeedLookupResult, String> {
+    query_sha256_threat_feed(&sha256).await
+}
+
 #[tauri::command]
 pub async fn get_game_compat_status(game_id: String) -> Result<GameCompatStatus, String> {
     tokio::task::spawn_blocking(move || {
@@ -1390,5 +2280,146 @@ pub(crate) mod tests {
             );
             assert_eq!(parsed.symbols[1].forwarder, None);
         }
+    }
+
+    fn build_synthetic_pe_with_thunk_imports(
+        is_32bit: bool,
+        dll_name: &str,
+        fn_names: &[&str],
+        extra_payload: &[u8],
+    ) -> Vec<u8> {
+        let mut buf = vec![0u8; 8192];
+        buf[0] = b'M';
+        buf[1] = b'Z';
+        let e_lfanew = 0x80usize;
+        buf[0x3C..0x40].copy_from_slice(&(e_lfanew as u32).to_le_bytes());
+        buf[e_lfanew..e_lfanew + 4].copy_from_slice(b"PE\0\0");
+
+        let coff = e_lfanew + 4;
+        let machine = if is_32bit {
+            IMAGE_FILE_MACHINE_I386
+        } else {
+            IMAGE_FILE_MACHINE_AMD64
+        };
+        buf[coff..coff + 2].copy_from_slice(&machine.to_le_bytes());
+        buf[coff + 2..coff + 4].copy_from_slice(&1u16.to_le_bytes());
+        let opt_size: u16 = if is_32bit { 224 } else { 240 };
+        buf[coff + 16..coff + 18].copy_from_slice(&opt_size.to_le_bytes());
+        buf[coff + 18..coff + 20].copy_from_slice(&0x0022u16.to_le_bytes());
+
+        let opt = coff + 20;
+        let opt_magic: u16 = if is_32bit { 0x010B } else { 0x020B };
+        buf[opt..opt + 2].copy_from_slice(&opt_magic.to_le_bytes());
+        let rva_count_off = if is_32bit { opt + 92 } else { opt + 108 };
+        let dd_base = if is_32bit { opt + 96 } else { opt + 112 };
+        buf[rva_count_off..rva_count_off + 4].copy_from_slice(&16u32.to_le_bytes());
+
+        let rdata_rva: u32 = 0x2000;
+        let rdata_raw: usize = 0x400;
+        buf[dd_base + 8..dd_base + 12].copy_from_slice(&rdata_rva.to_le_bytes());
+        buf[dd_base + 12..dd_base + 16].copy_from_slice(&0x400u32.to_le_bytes());
+
+        let sec = opt + opt_size as usize;
+        buf[sec..sec + 6].copy_from_slice(b".rdata");
+        buf[sec + 8..sec + 12].copy_from_slice(&0x1C00u32.to_le_bytes());
+        buf[sec + 12..sec + 16].copy_from_slice(&rdata_rva.to_le_bytes());
+        buf[sec + 16..sec + 20].copy_from_slice(&0x1C00u32.to_le_bytes());
+        buf[sec + 20..sec + 24].copy_from_slice(&(rdata_raw as u32).to_le_bytes());
+
+        let thunk_raw = rdata_raw + 64;
+        let step = if is_32bit { 4usize } else { 8usize };
+        let mut cursor = thunk_raw + (fn_names.len() + 1) * step;
+
+        let dll_rva = rdata_rva + (cursor - rdata_raw) as u32;
+        buf[cursor..cursor + dll_name.len()].copy_from_slice(dll_name.as_bytes());
+        buf[cursor + dll_name.len()] = 0;
+        cursor += dll_name.len() + 1;
+
+        let ilt_rva = rdata_rva + (thunk_raw - rdata_raw) as u32;
+        buf[rdata_raw..rdata_raw + 4].copy_from_slice(&ilt_rva.to_le_bytes());
+        buf[rdata_raw + 12..rdata_raw + 16].copy_from_slice(&dll_rva.to_le_bytes());
+        buf[rdata_raw + 16..rdata_raw + 20].copy_from_slice(&ilt_rva.to_le_bytes());
+
+        for (i, fn_name) in fn_names.iter().enumerate() {
+            let hn_rva = rdata_rva + (cursor - rdata_raw) as u32;
+            buf[cursor..cursor + 2].copy_from_slice(&0u16.to_le_bytes());
+            cursor += 2;
+            buf[cursor..cursor + fn_name.len()].copy_from_slice(fn_name.as_bytes());
+            buf[cursor + fn_name.len()] = 0;
+            cursor += fn_name.len() + 1;
+
+            let t_off = thunk_raw + i * step;
+            if is_32bit {
+                buf[t_off..t_off + 4].copy_from_slice(&hn_rva.to_le_bytes());
+            } else {
+                buf[t_off..t_off + 8].copy_from_slice(&(hn_rva as u64).to_le_bytes());
+            }
+        }
+
+        if cursor + extra_payload.len() < buf.len() {
+            buf[cursor..cursor + extra_payload.len()].copy_from_slice(extra_payload);
+        }
+        buf
+    }
+
+    #[test]
+    fn security_shield_v2_flags_injection_triad_and_droppers_and_quarantines() {
+        // 1. Classic injection triad on unsigned PE32+ -> Blocked
+        let mal_pe = build_synthetic_pe_with_thunk_imports(
+            false,
+            "kernel32.dll",
+            &["VirtualAllocEx", "WriteProcessMemory", "CreateRemoteThread"],
+            b"",
+        );
+        let parsed = parse_pe_import_functions(&mal_pe).unwrap();
+        assert_eq!(parsed.3.len(), 3);
+        let shield_blocked =
+            evaluate_pe_security_shield_bytes(&mal_pe, "Unsigned", "Unsigned PE", 4.2, false);
+        assert_eq!(shield_blocked.shield_badge, "Blocked");
+        assert!(shield_blocked
+            .suspicious_behaviors
+            .iter()
+            .any(|f| f.code == "PROCESS_INJECTION_TRIAD"));
+
+        // SignedVerified binary with identical APIs drops severity to Warning
+        let shield_signed =
+            evaluate_pe_security_shield_bytes(&mal_pe, "SignedVerified", "Signed", 4.2, false);
+        assert_eq!(shield_signed.shield_badge, "Warning");
+
+        // 2. Hidden UTF-16LE PowerShell dropper + Run persistence -> Blocked
+        let utf16_payload: Vec<u8> = "powershell -w hidden CurrentVersion\\Run"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        let dropper_pe = build_synthetic_pe_with_thunk_imports(
+            true,
+            "advapi32.dll",
+            &["RegSetValueExW", "CryptUnprotectData"],
+            &utf16_payload,
+        );
+        let dropper_shield =
+            evaluate_pe_security_shield_bytes(&dropper_pe, "Unsigned", "Unsigned PE", 4.5, false);
+        assert_eq!(dropper_shield.shield_badge, "Blocked");
+        assert!(dropper_shield
+            .suspicious_behaviors
+            .iter()
+            .any(|f| f.code == "HIDDEN_SCRIPT_DROPPER"));
+        assert!(dropper_shield
+            .suspicious_behaviors
+            .iter()
+            .any(|f| f.code == "REGISTRY_RUN_PERSISTENCE"));
+
+        // 3. Quarantine moves Blocked file out of staging directory cleanly
+        let tmp = std::env::temp_dir().join("duke_shield_v2_test");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let stage_file = tmp.join("evil_drop.exe");
+        let q_dir = tmp.join("quarantine");
+        fs::write(&stage_file, &mal_pe).unwrap();
+        let summary = gate_game_directory_pe_security(&tmp, Some(&q_dir), 16);
+        assert_eq!(summary.blocked_files.len(), 1);
+        assert!(!stage_file.exists());
+        assert!(summary.blocked_files[0].2.is_some());
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

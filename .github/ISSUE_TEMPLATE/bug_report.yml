@@ -1,0 +1,54 @@
+name: Bug Report
+description: Report a crash, launch failure, UI defect, or regression in Duke Launcher v1.0.0+.
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue with **Duke Launcher / The Duke Suite**. Never paste API keys, DPAPI tokens, or personal file paths containing your Windows username.
+  - type: input
+    id: version
+    attributes:
+      label: Duke Launcher Version
+      description: Visible in the titlebar pill or via `duke-launcher.exe --version`.
+      placeholder: v1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Install Mode
+      options:
+        - Standard Windows 11 (%LOCALAPPDATA%)
+        - Portable USB Mode (portable.txt beside executable)
+        - SteamOS / Bazzite / Linux (duke-companion)
+    validations:
+      required: true
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Affected Area
+      options:
+        - Library / Launching / Game Jail (AppContainer)
+        - Malware Shield / PE X-Ray / Privacy Vault
+        - Crash-to-Fix Engine / PCGamingWiki Links
+        - Retro Emulation / BIOS Vault / RetroAchievements / ROM Patcher
+        - Downloads / Workshop & Mod Archive Dropper
+        - Overlay HUD / Trainer (duke_sandbox) / Input Ghost
+        - Command Palette (Ctrl+K) / Disk Pressure Autopilot / Swarm
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What Happened & Steps to Reproduce
+      description: Include the exact game/ROM format, crash code (e.g. 0xC000007B), and steps to reproduce.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted Crash Log / Output
+      description: Attach redacted excerpts from `crash.log` in your Duke data directory if available.
+      render: text

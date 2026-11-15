@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "duke-core",
+    "duke-launcher/src-tauri",
+    "duke-systems/src-tauri",
+    "duke-monitor/src-tauri",
+    "duke-capture/src-tauri",
+    "duke-input/src-tauri",
+    "duke-swarm-node",
+    "duke-companion",
+]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

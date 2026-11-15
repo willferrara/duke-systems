@@ -583,6 +583,19 @@ fn publish_controller_guide_action(
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct GhostInjectFrameState {
+    target_exe: String,
+    buttons: u16,
+    lt: u8,
+    rt: u8,
+    lx: i8,
+    ly: i8,
+    rx: i8,
+    ry: i8,
+    active: bool,
+}
+
 struct AppState {
     store: RwLock<ProfileStore>,
     latest_telemetry: RwLock<LiveTelemetrySnapshot>,
@@ -590,6 +603,7 @@ struct AppState {
     radial_menu: RwLock<RadialMenuState>,
     radial_force_open: AtomicBool,
     bus_active_game: Mutex<Option<(u32, String, String)>>,
+    ghost_inject: Mutex<Option<GhostInjectFrameState>>,
     inspector_device_req: Mutex<Option<String>>,
     inspector_reset_req: AtomicBool,
     pending_hidpp_dpi: AtomicU32,
@@ -621,6 +635,7 @@ impl AppState {
             }),
             radial_force_open: AtomicBool::new(false),
             bus_active_game: Mutex::new(None),
+            ghost_inject: Mutex::new(None),
             inspector_device_req: Mutex::new(None),
             inspector_reset_req: AtomicBool::new(false),
             pending_hidpp_dpi: AtomicU32::new(0),
@@ -1013,8 +1028,45 @@ fn spawn_input_engine(app: AppHandle, state: Arc<AppState>) {
                 }
                 prev_radial_chord = radial_open_now;
 
-                // 6. Button / Switch / Wheel Remappings & Sub-ms Macro Engine
-                let wbtn = xbox_raw.buttons_mask;
+                // 6. Button / Switch / Wheel Remappings & Sub-ms Macro Engine (+ Deterministic Ghost Overlay)
+                let ghost_frame_active = state
+                    .ghost_inject
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .and_then(|gs| {
+                        if gs.active {
+                            let fg = get_foreground_exe_name();
+                            if !fg.is_empty() && exe_matches_rule(&fg, &gs.target_exe) {
+                                Some(gs.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    });
+                let (ghost_btn_mask, out_lx, out_ly, out_rx, out_ry, out_lt, out_rt) =
+                    if let Some(ref gs) = ghost_frame_active {
+                        let glx = (gs.lx as f32 / 127.0).clamp(-1.0, 1.0);
+                        let gly = (gs.ly as f32 / 127.0).clamp(-1.0, 1.0);
+                        let grx = (gs.rx as f32 / 127.0).clamp(-1.0, 1.0);
+                        let gry = (gs.ry as f32 / 127.0).clamp(-1.0, 1.0);
+                        let glt = (gs.lt as f32 / 255.0).clamp(0.0, 1.0);
+                        let grt = (gs.rt as f32 / 255.0).clamp(0.0, 1.0);
+                        (
+                            gs.buttons,
+                            if glx.abs() > out_lx.abs() { glx } else { out_lx },
+                            if gly.abs() > out_ly.abs() { gly } else { out_ly },
+                            if grx.abs() > out_rx.abs() { grx } else { out_rx },
+                            if gry.abs() > out_ry.abs() { gry } else { out_ry },
+                            out_lt.max(glt),
+                            out_rt.max(grt),
+                        )
+                    } else {
+                        (0, out_lx, out_ly, out_rx, out_ry, out_lt, out_rt)
+                    };
+                let wbtn = xbox_raw.buttons_mask | ghost_btn_mask;
                 let source_states: [(&str, bool); 30] = [
                     ("mouse4", (raw_mouse.buttons_mask & (1 << 3)) != 0),
                     ("mouse5", (raw_mouse.buttons_mask & (1 << 4)) != 0),
@@ -1032,13 +1084,15 @@ fn spawn_input_engine(app: AppHandle, state: Arc<AppState>) {
                         "pad_lt_hair",
                         gyro_frame.l2_down
                             || (xbox_raw.connected
-                                && xbox_raw.lt >= cached_profile.left_trigger.activation_threshold),
+                                && xbox_raw.lt >= cached_profile.left_trigger.activation_threshold)
+                            || out_lt >= cached_profile.left_trigger.activation_threshold,
                     ),
                     (
                         "pad_rt_hair",
                         gyro_frame.r2_down
                             || (xbox_raw.connected
-                                && xbox_raw.rt >= cached_profile.right_trigger.activation_threshold),
+                                && xbox_raw.rt >= cached_profile.right_trigger.activation_threshold)
+                            || out_rt >= cached_profile.right_trigger.activation_threshold,
                     ),
                     ("pad_ls", (wbtn & 0x0040) != 0),
                     ("pad_rs", (wbtn & 0x0080) != 0),
@@ -1964,6 +2018,38 @@ fn main() {
                                 .pending_macro_test
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner()) = Some(seq);
+                        }
+                    }
+                    DukeEvent::GhostInputFrame {
+                        target_exe,
+                        pid: _,
+                        buttons,
+                        lt,
+                        rt,
+                        lx,
+                        ly,
+                        rx,
+                        ry,
+                        active,
+                    } => {
+                        let mut guard = bus_state
+                            .ghost_inject
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if !active {
+                            *guard = None;
+                        } else {
+                            *guard = Some(GhostInjectFrameState {
+                                target_exe,
+                                buttons,
+                                lt,
+                                rt,
+                                lx,
+                                ly,
+                                rx,
+                                ry,
+                                active: true,
+                            });
                         }
                     }
                     _ => {}
