@@ -238,6 +238,7 @@ static ACTIVE_JOBS: OnceLock<Mutex<HashMap<String, Arc<duke_core::win32_ffi::Pro
     OnceLock::new();
 static TRAY_DAEMON: OnceLock<duke_core::tray_daemon::TrayDaemonState> = OnceLock::new();
 static HOTKEY_WATCHER_ACTIVE: AtomicBool = AtomicBool::new(false);
+static APP_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn get_active_jobs_map(
 ) -> &'static Mutex<HashMap<String, Arc<duke_core::win32_ffi::ProcessTreeJob>>> {
@@ -13928,7 +13929,7 @@ fn spawn_overlay_trigger_watcher(app: AppHandle) {
             let mut radial_chord_was_down = false;
             let mut vision_chord_was_down = false;
             let mut fse_chord_was_down = false;
-            loop {
+            while !APP_SHUTDOWN.load(Ordering::Acquire) {
                 let mut should_toggle_overlay = false;
                 let mut should_toggle_guide = false;
                 let mut should_toggle_radial = false;
@@ -14470,6 +14471,8 @@ fn main() {
 
             let exit_app = app.handle().clone();
             let on_exit_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                APP_SHUTDOWN.store(true, Ordering::Release);
+                HOTKEY_WATCHER_ACTIVE.store(false, Ordering::Release);
                 if let Some(cell) = DUKE_SHM_BUS.get() {
                     if let Ok(guard) = cell.lock() {
                         if let Some(ref bus) = *guard {
@@ -14640,6 +14643,9 @@ fn main() {
                 let mut interval = tokio::time::interval(Duration::from_secs(15));
                 loop {
                     interval.tick().await;
+                    if APP_SHUTDOWN.load(Ordering::Acquire) {
+                        break;
+                    }
                     tick_count = tick_count.saturating_add(1);
                     let _ = duke_ai_rt::unload_idle_workers_internal(false);
                     let ram_mode = RAM_TRIM_MODE.load(Ordering::Relaxed);
@@ -15004,7 +15010,12 @@ fn main() {
                 return;
             }
         }
-        let exit_cb = || shutdown_flush_downloads(app_handle);
+        let exit_cb = || {
+            APP_SHUTDOWN.store(true, Ordering::Release);
+            HOTKEY_WATCHER_ACTIVE.store(false, Ordering::Release);
+            couch_mode::clear_transient_couch_state();
+            shutdown_flush_downloads(app_handle);
+        };
         duke_core::tray_daemon::handle_run_event(
             app_handle,
             &event,

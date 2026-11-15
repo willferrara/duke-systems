@@ -671,19 +671,29 @@ mod win_etw {
     }
 
     pub fn query_qpc_freq() -> i64 {
-        let mut f = 0i64;
-        unsafe {
+        type QpfFn = unsafe extern "system" fn(*mut i64) -> i32;
+        static QPF_FN: OnceLock<Option<QpfFn>> = OnceLock::new();
+        let qpf_opt = *QPF_FN.get_or_init(|| unsafe {
             let k32_w = wide_null("kernel32.dll");
-            if let Ok(k32) = LoadLibraryW(PCWSTR(k32_w.as_ptr())) {
-                if !k32.is_invalid() {
-                    if let Some(p) =
-                        GetProcAddress(k32, PCSTR(c"QueryPerformanceFrequency".as_ptr().cast()))
-                    {
-                        type QpfFn = unsafe extern "system" fn(*mut i64) -> i32;
-                        let qpf: QpfFn = std::mem::transmute(p);
-                        let _ = qpf(&mut f);
-                    }
-                }
+            let Ok(k32) = LoadLibraryW(PCWSTR(k32_w.as_ptr())) else {
+                return None;
+            };
+            if k32.is_invalid() {
+                return None;
+            }
+            if let Some(p) =
+                GetProcAddress(k32, PCSTR(c"QueryPerformanceFrequency".as_ptr().cast()))
+            {
+                Some(std::mem::transmute::<unsafe extern "system" fn() -> isize, QpfFn>(p))
+            } else {
+                let _ = windows::Win32::Foundation::FreeLibrary(k32);
+                None
+            }
+        });
+        let mut f = 0i64;
+        if let Some(qpf) = qpf_opt {
+            unsafe {
+                let _ = qpf(&mut f);
             }
         }
         f.max(1)
@@ -1053,14 +1063,81 @@ fn save_scorecard_store(store: &ScorecardStore) -> Result<(), String> {
     atomic_write_string(&path, &json)
 }
 
+#[cfg(windows)]
+#[repr(C)]
+#[allow(non_snake_case)]
+struct ToolhelpProcessEntry32W {
+    dwSize: u32,
+    cntUsage: u32,
+    th32ProcessID: u32,
+    th32DefaultHeapID: usize,
+    th32ModuleID: u32,
+    cntThreads: u32,
+    th32ParentProcessID: u32,
+    pcPriClassBase: i32,
+    dwFlags: u32,
+    szExeFile: [u16; 260],
+}
+
+#[cfg(windows)]
+struct ToolhelpSnapshotProcs {
+    create_snap: unsafe extern "system" fn(u32, u32) -> isize,
+    proc_first: unsafe extern "system" fn(isize, *mut ToolhelpProcessEntry32W) -> i32,
+    proc_next: unsafe extern "system" fn(isize, *mut ToolhelpProcessEntry32W) -> i32,
+}
+
+#[cfg(windows)]
+fn toolhelp_snapshot_procs() -> Option<&'static ToolhelpSnapshotProcs> {
+    use windows::core::{PCSTR, PCWSTR};
+    use windows::Win32::Foundation::FreeLibrary;
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+
+    type CreateSnapshotFn = unsafe extern "system" fn(u32, u32) -> isize;
+    type ProcessFirstWFn = unsafe extern "system" fn(isize, *mut ToolhelpProcessEntry32W) -> i32;
+    type ProcessNextWFn = unsafe extern "system" fn(isize, *mut ToolhelpProcessEntry32W) -> i32;
+
+    static PROCS: OnceLock<Option<ToolhelpSnapshotProcs>> = OnceLock::new();
+    PROCS
+        .get_or_init(|| unsafe {
+            let k32_w: Vec<u16> = "kernel32.dll\0".encode_utf16().collect();
+            let Ok(k32) = LoadLibraryW(PCWSTR(k32_w.as_ptr())) else {
+                return None;
+            };
+            if k32.is_invalid() {
+                return None;
+            }
+            let (Some(snap_p), Some(first_p), Some(next_p)) = (
+                GetProcAddress(k32, PCSTR(c"CreateToolhelp32Snapshot".as_ptr().cast())),
+                GetProcAddress(k32, PCSTR(c"Process32FirstW".as_ptr().cast())),
+                GetProcAddress(k32, PCSTR(c"Process32NextW".as_ptr().cast())),
+            ) else {
+                let _ = FreeLibrary(k32);
+                return None;
+            };
+            Some(ToolhelpSnapshotProcs {
+                create_snap: std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    CreateSnapshotFn,
+                >(snap_p),
+                proc_first: std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    ProcessFirstWFn,
+                >(first_p),
+                proc_next: std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    ProcessNextWFn,
+                >(next_p),
+            })
+        })
+        .as_ref()
+}
+
 /// Enumerates heavyweight background processes outside the active game process tree
 /// when ETW/DWM detects frame-time stutter spikes (pure-Rust kernel32 snapshot, zero DLL injection).
 #[cfg(windows)]
 pub fn sample_background_pressure_processes(exclude_pids: &[u32]) -> Vec<String> {
     use std::ffi::c_void;
-    use windows::core::{PCSTR, PCWSTR};
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
 
     const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
     const HEAVY_WATCH_EXES: &[(&str, &str)] = &[
@@ -1080,53 +1157,31 @@ pub fn sample_background_pressure_processes(exclude_pids: &[u32]) -> Vec<String>
         ("radeonsoftware.exe", "AMD Adrenalin overlay"),
     ];
 
-    #[repr(C)]
-    #[allow(non_snake_case)]
-    struct ProcessEntry32W {
-        dwSize: u32,
-        cntUsage: u32,
-        th32ProcessID: u32,
-        th32DefaultHeapID: usize,
-        th32ModuleID: u32,
-        cntThreads: u32,
-        th32ParentProcessID: u32,
-        pcPriClassBase: i32,
-        dwFlags: u32,
-        szExeFile: [u16; 260],
+    struct SnapshotHandleGuard(isize);
+    impl Drop for SnapshotHandleGuard {
+        fn drop(&mut self) {
+            if self.0 != -1 && self.0 != 0 {
+                unsafe {
+                    let _ = CloseHandle(HANDLE(self.0 as *mut c_void));
+                }
+            }
+        }
     }
 
-    type CreateSnapshotFn = unsafe extern "system" fn(u32, u32) -> isize;
-    type ProcessFirstWFn = unsafe extern "system" fn(isize, *mut ProcessEntry32W) -> i32;
-    type ProcessNextWFn = unsafe extern "system" fn(isize, *mut ProcessEntry32W) -> i32;
-
     let mut found = Vec::new();
-    let k32_w: Vec<u16> = "kernel32.dll\0".encode_utf16().collect();
+    let Some(procs) = toolhelp_snapshot_procs() else {
+        return found;
+    };
+
     unsafe {
-        let Ok(k32) = LoadLibraryW(PCWSTR(k32_w.as_ptr())) else {
-            return found;
-        };
-        if k32.is_invalid() {
-            return found;
-        }
-        let (Some(snap_p), Some(first_p), Some(next_p)) = (
-            GetProcAddress(k32, PCSTR(c"CreateToolhelp32Snapshot".as_ptr().cast())),
-            GetProcAddress(k32, PCSTR(c"Process32FirstW".as_ptr().cast())),
-            GetProcAddress(k32, PCSTR(c"Process32NextW".as_ptr().cast())),
-        ) else {
-            return found;
-        };
-
-        let create_snap: CreateSnapshotFn = std::mem::transmute(snap_p);
-        let proc_first: ProcessFirstWFn = std::mem::transmute(first_p);
-        let proc_next: ProcessNextWFn = std::mem::transmute(next_p);
-
-        let snap = create_snap(TH32CS_SNAPPROCESS, 0);
+        let snap = (procs.create_snap)(TH32CS_SNAPPROCESS, 0);
         if snap == -1 || snap == 0 {
             return found;
         }
-        let mut pe: ProcessEntry32W = std::mem::zeroed();
-        pe.dwSize = std::mem::size_of::<ProcessEntry32W>() as u32;
-        if proc_first(snap, &mut pe) != 0 {
+        let _snap_guard = SnapshotHandleGuard(snap);
+        let mut pe: ToolhelpProcessEntry32W = std::mem::zeroed();
+        pe.dwSize = std::mem::size_of::<ToolhelpProcessEntry32W>() as u32;
+        if (procs.proc_first)(snap, &mut pe) != 0 {
             loop {
                 if !exclude_pids.contains(&pe.th32ProcessID) && pe.th32ProcessID > 4 {
                     let end = pe
@@ -1148,12 +1203,11 @@ pub fn sample_background_pressure_processes(exclude_pids: &[u32]) -> Vec<String>
                         break;
                     }
                 }
-                if proc_next(snap, &mut pe) == 0 {
+                if (procs.proc_next)(snap, &mut pe) == 0 {
                     break;
                 }
             }
         }
-        let _ = CloseHandle(windows::Win32::Foundation::HANDLE(snap as *mut c_void));
     }
     found
 }

@@ -1056,6 +1056,28 @@ body[data-theme="light"] .btn-secondary:hover:not(:disabled) {
 .pill.emerald { color: var(--accent-emerald); border-color: rgba(34, 197, 94, 0.35); }
 .pill.danger { color: var(--accent-crimson); border-color: rgba(239, 68, 68, 0.35); }
 
+.btn:focus:not(:focus-visible):not(.gamepad-focus),
+.btn-secondary:focus:not(:focus-visible):not(.gamepad-focus),
+.btn-primary:focus:not(:focus-visible):not(.gamepad-focus),
+.filter-pill:focus:not(:focus-visible):not(.gamepad-focus),
+.pill:focus:not(:focus-visible):not(.gamepad-focus),
+#btn-catalog-reset-filters:focus:not(:focus-visible):not(.gamepad-focus),
+#btn-catalog-clear-genres:focus:not(:focus-visible):not(.gamepad-focus) {
+  outline: none;
+  box-shadow: none;
+}
+
+.btn:focus-visible,
+.btn-secondary:focus-visible,
+.btn-primary:focus-visible,
+.filter-pill:focus-visible,
+.pill:focus-visible,
+#btn-catalog-reset-filters:focus-visible,
+#btn-catalog-clear-genres:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
 /* ==========================================================================
    MY GAMES — SIZEABLE ADAPTIVE CARDS
    ========================================================================== */
@@ -2671,9 +2693,9 @@ body.couch-mode .filter-pill {
 }
 
 .gamepad-focus {
-  outline: 3px solid var(--accent, #60cdff) !important;
+  outline: 3px solid var(--accent, var(--accent-primary, #60cdff)) !important;
   outline-offset: 2px;
-  box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent, #60cdff) 24%, transparent);
+  box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent, var(--accent-primary, #60cdff)) 24%, transparent);
   transform: translateY(-1px);
   transition: transform 0.1s ease, box-shadow 0.1s ease;
 }
@@ -5368,10 +5390,10 @@ body.couch-mode .main-panel {
 }
 
 body.couch-mode .gamepad-focus {
-  outline: 2.5px solid var(--accent);
+  outline: 2.5px solid var(--accent, var(--accent-primary, #60cdff));
   outline-offset: 2px;
   transform: scale(1.02);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 28%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, var(--accent-primary, #60cdff)) 28%, transparent);
 }
 
 .duke-deck-hint-bar {
@@ -5747,8 +5769,26 @@ body.couch-mode .gamepad-focus {
 
 .vkb-key-btn:hover,
 .vkb-key-btn.gamepad-focus {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 20%, var(--bg-elevated));
+  border-color: var(--accent, var(--accent-primary, #60cdff));
+  background: color-mix(in srgb, var(--accent, var(--accent-primary, #60cdff)) 20%, var(--bg-elevated));
+}
+
+body[data-gamepad-active="false"] .gamepad-focus,
+body[data-gamepad-active="false"].couch-mode .gamepad-focus {
+  outline: none !important;
+  outline-offset: 0;
+  box-shadow: none !important;
+  transform: none;
+}
+
+body[data-gamepad-active="false"] .gamepad-focus:focus-visible {
+  outline: 2px solid var(--accent-primary) !important;
+  outline-offset: 2px;
+}
+
+body[data-gamepad-active="false"] .vkb-key-btn.gamepad-focus:not(:hover) {
+  border-color: var(--border-hairline);
+  background: var(--bg-elevated);
 }
 
 .vkb-foot {

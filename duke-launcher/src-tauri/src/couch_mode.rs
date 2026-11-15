@@ -120,6 +120,54 @@ impl Default for UniversalPadState {
     }
 }
 
+impl UniversalPadState {
+    fn clear_axes_and_buttons(&mut self) {
+        self.lx = 0.0;
+        self.ly = 0.0;
+        self.rx = 0.0;
+        self.ry = 0.0;
+        self.lt = 0.0;
+        self.rt = 0.0;
+        self.a = false;
+        self.b = false;
+        self.x = false;
+        self.y = false;
+        self.lb = false;
+        self.rb = false;
+        self.back = false;
+        self.start = false;
+        self.ls = false;
+        self.rs = false;
+        self.up = false;
+        self.down = false;
+        self.left = false;
+        self.right = false;
+        self.guide = false;
+        self.buttons_mask = 0;
+        self.raw_axes = [0.0; 4];
+        self.calibrated_axes = [0.0; 4];
+    }
+
+    pub fn zero_inputs(&mut self) {
+        self.connected = false;
+        self.slot = 0;
+        self.clear_axes_and_buttons();
+        self.controller_kind = "none".to_string();
+        self.device_name = "None".to_string();
+        self.vid_pid.clear();
+    }
+
+    pub fn disconnected_snapshot(deadzone: f32, hid_dll_ready: bool) -> Self {
+        let mut s = Self {
+            deadzone,
+            hid_dll_ready,
+            ..Default::default()
+        };
+        s.zero_inputs();
+        s
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControllerCalibrationStatus {
@@ -153,6 +201,8 @@ struct CouchHidHub {
     last_hid_pad: Option<UniversalPadState>,
     last_kind: String,
     last_device_name: String,
+    last_connected: bool,
+    idle_empty_reads: u32,
 }
 
 impl CouchHidHub {
@@ -167,6 +217,26 @@ impl CouchHidHub {
             last_hid_pad: None,
             last_kind: "none".to_string(),
             last_device_name: "None".to_string(),
+            last_connected: false,
+            idle_empty_reads: 0,
+        }
+    }
+
+    fn reset_disconnected_state(&mut self) {
+        self.opened = None;
+        self.last_hid_pad = None;
+        self.last_raw_axes = [0.0; 4];
+        self.last_kind = "none".to_string();
+        self.last_device_name = "None".to_string();
+        self.last_connected = false;
+        self.idle_empty_reads = 0;
+    }
+
+    fn clear_transient_pad_inputs(&mut self) {
+        self.last_raw_axes = [0.0; 4];
+        self.idle_empty_reads = 0;
+        if let Some(ref mut p) = self.last_hid_pad {
+            p.clear_axes_and_buttons();
         }
     }
 
@@ -258,6 +328,12 @@ impl CouchHidHub {
                     fpv_max: [2047; 16],
                     fpv_tel: FpvTelemetry::default(),
                 });
+                self.last_hid_pad = None;
+                self.last_raw_axes = [0.0; 4];
+                self.last_kind = "none".to_string();
+                self.last_device_name = "None".to_string();
+                self.last_connected = false;
+                self.idle_empty_reads = 0;
             }
         }
     }
@@ -600,7 +676,7 @@ pub fn poll_universal_controller_state() -> UniversalPadState {
     let hid_ready = duke_core::win32_ffi::hid_dll_available();
 
     let Ok(mut hub) = hid_hub().lock() else {
-        return UniversalPadState::default();
+        return UniversalPadState::disconnected_snapshot(0.14, hid_ready);
     };
 
     if xpad.connected {
@@ -611,6 +687,8 @@ pub fn poll_universal_controller_state() -> UniversalPadState {
         hub.last_raw_axes = raw_axes;
         hub.last_kind = "xbox".to_string();
         hub.last_device_name = "Xbox / XInput Controller (Slot 1)".to_string();
+        hub.last_connected = true;
+        hub.idle_empty_reads = 0;
 
         let mut buttons_mask = 0u16;
         if xpad.dpad_up { buttons_mask |= 0x0001; }
@@ -682,19 +760,24 @@ pub fn poll_universal_controller_state() -> UniversalPadState {
         }
     }
 
+    if !read_failed && latest_len == 0 && hub.opened.is_some() {
+        hub.idle_empty_reads = hub.idle_empty_reads.saturating_add(1);
+        if hub.idle_empty_reads % 15 == 0 {
+            if let Some(ref opened) = hub.opened {
+                if opened.device.get_product_string().is_err() {
+                    read_failed = true;
+                }
+            }
+        }
+    }
+
     if read_failed {
-        hub.opened = None;
-        hub.last_hid_pad = None;
-        hub.last_kind = "none".to_string();
-        hub.last_device_name = "None".to_string();
-        return UniversalPadState {
-            hid_dll_ready: hid_ready,
-            deadzone: hub.calibrator.deadzone,
-            ..Default::default()
-        };
+        hub.reset_disconnected_state();
+        return UniversalPadState::disconnected_snapshot(hub.calibrator.deadzone, hid_ready);
     }
 
     if latest_len > 0 {
+        hub.idle_empty_reads = 0;
         let parsed = if let Some(ref mut opened) = hub.opened {
             match opened.kind {
                 DeviceKind::FpvTransmitter => {
@@ -783,6 +866,8 @@ pub fn poll_universal_controller_state() -> UniversalPadState {
             hub.last_kind = pad.controller_kind.clone();
             hub.last_device_name = dev_name;
             hub.last_hid_pad = Some(pad.clone());
+            hub.last_connected = true;
+            hub.idle_empty_reads = 0;
             return pad;
         }
     }
@@ -811,11 +896,10 @@ pub fn poll_universal_controller_state() -> UniversalPadState {
         }
     }
 
-    UniversalPadState {
-        hid_dll_ready: hid_ready,
-        deadzone: hub.calibrator.deadzone,
-        ..Default::default()
+    if read_failed || hub.last_connected || (hub.opened.is_some() && hub.idle_empty_reads >= 15) {
+        hub.reset_disconnected_state();
     }
+    UniversalPadState::disconnected_snapshot(hub.calibrator.deadzone, hid_ready)
 }
 
 pub fn current_couch_status(settings_couch_mode: bool) -> CouchModeStatus {
@@ -872,6 +956,9 @@ pub fn handle_controller_guide_event(
         "toggle_couch_mode" => {
             let mut settings = crate::load_settings_from_disk(app);
             settings.couch_mode = !settings.couch_mode;
+            if !settings.couch_mode {
+                clear_transient_couch_state();
+            }
             let _ = crate::save_settings_to_disk(app, &settings);
             let status = current_couch_status(settings.couch_mode);
             let _ = app.emit("couch-mode-toggled", &status);
@@ -934,6 +1021,15 @@ pub async fn get_couch_mode_status(app: AppHandle) -> Result<CouchModeStatus, St
     Ok(current_couch_status(settings.couch_mode))
 }
 
+pub fn clear_transient_couch_state() {
+    RADIAL_VISIBLE.store(false, Ordering::Release);
+    VIRTUAL_KEYBOARD_VISIBLE.store(false, Ordering::Release);
+    *radial_slot_lock().write().unwrap_or_else(|e| e.into_inner()) = None;
+    if let Ok(mut hub) = hid_hub().lock() {
+        hub.clear_transient_pad_inputs();
+    }
+}
+
 #[tauri::command]
 pub async fn set_couch_mode_state(
     app: AppHandle,
@@ -954,6 +1050,9 @@ pub async fn set_couch_mode_state(
         if !ro {
             *radial_slot_lock().write().unwrap_or_else(|e| e.into_inner()) = None;
         }
+    }
+    if !enabled {
+        clear_transient_couch_state();
     }
     let mut settings = crate::load_settings_from_disk(&app);
     settings.couch_mode = enabled;
@@ -1008,7 +1107,7 @@ pub fn calibrate_controller_axes(
         hub.calibrator.set_deadzone(dz);
     }
     match mode.trim().to_ascii_lowercase().as_str() {
-        "auto_center" | "center" | "calibrate" => {
+        "auto_center" | "center" | "calibrate" if pad.connected => {
             hub.calibrator.capture_rest_pose(pad.raw_axes);
         }
         "reset" => {
@@ -1016,24 +1115,21 @@ pub fn calibrate_controller_axes(
         }
         _ => {}
     }
-    let is_fpv = hub.last_kind == "edgetx";
-    let calibrated = hub.calibrator.normalize_axes(pad.raw_axes, is_fpv);
+    let (raw_axes, calibrated_axes, controller_kind, device_name) = if pad.connected {
+        let is_fpv = pad.controller_kind == "edgetx" || hub.last_kind == "edgetx";
+        let calibrated = hub.calibrator.normalize_axes(pad.raw_axes, is_fpv);
+        (pad.raw_axes, calibrated, pad.controller_kind, pad.device_name)
+    } else {
+        ([0.0; 4], [0.0; 4], "none".to_string(), "None".to_string())
+    };
     Ok(ControllerCalibrationStatus {
         deadzone: hub.calibrator.deadzone,
         center_offsets: hub.calibrator.center_offsets,
         axis_modes: hub.calibrator.axis_modes,
-        raw_axes: pad.raw_axes,
-        calibrated_axes: calibrated,
-        controller_kind: if pad.connected {
-            pad.controller_kind
-        } else {
-            hub.last_kind.clone()
-        },
-        device_name: if pad.connected {
-            pad.device_name
-        } else {
-            hub.last_device_name.clone()
-        },
+        raw_axes,
+        calibrated_axes,
+        controller_kind,
+        device_name,
     })
 }
 
@@ -1067,5 +1163,195 @@ mod tests {
         assert_eq!(cal.axis_modes[1], AxisCenterMode::ThrottleLow);
         let resting = cal.normalize_axes([0.03, -0.95, 0.0, 0.02], true);
         assert!(resting.iter().all(|v| v.abs() < 0.001));
+    }
+
+    #[test]
+    fn disconnect_zeroes_all_axes_and_buttons() {
+        let mut pad = UniversalPadState {
+            connected: true,
+            slot: 2,
+            lx: 0.75,
+            ly: -0.82,
+            rx: -0.45,
+            ry: 0.91,
+            lt: 0.65,
+            rt: 0.88,
+            a: true,
+            b: true,
+            x: true,
+            y: true,
+            lb: true,
+            rb: true,
+            back: true,
+            start: true,
+            ls: true,
+            rs: true,
+            up: true,
+            down: true,
+            left: true,
+            right: true,
+            guide: true,
+            buttons_mask: 0xFFFF,
+            controller_kind: "dualsense".to_string(),
+            device_name: "DualSense Wireless Controller".to_string(),
+            vid_pid: "054C:0CE6".to_string(),
+            raw_axes: [0.75, -0.82, -0.45, 0.91],
+            calibrated_axes: [0.71, -0.79, -0.41, 0.89],
+            deadzone: 0.22,
+            hid_dll_ready: true,
+            ..Default::default()
+        };
+        pad.zero_inputs();
+        assert!(!pad.connected);
+        assert_eq!(pad.slot, 0);
+        assert_eq!(pad.lx, 0.0);
+        assert_eq!(pad.ly, 0.0);
+        assert_eq!(pad.rx, 0.0);
+        assert_eq!(pad.ry, 0.0);
+        assert_eq!(pad.lt, 0.0);
+        assert_eq!(pad.rt, 0.0);
+        assert!(!pad.a && !pad.b && !pad.x && !pad.y);
+        assert!(!pad.lb && !pad.rb && !pad.back && !pad.start);
+        assert!(!pad.ls && !pad.rs && !pad.guide);
+        assert!(!pad.up && !pad.down && !pad.left && !pad.right);
+        assert_eq!(pad.buttons_mask, 0);
+        assert_eq!(pad.controller_kind, "none");
+        assert_eq!(pad.device_name, "None");
+        assert!(pad.vid_pid.is_empty());
+        assert_eq!(pad.raw_axes, [0.0; 4]);
+        assert_eq!(pad.calibrated_axes, [0.0; 4]);
+
+        let snap = UniversalPadState::disconnected_snapshot(0.22, true);
+        assert!(!snap.connected);
+        assert_eq!(snap.slot, 0);
+        assert_eq!(snap.controller_kind, "none");
+        assert_eq!(snap.device_name, "None");
+        assert!(snap.vid_pid.is_empty());
+        assert_eq!(snap.buttons_mask, 0);
+        assert_eq!(snap.raw_axes, [0.0; 4]);
+        assert_eq!(snap.calibrated_axes, [0.0; 4]);
+        assert!((snap.deadzone - 0.22).abs() < f32::EPSILON);
+        assert!(snap.hid_dll_ready);
+    }
+
+    #[test]
+    fn hid_hub_reset_on_disconnect_clears_stale_pad_and_metadata() {
+        let mut hub = CouchHidHub::new();
+        assert!(!hub.last_connected);
+        assert_eq!(hub.idle_empty_reads, 0);
+
+        hub.last_connected = true;
+        hub.idle_empty_reads = 7;
+        hub.last_raw_axes = [0.5, -0.9, 0.2, 0.4];
+        hub.last_kind = "dualsense".to_string();
+        hub.last_device_name = "DualSense Wireless Controller".to_string();
+        hub.last_hid_pad = Some(UniversalPadState {
+            connected: true,
+            slot: 1,
+            lx: 0.5,
+            ly: -0.9,
+            rx: 0.2,
+            ry: 0.4,
+            lt: 0.7,
+            rt: 0.3,
+            a: true,
+            guide: true,
+            buttons_mask: 0x1001,
+            controller_kind: "dualsense".to_string(),
+            device_name: "DualSense Wireless Controller".to_string(),
+            vid_pid: "054C:0CE6".to_string(),
+            raw_axes: [0.5, -0.9, 0.2, 0.4],
+            calibrated_axes: [0.45, -0.88, 0.15, 0.35],
+            ..Default::default()
+        });
+
+        hub.clear_transient_pad_inputs();
+        assert_eq!(hub.last_raw_axes, [0.0; 4]);
+        assert_eq!(hub.idle_empty_reads, 0);
+        let preserved = hub.last_hid_pad.as_ref();
+        assert!(preserved.is_some());
+        if let Some(p) = preserved {
+            assert!(p.connected);
+            assert_eq!(p.controller_kind, "dualsense");
+            assert_eq!(p.device_name, "DualSense Wireless Controller");
+            assert_eq!(p.vid_pid, "054C:0CE6");
+            assert_eq!(p.lx, 0.0);
+            assert_eq!(p.ly, 0.0);
+            assert_eq!(p.rx, 0.0);
+            assert_eq!(p.ry, 0.0);
+            assert_eq!(p.lt, 0.0);
+            assert_eq!(p.rt, 0.0);
+            assert!(!p.a && !p.guide);
+            assert_eq!(p.buttons_mask, 0);
+            assert_eq!(p.raw_axes, [0.0; 4]);
+            assert_eq!(p.calibrated_axes, [0.0; 4]);
+        }
+
+        hub.reset_disconnected_state();
+        assert!(hub.opened.is_none());
+        assert!(hub.last_hid_pad.is_none());
+        assert_eq!(hub.last_raw_axes, [0.0; 4]);
+        assert_eq!(hub.last_kind, "none");
+        assert_eq!(hub.last_device_name, "None");
+        assert!(!hub.last_connected);
+        assert_eq!(hub.idle_empty_reads, 0);
+    }
+
+    #[test]
+    fn mode_exit_clears_radial_and_virtual_keyboard_flags() {
+        RADIAL_VISIBLE.store(true, Ordering::Release);
+        VIRTUAL_KEYBOARD_VISIBLE.store(true, Ordering::Release);
+        *radial_slot_lock().write().unwrap_or_else(|e| e.into_inner()) = Some(3);
+        {
+            let Ok(mut hub) = hid_hub().lock() else {
+                panic!("hid_hub mutex poisoned");
+            };
+            hub.last_connected = true;
+            hub.idle_empty_reads = 9;
+            hub.last_raw_axes = [0.9, -0.8, 0.1, -0.2];
+            hub.last_hid_pad = Some(UniversalPadState {
+                connected: true,
+                lx: 0.9,
+                ly: -0.8,
+                a: true,
+                guide: true,
+                buttons_mask: 0x1000,
+                controller_kind: "edgetx".to_string(),
+                device_name: "RadioMaster Pocket".to_string(),
+                vid_pid: "1209:4F54".to_string(),
+                raw_axes: [0.9, -0.8, 0.1, -0.2],
+                calibrated_axes: [0.85, -0.75, 0.05, -0.15],
+                ..Default::default()
+            });
+        }
+
+        clear_transient_couch_state();
+
+        assert!(!RADIAL_VISIBLE.load(Ordering::Acquire));
+        assert!(!VIRTUAL_KEYBOARD_VISIBLE.load(Ordering::Acquire));
+        assert!(radial_slot_lock()
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none());
+
+        let Ok(mut hub) = hid_hub().lock() else {
+            panic!("hid_hub mutex poisoned");
+        };
+        assert_eq!(hub.last_raw_axes, [0.0; 4]);
+        assert_eq!(hub.idle_empty_reads, 0);
+        let Some(ref p) = hub.last_hid_pad else {
+            panic!("expected preserved last_hid_pad");
+        };
+        assert!(p.connected);
+        assert_eq!(p.controller_kind, "edgetx");
+        assert_eq!(p.device_name, "RadioMaster Pocket");
+        assert_eq!(p.vid_pid, "1209:4F54");
+        assert_eq!(p.lx, 0.0);
+        assert_eq!(p.ly, 0.0);
+        assert!(!p.a && !p.guide);
+        assert_eq!(p.buttons_mask, 0);
+        assert_eq!(p.raw_axes, [0.0; 4]);
+        assert_eq!(p.calibrated_axes, [0.0; 4]);
+        hub.reset_disconnected_state();
     }
 }

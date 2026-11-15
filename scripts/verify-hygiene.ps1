@@ -181,6 +181,13 @@ try {
     $TauriOk = $TransOk -and (-not $SingleProcLeak)
     Add-CheckResult 'Tauri Window Config' $TauriOk $(if ($TauriOk) { 'main.transparent = false, multi-process WebView2 intact' } else { "transparent=$($MainWin.transparent), singleProcessLeak=$SingleProcLeak" })
 
+    $CssPath = Join-Path $RepoRoot 'duke-launcher\src\styles.css'
+    $CssRaw = [System.IO.File]::ReadAllText($CssPath)
+    $SolidThemes = @('dark', 'light', 'minecraft', 'sunset', 'aerospace', 'cyberpunk', 'terminal', 'crimson', 'ocean', 'frost')
+    $MissingThemes = @($SolidThemes | Where-Object { $CssRaw -notmatch ("\[data-theme=""$($_)""\]") })
+    $ThemesOk = ($MissingThemes.Count -eq 0)
+    Add-CheckResult '10 Solid CSS Themes' $ThemesOk $(if ($ThemesOk) { 'All 10 solid themes verified in styles.css' } else { "Missing themes: $($MissingThemes -join ', ')" })
+
     # ------------------------------------------------------------------
     # 3b. Zero Forbidden Theme & Zero Personal Username/Path Leaks
     # ------------------------------------------------------------------

@@ -966,7 +966,19 @@ pub async fn harvest_retro_catalog_internal(
         }
     }
 
+    if !pending_batch.is_empty() {
+        let batch = std::mem::take(&mut pending_batch);
+        let dk_c = dkcat_path.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            catalog_mmap::upsert_entries_dkcat(&dk_c, &batch, None, &[])
+        })
+        .await;
+    }
+
     save_retro_sync_state(&sync_state);
+    drop(pending_batch);
+    drop(sync_state);
+    duke_core::win32_ffi::trim_current_working_set();
     let (total_indexed, _, _) = catalog_mmap::catalog_mmap_header_meta();
     Ok(RetroSyncStatus {
         running: false,

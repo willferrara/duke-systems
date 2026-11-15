@@ -69,6 +69,34 @@ fn active_speed_state() -> &'static Mutex<(f64, f64)> {
     SPEED.get_or_init(|| Mutex::new((1.0, 15.625)))
 }
 
+#[cfg(windows)]
+struct LoadedLibGuard(windows::Win32::Foundation::HMODULE);
+
+#[cfg(windows)]
+impl Drop for LoadedLibGuard {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            unsafe {
+                let _ = windows::Win32::Foundation::FreeLibrary(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+struct SafeProcessHandle(windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for SafeProcessHandle {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(self.0);
+            }
+        }
+    }
+}
+
 /// Evaluates process names and loaded kernel driver names against online anti-cheat signatures
 /// (`EasyAntiCheat`, `BattlEye`, `Vanguard`, `FACEIT`).
 pub fn evaluate_anticheat_guard(exe_names: &[&str], driver_names: &[&str]) -> AntiCheatGuardReport {
@@ -128,7 +156,6 @@ pub fn evaluate_anticheat_guard(exe_names: &[&str], driver_names: &[&str]) -> An
 pub fn scan_anticheat_drivers_and_processes(exe_path_hint: Option<&str>) -> AntiCheatGuardReport {
     use std::ffi::c_void;
     use windows::core::{PCSTR, PCWSTR};
-    use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
     const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
@@ -160,6 +187,7 @@ pub fn scan_anticheat_drivers_and_processes(exe_path_hint: Option<&str>) -> Anti
         let k32_w: Vec<u16> = "kernel32.dll\0".encode_utf16().collect();
         if let Ok(k32) = LoadLibraryW(PCWSTR(k32_w.as_ptr())) {
             if !k32.is_invalid() {
+                let _k32_guard = LoadedLibGuard(k32);
                 if let (Some(snap_p), Some(first_p), Some(next_p)) = (
                     GetProcAddress(k32, PCSTR(c"CreateToolhelp32Snapshot".as_ptr().cast())),
                     GetProcAddress(k32, PCSTR(c"Process32FirstW".as_ptr().cast())),
@@ -170,6 +198,9 @@ pub fn scan_anticheat_drivers_and_processes(exe_path_hint: Option<&str>) -> Anti
                     let proc_next: ProcessNextWFn = std::mem::transmute(next_p);
                     let snap = create_snap(TH32CS_SNAPPROCESS, 0);
                     if snap != -1 && snap != 0 {
+                        let _snap_guard = SafeProcessHandle(windows::Win32::Foundation::HANDLE(
+                            snap as *mut c_void,
+                        ));
                         let mut pe: ProcessEntry32W = std::mem::zeroed();
                         pe.dwSize = std::mem::size_of::<ProcessEntry32W>() as u32;
                         if proc_first(snap, &mut pe) != 0 {
@@ -188,7 +219,6 @@ pub fn scan_anticheat_drivers_and_processes(exe_path_hint: Option<&str>) -> Anti
                                 }
                             }
                         }
-                        let _ = CloseHandle(windows::Win32::Foundation::HANDLE(snap as *mut c_void));
                     }
                 }
             }
@@ -197,6 +227,7 @@ pub fn scan_anticheat_drivers_and_processes(exe_path_hint: Option<&str>) -> Anti
         let psapi_w: Vec<u16> = "psapi.dll\0".encode_utf16().collect();
         if let Ok(psapi) = LoadLibraryW(PCWSTR(psapi_w.as_ptr())) {
             if !psapi.is_invalid() {
+                let _psapi_guard = LoadedLibGuard(psapi);
                 if let (Some(enum_p), Some(name_p)) = (
                     GetProcAddress(psapi, PCSTR(c"EnumDeviceDrivers".as_ptr().cast())),
                     GetProcAddress(psapi, PCSTR(c"GetDeviceDriverBaseNameW".as_ptr().cast())),
@@ -344,23 +375,33 @@ pub fn speed_scale_to_100ns_units(scale: f64) -> (f64, u32) {
 }
 
 #[cfg(windows)]
-fn apply_nt_timer_resolution(desired_100ns: u32, enable: bool) -> Result<f64, String> {
+fn nt_set_timer_resolution_fn() -> Option<unsafe extern "system" fn(u32, u8, *mut u32) -> i32> {
     use windows::core::{PCSTR, PCWSTR};
     use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
     type NtSetTimerResFn = unsafe extern "system" fn(u32, u8, *mut u32) -> i32;
-    let ntdll_w: Vec<u16> = "ntdll.dll\0".encode_utf16().collect();
-    let mut actual = desired_100ns;
-    unsafe {
-        let h = LoadLibraryW(PCWSTR(ntdll_w.as_ptr()))
-            .map_err(|e| format!("Failed loading ntdll.dll: {e}"))?;
-        let p = GetProcAddress(h, PCSTR(c"NtSetTimerResolution".as_ptr().cast()))
-            .ok_or_else(|| "NtSetTimerResolution symbol missing.".to_string())?;
-        let func: NtSetTimerResFn = std::mem::transmute(p);
-        let status = func(desired_100ns, if enable { 1 } else { 0 }, &mut actual);
-        if status < 0 {
-            return Err(format!("NtSetTimerResolution NTSTATUS 0x{:08X}", status as u32));
+    static FN: OnceLock<Option<NtSetTimerResFn>> = OnceLock::new();
+    *FN.get_or_init(|| unsafe {
+        let ntdll_w: Vec<u16> = "ntdll.dll\0".encode_utf16().collect();
+        let h = LoadLibraryW(PCWSTR(ntdll_w.as_ptr())).ok()?;
+        if h.is_invalid() {
+            return None;
         }
+        let guard = LoadedLibGuard(h);
+        let p = GetProcAddress(h, PCSTR(c"NtSetTimerResolution".as_ptr().cast()))?;
+        std::mem::forget(guard);
+        Some(std::mem::transmute::<unsafe extern "system" fn() -> isize, NtSetTimerResFn>(p))
+    })
+}
+
+#[cfg(windows)]
+fn apply_nt_timer_resolution(desired_100ns: u32, enable: bool) -> Result<f64, String> {
+    let func = nt_set_timer_resolution_fn()
+        .ok_or_else(|| "NtSetTimerResolution symbol missing.".to_string())?;
+    let mut actual = desired_100ns;
+    let status = unsafe { func(desired_100ns, if enable { 1 } else { 0 }, &mut actual) };
+    if status < 0 {
+        return Err(format!("NtSetTimerResolution NTSTATUS 0x{:08X}", status as u32));
     }
     Ok((actual as f64) / 10_000.0)
 }
@@ -368,6 +409,87 @@ fn apply_nt_timer_resolution(desired_100ns: u32, enable: bool) -> Result<f64, St
 #[cfg(not(windows))]
 fn apply_nt_timer_resolution(desired_100ns: u32, _enable: bool) -> Result<f64, String> {
     Ok((desired_100ns as f64) / 10_000.0)
+}
+
+#[cfg(windows)]
+#[repr(C)]
+#[allow(non_snake_case)]
+struct MemoryBasicInformation {
+    BaseAddress: *const std::ffi::c_void,
+    AllocationBase: *const std::ffi::c_void,
+    AllocationProtect: u32,
+    PartitionId: u16,
+    RegionSize: usize,
+    State: u32,
+    Protect: u32,
+    Type: u32,
+}
+
+#[cfg(windows)]
+struct Kernel32MemoryApi {
+    virtual_query_ex: unsafe extern "system" fn(
+        *mut std::ffi::c_void,
+        *const std::ffi::c_void,
+        *mut MemoryBasicInformation,
+        usize,
+    ) -> usize,
+    read_process_memory: unsafe extern "system" fn(
+        *mut std::ffi::c_void,
+        *const std::ffi::c_void,
+        *mut std::ffi::c_void,
+        usize,
+        *mut usize,
+    ) -> i32,
+    write_process_memory: unsafe extern "system" fn(
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+        *const std::ffi::c_void,
+        usize,
+        *mut usize,
+    ) -> i32,
+}
+
+#[cfg(windows)]
+fn kernel32_memory_api() -> Option<&'static Kernel32MemoryApi> {
+    use std::ffi::c_void;
+    use windows::core::{PCSTR, PCWSTR};
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+
+    type VirtualQueryExFn =
+        unsafe extern "system" fn(*mut c_void, *const c_void, *mut MemoryBasicInformation, usize) -> usize;
+    type ReadProcessMemoryFn =
+        unsafe extern "system" fn(*mut c_void, *const c_void, *mut c_void, usize, *mut usize) -> i32;
+    type WriteProcessMemoryFn =
+        unsafe extern "system" fn(*mut c_void, *mut c_void, *const c_void, usize, *mut usize) -> i32;
+
+    static API: OnceLock<Option<Kernel32MemoryApi>> = OnceLock::new();
+    API.get_or_init(|| unsafe {
+        let k32_w: Vec<u16> = "kernel32.dll\0".encode_utf16().collect();
+        let k32 = LoadLibraryW(PCWSTR(k32_w.as_ptr())).ok()?;
+        if k32.is_invalid() {
+            return None;
+        }
+        let guard = LoadedLibGuard(k32);
+        let vqx_p = GetProcAddress(k32, PCSTR(c"VirtualQueryEx".as_ptr().cast()))?;
+        let rpm_p = GetProcAddress(k32, PCSTR(c"ReadProcessMemory".as_ptr().cast()))?;
+        let wpm_p = GetProcAddress(k32, PCSTR(c"WriteProcessMemory".as_ptr().cast()))?;
+        std::mem::forget(guard);
+        Some(Kernel32MemoryApi {
+            virtual_query_ex: std::mem::transmute::<
+                unsafe extern "system" fn() -> isize,
+                VirtualQueryExFn,
+            >(vqx_p),
+            read_process_memory: std::mem::transmute::<
+                unsafe extern "system" fn() -> isize,
+                ReadProcessMemoryFn,
+            >(rpm_p),
+            write_process_memory: std::mem::transmute::<
+                unsafe extern "system" fn() -> isize,
+                WriteProcessMemoryFn,
+            >(wpm_p),
+        })
+    })
+    .as_ref()
 }
 
 #[cfg(windows)]
@@ -379,9 +501,6 @@ fn scan_or_refine_process_memory(
     prior: Option<Vec<usize>>,
 ) -> Result<(Vec<usize>, Vec<MemoryMatchPreview>), String> {
     use std::ffi::c_void;
-    use windows::core::{PCSTR, PCWSTR};
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 
     const MEM_COMMIT: u32 = 0x1000;
@@ -389,42 +508,17 @@ fn scan_or_refine_process_memory(
     const PAGE_EXECUTE_READWRITE: u32 = 0x40;
     const PAGE_GUARD: u32 = 0x100;
 
-    #[repr(C)]
-    #[allow(non_snake_case)]
-    struct MemoryBasicInformation {
-        BaseAddress: *const c_void,
-        AllocationBase: *const c_void,
-        AllocationProtect: u32,
-        PartitionId: u16,
-        RegionSize: usize,
-        State: u32,
-        Protect: u32,
-        Type: u32,
-    }
+    let api = kernel32_memory_api()
+        .ok_or_else(|| "VirtualQueryEx/ReadProcessMemory missing in kernel32.dll".to_string())?;
+    let vqx_fn = api.virtual_query_ex;
+    let rpm_fn = api.read_process_memory;
 
-    type VirtualQueryExFn =
-        unsafe extern "system" fn(*mut c_void, *const c_void, *mut MemoryBasicInformation, usize) -> usize;
-    type ReadProcessMemoryFn =
-        unsafe extern "system" fn(*mut c_void, *const c_void, *mut c_void, usize, *mut usize) -> i32;
+    let proc_handle = SafeProcessHandle(
+        unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) }
+            .map_err(|e| format!("Cannot attach to PID {pid} for read scan: {e}"))?,
+    );
 
-    let k32_w: Vec<u16> = "kernel32.dll\0".encode_utf16().collect();
-    let (vqx_fn, rpm_fn) = unsafe {
-        let k32 = LoadLibraryW(PCWSTR(k32_w.as_ptr()))
-            .map_err(|e| format!("Failed loading kernel32.dll: {e}"))?;
-        let vqx_p = GetProcAddress(k32, PCSTR(c"VirtualQueryEx".as_ptr().cast()))
-            .ok_or_else(|| "VirtualQueryEx missing".to_string())?;
-        let rpm_p = GetProcAddress(k32, PCSTR(c"ReadProcessMemory".as_ptr().cast()))
-            .ok_or_else(|| "ReadProcessMemory missing".to_string())?;
-        (
-            std::mem::transmute::<unsafe extern "system" fn() -> isize, VirtualQueryExFn>(vqx_p),
-            std::mem::transmute::<unsafe extern "system" fn() -> isize, ReadProcessMemoryFn>(rpm_p),
-        )
-    };
-
-    let proc_handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) }
-        .map_err(|e| format!("Cannot attach to PID {pid} for read scan: {e}"))?;
-
-    let raw_handle = proc_handle.0;
+    let raw_handle = proc_handle.0 .0;
     let mut matches_addrs = Vec::new();
     let mut chunk = vec![0u8; CHUNK_READ_BYTES];
 
@@ -515,9 +609,6 @@ fn scan_or_refine_process_memory(
         })
         .collect();
 
-    unsafe {
-        let _ = CloseHandle(proc_handle);
-    }
     Ok((matches_addrs, previews))
 }
 
@@ -536,47 +627,35 @@ fn scan_or_refine_process_memory(
 #[cfg(windows)]
 fn write_process_memory_bytes(pid: u32, addr: usize, payload: &[u8]) -> Result<(), String> {
     use std::ffi::c_void;
-    use windows::core::{PCSTR, PCWSTR};
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
     };
 
-    type WriteProcessMemoryFn =
-        unsafe extern "system" fn(*mut c_void, *mut c_void, *const c_void, usize, *mut usize) -> i32;
+    let api = kernel32_memory_api()
+        .ok_or_else(|| "WriteProcessMemory missing in kernel32.dll".to_string())?;
+    let wpm_fn = api.write_process_memory;
 
-    let k32_w: Vec<u16> = "kernel32.dll\0".encode_utf16().collect();
-    let wpm_fn = unsafe {
-        let k32 = LoadLibraryW(PCWSTR(k32_w.as_ptr()))
-            .map_err(|e| format!("Failed loading kernel32.dll: {e}"))?;
-        let p = GetProcAddress(k32, PCSTR(c"WriteProcessMemory".as_ptr().cast()))
-            .ok_or_else(|| "WriteProcessMemory missing".to_string())?;
-        std::mem::transmute::<unsafe extern "system" fn() -> isize, WriteProcessMemoryFn>(p)
-    };
-
-    let proc_handle = unsafe {
-        OpenProcess(
-            PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE,
-            false,
-            pid,
-        )
-    }
-    .map_err(|e| format!("Cannot open PID {pid} for write: {e}"))?;
+    let proc_handle = SafeProcessHandle(
+        unsafe {
+            OpenProcess(
+                PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE,
+                false,
+                pid,
+            )
+        }
+        .map_err(|e| format!("Cannot open PID {pid} for write: {e}"))?,
+    );
 
     let mut written = 0usize;
     let ok = unsafe {
         wpm_fn(
-            proc_handle.0,
+            proc_handle.0 .0,
             addr as *mut c_void,
             payload.as_ptr() as *const c_void,
             payload.len(),
             &mut written,
         )
     };
-    unsafe {
-        let _ = CloseHandle(proc_handle);
-    }
     if ok == 0 || written != payload.len() {
         return Err(format!(
             "WriteProcessMemory at 0x{addr:X} failed (wrote {written}/{} bytes).",

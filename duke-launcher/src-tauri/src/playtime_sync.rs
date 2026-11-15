@@ -1081,7 +1081,7 @@ pub async fn run_external_playtime_sync_once(
     let snapshot_lib = crate::load_library_lightweight(app).unwrap_or_default();
     let retro_roots = infer_retroarch_roots_from_library(&snapshot_lib);
 
-    let index = tokio::task::spawn_blocking(move || collect_all_external_playtimes(&retro_roots))
+    let mut index = tokio::task::spawn_blocking(move || collect_all_external_playtimes(&retro_roots))
         .await
         .map_err(|e| format!("Playtime sync task failed: {e}"))?;
 
@@ -1091,19 +1091,33 @@ pub async fn run_external_playtime_sync_once(
     }
 
     let updated_games = apply_external_playtimes_non_destructive(&mut library, &index);
+    let total_imported_secs: u64 = library.iter().map(|g| g.imported_playtime_secs).sum();
+    let total_duke_secs: u64 = library.iter().map(|g| g.duke_playtime_secs).sum();
+
     if updated_games > 0 {
         crate::save_library_to_disk(app, &library)?;
         let _ = app.emit("library-updated", &library);
+        let _ = app.emit(
+            "playtime-synced",
+            serde_json::json!({
+                "updatedGames": updated_games,
+                "totalImportedSecs": total_imported_secs,
+                "totalDukeSecs": total_duke_secs,
+            }),
+        );
     }
 
-    let total_imported_secs: u64 = library.iter().map(|g| g.imported_playtime_secs).sum();
-    let total_duke_secs: u64 = library.iter().map(|g| g.duke_playtime_secs).sum();
+    let sources_scanned = std::mem::take(&mut index.sources_scanned);
+    drop(index);
+    drop(library);
+    drop(snapshot_lib);
+    duke_core::win32_ffi::trim_current_working_set();
 
     Ok(PlaytimeSyncSummary {
         updated_games,
         total_imported_secs,
         total_duke_secs,
-        sources_scanned: index.sources_scanned,
+        sources_scanned,
     })
 }
 

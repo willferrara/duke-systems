@@ -348,6 +348,96 @@ fn resolve_workspace_launcher_dirs() -> Option<(PathBuf, PathBuf)> {
     None
 }
 
+fn case_controller_disconnect_and_mode_exit_state_hygiene() -> Result<String, String> {
+    let mut dirty = crate::couch_mode::UniversalPadState {
+        connected: true,
+        slot: 2,
+        lx: 0.78,
+        ly: -0.64,
+        rx: -0.45,
+        ry: 0.35,
+        lt: 0.92,
+        rt: 0.88,
+        a: true,
+        b: true,
+        x: true,
+        y: true,
+        lb: true,
+        rb: true,
+        back: true,
+        start: true,
+        ls: true,
+        rs: true,
+        up: true,
+        down: true,
+        left: true,
+        right: true,
+        guide: true,
+        buttons_mask: 0xFFFF,
+        controller_kind: "xbox".to_string(),
+        device_name: "Mock Pad".to_string(),
+        vid_pid: "045e:02ea".to_string(),
+        raw_axes: [0.5, -0.5, 0.25, -0.25],
+        calibrated_axes: [0.4, -0.4, 0.2, -0.2],
+        ..Default::default()
+    };
+    dirty.zero_inputs();
+
+    if dirty.connected
+        || dirty.slot != 0
+        || dirty.lx != 0.0
+        || dirty.ly != 0.0
+        || dirty.rx != 0.0
+        || dirty.ry != 0.0
+        || dirty.lt != 0.0
+        || dirty.rt != 0.0
+        || dirty.buttons_mask != 0
+        || dirty.a
+        || dirty.b
+        || dirty.x
+        || dirty.y
+        || dirty.lb
+        || dirty.rb
+        || dirty.back
+        || dirty.start
+        || dirty.ls
+        || dirty.rs
+        || dirty.up
+        || dirty.down
+        || dirty.left
+        || dirty.right
+        || dirty.guide
+        || dirty.controller_kind != "none"
+        || dirty.device_name != "None"
+        || !dirty.vid_pid.is_empty()
+    {
+        return Err("UniversalPadState::zero_inputs left non-zero controller state.".to_string());
+    }
+
+    let snap = crate::couch_mode::UniversalPadState::disconnected_snapshot(0.14, true);
+    if snap.connected
+        || snap.buttons_mask != 0
+        || snap.lx != 0.0
+        || snap.ly != 0.0
+        || snap.controller_kind != "none"
+    {
+        return Err("UniversalPadState::disconnected_snapshot did not return zeroed state.".to_string());
+    }
+
+    for _ in 0..25 {
+        crate::couch_mode::clear_transient_couch_state();
+        let status = crate::couch_mode::current_couch_status(false);
+        if status.radial_visible
+            || status.virtual_keyboard_visible
+            || status.radial_selected_slot.is_some()
+        {
+            return Err("Transient Duke Deck state leaked after clear_transient_couch_state().".to_string());
+        }
+    }
+
+    Ok("Controller disconnect zero-inputs, disconnected snapshot, and 25x Duke Deck transient state resets verified.".to_string())
+}
+
 pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
     let Some((launcher_dir, tauri_dir)) = resolve_workspace_launcher_dirs() else {
         return Ok("Source tree not adjacent to binary; skipped static UI parity scan.".to_string());
@@ -366,8 +456,8 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
         .map_err(|e| format!("Failed reading tauri.conf.json: {e}"))?;
 
     // 1. Version & Window Safety Checks
-    if !index_html.contains("2.1.0") || !tauri_conf.contains("\"2.1.0\"") {
-        return Err("Expected v2.1.0 marker missing in index.html or tauri.conf.json.".to_string());
+    if !index_html.contains("2.1.1") || !tauri_conf.contains("\"2.1.1\"") {
+        return Err("Expected v2.1.1 marker missing in index.html or tauri.conf.json.".to_string());
     }
 
     let default_sites = crate::sites::default_search_sites();
@@ -492,6 +582,19 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
         }
     }
 
+    for required_hook in [
+        "clearControllerFocus",
+        "gamepaddisconnected",
+        "toggleCouchMode",
+        "closeTopmostUiLayer",
+    ] {
+        if !main_js.contains(required_hook) {
+            return Err(format!(
+                "main.js missing required controller/state hygiene symbol `{required_hook}`"
+            ));
+        }
+    }
+
     Ok(format!(
         "Verified 6 views, 10 modals, 10 themes, {} SVG symbols, {} DOM IDs checked, {} IPC commands registered.",
         symbol_ids.len(),
@@ -548,6 +651,10 @@ pub fn run_chaos_stress_harness_sync(check_ui_contract: bool) -> StressHarnessRe
         run_case(
             "wasm_sandbox_and_fse_safety_guard",
             case_wasm_sandbox_and_fse_safety,
+        ),
+        run_case(
+            "controller_disconnect_and_mode_exit_state_hygiene",
+            case_controller_disconnect_and_mode_exit_state_hygiene,
         ),
     ];
 
@@ -621,6 +728,6 @@ mod tests {
             );
         }
         assert_eq!(report.failed_cases, 0);
-        assert_eq!(report.passed_cases, 9);
+        assert_eq!(report.passed_cases, 10);
     }
 }

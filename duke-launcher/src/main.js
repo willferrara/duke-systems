@@ -435,6 +435,17 @@ const state = {
   vkbTargetInput: null,
   vkbShift: false,
   gamepadPollingRateFn: null,
+  gamepadClearFocusFn: null,
+  gamepadResetRepeatsFn: null,
+  gamepadStopPollingFn: null,
+  controllerConnected: false,
+  hasActiveGamepadFocus: false,
+  pendingAbortControllers: new Map(),
+  libraryPatchTimer: null,
+  libraryPatchRaf: null,
+  pendingLibraryPayload: null,
+  pendingLibraryStructural: false,
+  pendingChangedGameIds: new Set(),
   sgdbResults: null,
   sgdbSelection: {
     coverUrl: null,
@@ -801,9 +812,248 @@ function renderThemes() {
   ).join("");
 }
 
+function beginScopedRequest(scope) {
+  const key = String(scope || "global");
+  const prev = state.pendingAbortControllers.get(key);
+  if (prev) {
+    try {
+      prev.abort();
+    } catch {
+      // Ignore AbortController cleanup errors
+    }
+  }
+  const ctrl = new AbortController();
+  state.pendingAbortControllers.set(key, ctrl);
+  return ctrl.signal;
+}
+
+function abortScopedRequests(scope) {
+  const key = String(scope || "global");
+  const prev = state.pendingAbortControllers.get(key);
+  if (prev) {
+    try {
+      prev.abort();
+    } catch {
+      // Ignore AbortController cleanup errors
+    }
+    state.pendingAbortControllers.delete(key);
+  }
+}
+
+function abortAllScopedRequests() {
+  for (const ctrl of state.pendingAbortControllers.values()) {
+    try {
+      ctrl.abort();
+    } catch {
+      // Ignore AbortController cleanup errors
+    }
+  }
+  state.pendingAbortControllers.clear();
+}
+
+function clearControllerFocus(options = {}) {
+  const disconnect = Boolean(options?.disconnect ?? !state.controllerConnected);
+  const blurNonText = options?.blurNonText !== false;
+  const resetRepeats = options?.resetRepeats !== false;
+
+  state.hasActiveGamepadFocus = false;
+  document.body?.setAttribute("data-gamepad-active", "false");
+
+  document.querySelectorAll(".gamepad-focus").forEach((node) => {
+    node.classList.remove("gamepad-focus");
+  });
+
+  state.gamepadClearFocusFn?.();
+  if (resetRepeats) {
+    state.gamepadResetRepeatsFn?.();
+  }
+
+  if (blurNonText) {
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== document.documentElement) {
+      const tag = String(active.tagName || "").toUpperCase();
+      const inputType = String(active.type || "text").toLowerCase();
+      const isTextInput =
+        tag === "TEXTAREA" ||
+        Boolean(active.isContentEditable) ||
+        (tag === "INPUT" &&
+          !["button", "submit", "reset", "checkbox", "radio", "range"].includes(inputType));
+      if (!isTextInput) {
+        active.blur?.();
+      }
+    }
+  }
+
+  if (disconnect) {
+    state.controllerConnected = false;
+    const badge = el("titlebar-controller-badge");
+    if (badge) badge.classList.add("hidden");
+    const ind = el("couch-input-indicator");
+    if (ind) {
+      ind.classList.remove("connected");
+      ind.title = "No Controller Connected";
+    }
+    const dotL = el("couch-stick-dot-l");
+    const dotR = el("couch-stick-dot-r");
+    if (dotL) dotL.style.transform = "translate(-50%, -50%)";
+    if (dotR) dotR.style.transform = "translate(-50%, -50%)";
+    const devLbl = el("cal-device-label");
+    if (devLbl) devLbl.textContent = "No active controller";
+    for (let i = 0; i < 4; i++) {
+      const barEl = el(`cal-axis-bar-${i}`);
+      const valEl = el(`cal-axis-val-${i}`);
+      if (barEl) barEl.style.width = "50.0%";
+      if (valEl) valEl.textContent = "0.00";
+    }
+    updateControllerGlyphLegend("none");
+  }
+}
+
+function closeCouchCalibratorPopover() {
+  const pop = el("couch-calibrator-popover");
+  if (!pop || pop.classList.contains("hidden")) return;
+  pop.classList.add("hidden");
+  clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
+}
+
+function closeCatalogDetailModal() {
+  state.catalog.modalRequestId += 1;
+  abortScopedRequests("catalog-modal");
+  const modal = el("catalog-detail-modal");
+  if (!modal || modal.classList.contains("hidden")) return;
+  modal.classList.add("hidden");
+  clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
+}
+
+function closeDetailsModal() {
+  abortScopedRequests("cover-search");
+  const modal = el("details-modal");
+  if (!modal || modal.classList.contains("hidden")) return;
+  modal.classList.add("hidden");
+  clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
+}
+
+function closeRestoreSaveModal() {
+  abortScopedRequests("restore-save");
+  const modal = el("restore-save-modal");
+  if (!modal || modal.classList.contains("hidden")) return;
+  modal.classList.add("hidden");
+  clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
+}
+
+function closeSnapshotsModal() {
+  abortScopedRequests("snapshots-modal");
+  const modal = el("snapshots-modal");
+  if (!modal || modal.classList.contains("hidden")) return;
+  modal.classList.add("hidden");
+  clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
+}
+
+function closePreflightModal() {
+  abortScopedRequests("preflight-modal");
+  const modal = el("preflight-modal");
+  if (!modal || modal.classList.contains("hidden")) return;
+  modal.classList.add("hidden");
+  clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
+}
+
+function closeTopmostUiLayer() {
+  const isVisible = (id) => {
+    const node = el(id);
+    return Boolean(node && !node.classList.contains("hidden"));
+  };
+  if (isVisible("virtual-keyboard-overlay")) {
+    closeVirtualKeyboard(false);
+    return true;
+  }
+  if (isVisible("radial-hotbar-overlay")) {
+    closeRadialHotbar();
+    return true;
+  }
+  if (isVisible("couch-calibrator-popover")) {
+    closeCouchCalibratorPopover();
+    return true;
+  }
+  if (isVisible("duke-pilot-popover")) {
+    closeDukePilotPopover();
+    return true;
+  }
+  if (isVisible("emu-install-prompt-modal")) {
+    closeEmulatorInstallModal();
+    return true;
+  }
+  if (isVisible("clean-uninstall-modal")) {
+    closeCleanUninstallModal();
+    return true;
+  }
+  if (isVisible("coop-stream-modal")) {
+    closeCoopStreamModal();
+    return true;
+  }
+  if (isVisible("snapshots-modal")) {
+    closeSnapshotsModal();
+    return true;
+  }
+  if (isVisible("preflight-modal")) {
+    closePreflightModal();
+    return true;
+  }
+  if (isVisible("restore-save-modal")) {
+    closeRestoreSaveModal();
+    return true;
+  }
+  if (isVisible("add-site-modal")) {
+    closeAddSiteModal();
+    return true;
+  }
+  if (isVisible("bulk-import-modal")) {
+    closeBulkImportModal();
+    return true;
+  }
+  if (isVisible("catalog-detail-modal")) {
+    closeCatalogDetailModal();
+    return true;
+  }
+  if (isVisible("details-modal")) {
+    closeDetailsModal();
+    return true;
+  }
+  if (isVisible("friends-drawer")) {
+    toggleFriendsDrawer(false);
+    return true;
+  }
+  if (isVisible("catalog-genres-drawer-body")) {
+    el("catalog-genres-drawer-body")?.classList.add("hidden");
+    state.catalog.genresDrawerOpen = false;
+    return true;
+  }
+  if (state.selectedDetailId) {
+    state.selectedDetailId = null;
+    abortScopedRequests("detail");
+    switchTab("library", false);
+    renderSidebarGameList();
+    renderLibraryGrid();
+    return true;
+  }
+  return false;
+}
+
 function switchTab(tab, keepDetail = false) {
-  if (!keepDetail) state.selectedDetailId = null;
+  if (!keepDetail) {
+    state.selectedDetailId = null;
+    abortScopedRequests("detail");
+  }
+  if (tab !== "catalog") {
+    abortScopedRequests("catalog");
+  }
   state.activeTab = tab;
+  clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: false, resetRepeats: true });
+  closeDukePilotPopover();
+  closeCouchCalibratorPopover();
+  if (el("catalog-genres-drawer-body")) {
+    el("catalog-genres-drawer-body").classList.add("hidden");
+    state.catalog.genresDrawerOpen = false;
+  }
 
   document.querySelectorAll(".sidebar-nav .nav-item").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.tab === tab);
@@ -1190,6 +1440,133 @@ function renderLibraryGrid() {
   grid.replaceChildren(frag);
 }
 
+function patchChangedLibraryCards(changedIds = null) {
+  const grid = el("library-grid");
+  if (!grid || state.activeTab !== "library" || state.selectedDetailId) return false;
+  const games = getFilteredSortedGames();
+  const empty = el("library-empty");
+  if (empty) empty.classList.toggle("hidden", state.library.length > 0);
+
+  const cards = Array.from(grid.querySelectorAll(".game-card[data-game-id]"));
+  if (cards.length !== games.length || games.length === 0) {
+    return false;
+  }
+  const byId = new Map();
+  for (let i = 0; i < games.length; i++) {
+    const g = games[i];
+    if (!g || cards[i]?.dataset?.gameId !== g.id) {
+      return false;
+    }
+    byId.set(g.id, g);
+  }
+
+  const targetIds = changedIds && changedIds.size > 0 ? changedIds : null;
+  for (const card of cards) {
+    const game = byId.get(card.dataset.gameId);
+    if (!game) continue;
+    if (targetIds && !targetIds.has(game.id)) continue;
+
+    const favBtn = card.querySelector('.card-fav-btn[data-action="fav"]');
+    if (favBtn) favBtn.classList.toggle("is-fav", Boolean(game.isFavorite));
+
+    const titleEl = card.querySelector(".game-card-title");
+    if (titleEl && titleEl.textContent !== game.title) {
+      titleEl.textContent = game.title;
+      titleEl.title = game.title;
+    }
+
+    const metaEl = card.querySelector(".game-card-meta");
+    if (metaEl) {
+      const spans = metaEl.querySelectorAll("span");
+      const nextPlaytime = formatPlaytime(getTotalPlaytimeSecs(game));
+      const nextLast = formatLastPlayed(game.lastPlayedTs || game.lastPlayed);
+      if (spans[0] && spans[0].textContent !== nextPlaytime) spans[0].textContent = nextPlaytime;
+      if (spans[1] && spans[1].textContent !== nextLast) spans[1].textContent = nextLast;
+    }
+
+    const mediaEl = card.querySelector(".game-card-media");
+    const nextCover = resolveMediaUrl(game.coverUrl) || resolveMediaUrl(game.coverDataUrl);
+    if (mediaEl && nextCover) {
+      const curImg = mediaEl.querySelector("img.game-card-img");
+      if (!curImg || curImg.getAttribute("src") !== nextCover) {
+        const nextImg = document.createElement("img");
+        nextImg.src = nextCover;
+        nextImg.alt = game.title;
+        nextImg.className = "game-card-img";
+        nextImg.loading = "lazy";
+        nextImg.decoding = "async";
+        nextImg.addEventListener(
+          "error",
+          () => {
+            nextImg.replaceWith(createProceduralCoverCardEl(game.title, resolveGameSourceLabel(game), game.source || ""));
+          },
+          { once: true }
+        );
+        const oldMedia = curImg || mediaEl.querySelector(".procedural-cover-card");
+        if (oldMedia) oldMedia.replaceWith(nextImg);
+        else mediaEl.prepend(nextImg);
+      }
+    }
+  }
+  return true;
+}
+
+function scheduleLibraryCoalescedFlush() {
+  if (state.libraryPatchTimer !== null) {
+    clearTimeout(state.libraryPatchTimer);
+  }
+  state.libraryPatchTimer = setTimeout(() => {
+    state.libraryPatchTimer = null;
+    if (state.libraryPatchRaf !== null) {
+      cancelAnimationFrame(state.libraryPatchRaf);
+    }
+    state.libraryPatchRaf = requestAnimationFrame(() => {
+      state.libraryPatchRaf = null;
+      const nextLib = state.pendingLibraryPayload;
+      const structural = Boolean(state.pendingLibraryStructural);
+      const changedSet = new Set(state.pendingChangedGameIds);
+      state.pendingLibraryPayload = null;
+      state.pendingLibraryStructural = false;
+      state.pendingChangedGameIds.clear();
+
+      if (Array.isArray(nextLib)) {
+        const activeIds = new Set(nextLib.map((g) => g.id));
+        for (const cachedId of Object.keys(state.sidebarIcons)) {
+          if (!activeIds.has(cachedId)) delete state.sidebarIcons[cachedId];
+        }
+        for (const attemptedId of Array.from(state.sidebarIconsAttempted)) {
+          if (!activeIds.has(attemptedId)) state.sidebarIconsAttempted.delete(attemptedId);
+        }
+        state.library = nextLib;
+      }
+
+      if (structural) {
+        renderLibraryGrid();
+        renderSidebarGameList();
+      } else if (changedSet.size > 0) {
+        if (!patchChangedLibraryCards(changedSet)) {
+          renderLibraryGrid();
+        }
+        renderSidebarGameList();
+      }
+
+      if (state.selectedDetailId && (structural || changedSet.has(state.selectedDetailId))) {
+        const selGame = state.library.find((g) => g.id === state.selectedDetailId);
+        if (selGame) {
+          if (el("detail-playtime")) el("detail-playtime").textContent = formatPlaytime(getTotalPlaytimeSecs(selGame));
+          if (el("detail-last-played")) {
+            el("detail-last-played").textContent = formatLastPlayed(selGame.lastPlayedTs || selGame.lastPlayed);
+          }
+        }
+      }
+      if (state.catalog.loaded && state.activeTab === "catalog" && structural) {
+        renderCatalogView(true);
+      }
+      updateSidebarTelemetry();
+    });
+  }, 150);
+}
+
 function buildHeroCandidateList(appId, fallbackUrl) {
   const candidates = [];
   const validId = Number(appId || 0);
@@ -1343,6 +1720,7 @@ async function openGameDetail(gameId) {
 
   state.activeDetailRequestId += 1;
   const requestId = state.activeDetailRequestId;
+  const detailSignal = beginScopedRequest("detail");
   state.selectedDetailId = game.id;
   switchTab("library", true);
   renderSidebarGameList();
@@ -1441,7 +1819,9 @@ async function openGameDetail(gameId) {
   }
 
   const isStillCurrent = () =>
-    requestId === state.activeDetailRequestId && state.selectedDetailId === game.id;
+    !detailSignal.aborted &&
+    requestId === state.activeDetailRequestId &&
+    state.selectedDetailId === game.id;
 
   if (isRetroGame && (!initialAppId || Number(initialAppId) >= 2000000000)) {
     try {
@@ -3416,6 +3796,9 @@ function toggleFriendsDrawer(forceOpen = null) {
         refreshFriendsPanel(true);
       }
     }, 20000);
+  } else {
+    abortScopedRequests("friends-drawer");
+    clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
   }
 }
 
@@ -3588,6 +3971,8 @@ function closeCoopStreamModal() {
   state.coopModalOpen = false;
   el("coop-stream-modal")?.classList.add("hidden");
   stopCoopP2InputPump();
+  abortScopedRequests("coop-modal");
+  clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
 }
 
 function syncSettingsUiFromBackend(settings) {
@@ -4818,6 +5203,7 @@ function openAddSiteModal() {
 
 function closeAddSiteModal() {
   el("add-site-modal")?.classList.add("hidden");
+  clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
 }
 
 function openBulkImportModal() {
@@ -4830,6 +5216,7 @@ function openBulkImportModal() {
 
 function closeBulkImportModal() {
   el("bulk-import-modal")?.classList.add("hidden");
+  clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
 }
 
 function renderSourcesFeedList() {
@@ -5595,6 +5982,7 @@ async function openCatalogModal(appId) {
 
   state.catalog.modalRequestId += 1;
   const modalReqId = state.catalog.modalRequestId;
+  const catalogSignal = beginScopedRequest("catalog-modal");
   state.catalog.modalGame = entry;
 
   const modalHeroImg = el("catalog-modal-hero-img");
@@ -5610,6 +5998,7 @@ async function openCatalogModal(appId) {
   el("catalog-detail-modal")?.classList.remove("hidden");
 
   const isStillModalCurrent = () =>
+    !catalogSignal.aborted &&
     modalReqId === state.catalog.modalRequestId &&
     !el("catalog-detail-modal")?.classList.contains("hidden");
 
@@ -6280,6 +6669,7 @@ function openEmulatorInstallModal({ game, consoleSlug, consoleName, emuDisplayNa
 function closeEmulatorInstallModal() {
   el("emu-install-prompt-modal")?.classList.add("hidden");
   pendingEmuInstallPrompt = null;
+  clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
 }
 
 async function launchGameDirectly(game) {
@@ -6495,6 +6885,12 @@ function updateControllerGlyphLegend(controllerKind = state.controllerKind) {
   if (el("glyph-btn-rb")) el("glyph-btn-rb").textContent = glyphs.rb;
 }
 
+function toggleCouchMode(forceEnabled = null, persist = true, controllerKind = null) {
+  const next = typeof forceEnabled === "boolean" ? forceEnabled : !state.couchMode;
+  applyCouchMode(next, persist, controllerKind);
+  return state.couchMode;
+}
+
 function applyCouchMode(enabled, persist = false, controllerKind = null) {
   state.couchMode = Boolean(enabled);
   if (controllerKind) {
@@ -6510,13 +6906,20 @@ function applyCouchMode(enabled, persist = false, controllerKind = null) {
     hintBar.classList.toggle("hidden", !state.couchMode);
   }
   if (!state.couchMode) {
+    closeRadialHotbar();
+    closeVirtualKeyboard(false);
     el("couch-calibrator-popover")?.classList.add("hidden");
+    clearControllerFocus({
+      disconnect: !state.controllerConnected,
+      blurNonText: true,
+      resetRepeats: true
+    });
   }
   const titleBtn = el("btn-titlebar-couch");
   if (titleBtn) {
     titleBtn.classList.toggle("active", state.couchMode);
   }
-  updateControllerGlyphLegend(state.controllerKind);
+  updateControllerGlyphLegend(state.couchMode || state.controllerConnected ? state.controllerKind : "none");
   state.gamepadPollingRateFn?.(state.couchMode || state.radialOpen);
 
   try {
@@ -6675,6 +7078,7 @@ function pilotIconName(raw) {
 function closeDukePilotPopover() {
   el("duke-pilot-popover")?.classList.add("hidden");
   state.pilotEverythingIdx = -1;
+  clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: false, resetRepeats: true });
 }
 
 async function hydrateEverythingSaveCache() {
@@ -7400,9 +7804,13 @@ function openRadialHotbar(slots = null) {
 }
 
 function closeRadialHotbar() {
+  const wasOpen = Boolean(state.radialOpen) || !el("radial-hotbar-overlay")?.classList.contains("hidden");
   state.radialOpen = false;
   el("radial-hotbar-overlay")?.classList.add("hidden");
-  state.gamepadPollingRateFn?.(state.couchMode);
+  if (wasOpen) {
+    clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
+    state.gamepadPollingRateFn?.(state.couchMode);
+  }
 }
 
 async function handleRadialActionDispatch(action, slotId = null) {
@@ -7498,13 +7906,18 @@ function openVirtualKeyboard(targetEl = null) {
 }
 
 function closeVirtualKeyboard(applyText = false) {
+  const overlay = el("virtual-keyboard-overlay");
+  const wasOpen = overlay && !overlay.classList.contains("hidden");
   const preview = el("vkb-preview");
   if (applyText && state.vkbTargetInput && preview) {
     state.vkbTargetInput.value = preview.value;
     state.vkbTargetInput.dispatchEvent(new Event("input", { bubbles: true }));
     state.vkbTargetInput.focus();
   }
-  el("virtual-keyboard-overlay")?.classList.add("hidden");
+  overlay?.classList.add("hidden");
+  if (wasOpen && !applyText) {
+    clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
+  }
 }
 
 async function readSystemClipboardText() {
@@ -7837,7 +8250,7 @@ function wireEvents() {
   });
 
   el("btn-titlebar-couch")?.addEventListener("click", () => {
-    applyCouchMode(!state.couchMode, true);
+    toggleCouchMode(!state.couchMode, true);
     showToast(state.couchMode ? "Duke Deck 10-Foot Mode activated." : "Returned to Desktop Mode.", "info", 2200);
   });
 
@@ -7851,7 +8264,7 @@ function wireEvents() {
     }
   });
   el("btn-cal-close")?.addEventListener("click", () => {
-    el("couch-calibrator-popover")?.classList.add("hidden");
+    closeCouchCalibratorPopover();
   });
   el("cal-deadzone-slider")?.addEventListener("input", (e) => {
     const pct = Number(e.target?.value || 14);
@@ -7879,7 +8292,7 @@ function wireEvents() {
   });
   el("btn-couch-radial")?.addEventListener("click", () => openRadialHotbar());
   el("btn-couch-vkb")?.addEventListener("click", () => openVirtualKeyboard(el("search-input")));
-  el("btn-couch-exit")?.addEventListener("click", () => applyCouchMode(false, true));
+  el("btn-couch-exit")?.addEventListener("click", () => toggleCouchMode(false, true));
   el("btn-radial-close")?.addEventListener("click", () => closeRadialHotbar());
   el("radial-slots-ring")?.addEventListener("click", (e) => {
     const btn = e.target.closest(".radial-slot-btn[data-radial-action]");
@@ -7995,6 +8408,66 @@ function wireEvents() {
   });
   window.addEventListener("blur", () => {
     middleZoomHeld = false;
+    state.coopKeysDown?.clear();
+    clearControllerFocus({
+      disconnect: !state.controllerConnected,
+      blurNonText: true,
+      resetRepeats: true
+    });
+  });
+  window.addEventListener("gamepaddisconnected", () => {
+    clearControllerFocus({
+      disconnect: true,
+      blurNonText: true,
+      resetRepeats: true
+    });
+    state.gamepadPollingRateFn?.();
+  });
+  const handleMousePointerReturn = (blurActive) => {
+    if (!state.hasActiveGamepadFocus) return;
+    clearControllerFocus({
+      disconnect: !state.controllerConnected,
+      blurNonText: blurActive,
+      resetRepeats: true
+    });
+  };
+  document.addEventListener("mousemove", () => handleMousePointerReturn(true), { passive: true });
+  document.addEventListener("mousedown", () => handleMousePointerReturn(false), { passive: true });
+  window.addEventListener("keydown", (e) => {
+    if (document.body?.classList?.contains("overlay-hud-mode")) return;
+    if (e.key === "Escape" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      if (closeTopmostUiLayer()) {
+        e.preventDefault();
+      }
+    }
+  });
+  window.addEventListener("beforeunload", () => {
+    if (state.friendsPollTimer !== null) {
+      clearInterval(state.friendsPollTimer);
+      state.friendsPollTimer = null;
+    }
+    if (state.coopInputTimer !== null) {
+      clearInterval(state.coopInputTimer);
+      state.coopInputTimer = null;
+    }
+    if (state.clipboardFocusTimer !== null) {
+      clearInterval(state.clipboardFocusTimer);
+      state.clipboardFocusTimer = null;
+    }
+    if (state.pilotDebounceId !== null) {
+      clearTimeout(state.pilotDebounceId);
+      state.pilotDebounceId = null;
+    }
+    if (state.libraryPatchTimer !== null) {
+      clearTimeout(state.libraryPatchTimer);
+      state.libraryPatchTimer = null;
+    }
+    if (state.libraryPatchRaf !== null) {
+      cancelAnimationFrame(state.libraryPatchRaf);
+      state.libraryPatchRaf = null;
+    }
+    state.gamepadStopPollingFn?.();
+    abortAllScopedRequests();
   });
 
   el("search-input")?.addEventListener("input", (e) => {
@@ -8213,10 +8686,7 @@ function wireEvents() {
   });
 
   // Catalog Detail Modal Controls
-  const closeCatalogModal = () => {
-    state.catalog.modalRequestId += 1;
-    el("catalog-detail-modal")?.classList.add("hidden");
-  };
+  const closeCatalogModal = closeCatalogDetailModal;
   el("btn-close-catalog-modal")?.addEventListener("click", closeCatalogModal);
   el("catalog-detail-modal")?.addEventListener("click", (e) => {
     if (e.target === el("catalog-detail-modal")) closeCatalogModal();
@@ -10736,9 +11206,9 @@ async function openCleanUninstallModalForGame(game) {
   });
 
   // Details & Cover Modal Events (Steam CDN & SteamGridDB + Custom .ICO)
-  el("btn-close-details-modal")?.addEventListener("click", () => el("details-modal")?.classList.add("hidden"));
+  el("btn-close-details-modal")?.addEventListener("click", closeDetailsModal);
   el("details-modal")?.addEventListener("click", (e) => {
-    if (e.target === el("details-modal")) el("details-modal")?.classList.add("hidden");
+    if (e.target === el("details-modal")) closeDetailsModal();
   });
 
   el("cover-modal-tabs")?.addEventListener("click", (e) => {
@@ -10888,7 +11358,7 @@ async function openCleanUninstallModalForGame(game) {
     const game = state.library.find((g) => g.id === state.modalGameId);
     if (!btn || !game) return;
     const act = btn.dataset.modalAction;
-    el("details-modal")?.classList.add("hidden");
+    closeDetailsModal();
     if (act === "play") await launchGameById(game);
     else if (act === "folder") await invokeCommand("open_game_folder", { path: game.installDir || game.exePath });
     else if (act === "change-exe") await changeExeFlow(game);
@@ -10903,7 +11373,7 @@ async function openCleanUninstallModalForGame(game) {
   });
 
   // Restore Save Modal Events
-  const closeRestoreModal = () => el("restore-save-modal")?.classList.add("hidden");
+  const closeRestoreModal = closeRestoreSaveModal;
   el("btn-close-restore-modal")?.addEventListener("click", closeRestoreModal);
   el("btn-cancel-restore-save")?.addEventListener("click", closeRestoreModal);
   el("restore-save-modal")?.addEventListener("click", (e) => {
@@ -10935,7 +11405,6 @@ async function openCleanUninstallModalForGame(game) {
   });
 
   // Snapshots Modal Events (BLAKE3 + CreateHardLinkW CAS)
-  const closeSnapshotsModal = () => el("snapshots-modal")?.classList.add("hidden");
   el("btn-close-snapshots-modal")?.addEventListener("click", closeSnapshotsModal);
   el("btn-cancel-snapshots-modal")?.addEventListener("click", closeSnapshotsModal);
   el("snapshots-modal")?.addEventListener("click", (e) => {
@@ -11004,7 +11473,6 @@ async function openCleanUninstallModalForGame(game) {
   });
 
   // Pre-Flight PE32 / PE32+ DLL Auto-Healer Modal Events
-  const closePreflightModal = () => el("preflight-modal")?.classList.add("hidden");
   el("btn-close-preflight-modal")?.addEventListener("click", closePreflightModal);
   el("btn-cancel-preflight-modal")?.addEventListener("click", closePreflightModal);
   el("preflight-modal")?.addEventListener("click", (e) => {
@@ -12361,27 +12829,54 @@ function startGamepadControllerLoop() {
   let lastMoveTs = 0;
   const prev = { a: false, b: false, x: false, lb: false, rb: false };
 
+  const resetRepeats = () => {
+    prev.a = false;
+    prev.b = false;
+    prev.x = false;
+    prev.lb = false;
+    prev.rb = false;
+    lastMoveTs = 0;
+  };
+
   const setGamepadFocus = (nextEl) => {
     if (focusedEl && focusedEl !== nextEl) {
       focusedEl.classList.remove("gamepad-focus");
     }
     focusedEl = nextEl || null;
     if (focusedEl && document.contains(focusedEl)) {
+      state.hasActiveGamepadFocus = true;
+      document.body?.setAttribute("data-gamepad-active", "true");
       focusedEl.classList.add("gamepad-focus");
       focusedEl.focus?.({ preventScroll: true });
       focusedEl.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    } else {
+      focusedEl = null;
+      state.hasActiveGamepadFocus = false;
+      document.body?.setAttribute("data-gamepad-active", "false");
     }
   };
 
+  state.gamepadClearFocusFn = () => {
+    if (focusedEl) {
+      focusedEl.classList.remove("gamepad-focus");
+    }
+    focusedEl = null;
+    state.hasActiveGamepadFocus = false;
+  };
+  state.gamepadResetRepeatsFn = resetRepeats;
+
   const getActiveModal = () => {
     const modals = [
-      "details-modal",
-      "catalog-detail-modal",
-      "restore-save-modal",
+      "emu-install-prompt-modal",
+      "clean-uninstall-modal",
+      "coop-stream-modal",
       "snapshots-modal",
       "preflight-modal",
+      "restore-save-modal",
       "add-site-modal",
-      "bulk-import-modal"
+      "bulk-import-modal",
+      "catalog-detail-modal",
+      "details-modal"
     ];
     for (const id of modals) {
       const m = el(id);
@@ -12491,7 +12986,7 @@ function startGamepadControllerLoop() {
   const handleBack = () => {
     const modal = getActiveModal();
     if (modal) {
-      modal.classList.add("hidden");
+      closeTopmostUiLayer();
       setGamepadFocus(null);
       return;
     }
@@ -12499,7 +12994,7 @@ function startGamepadControllerLoop() {
       el("btn-detail-back")?.click();
       setTimeout(() => {
         const firstCard = document.querySelector("#library-grid .game-card");
-        if (firstCard) setGamepadFocus(firstCard);
+        if (firstCard && state.controllerConnected) setGamepadFocus(firstCard);
       }, 40);
       return;
     }
@@ -12509,7 +13004,7 @@ function startGamepadControllerLoop() {
 
   const cycleTab = (dir) => {
     const modal = getActiveModal();
-    if (modal) modal.classList.add("hidden");
+    if (modal) closeTopmostUiLayer();
     const curIdx = CYCLE_TABS.indexOf(state.activeTab);
     const nextIdx =
       curIdx < 0 ? 0 : (curIdx + dir + CYCLE_TABS.length) % CYCLE_TABS.length;
@@ -12646,11 +13141,16 @@ function startGamepadControllerLoop() {
       const nativePad = await pollGamepadState().catch(() => null);
       const pad = nativePad?.connected ? nativePad : pollBrowserGamepad() || nativePad;
       const connected = Boolean(pad?.connected);
+      state.controllerConnected = connected;
       if (connected !== lastConnected) {
         lastConnected = connected;
-        const badge = el("titlebar-controller-badge");
-        if (badge) badge.classList.toggle("hidden", !connected);
-        updateControllerGlyphLegend(connected ? pad?.controllerKind || "xbox" : "none");
+        if (connected) {
+          const badge = el("titlebar-controller-badge");
+          if (badge) badge.classList.remove("hidden");
+          updateControllerGlyphLegend(pad?.controllerKind || "xbox");
+        } else {
+          clearControllerFocus({ disconnect: true, blurNonText: true, resetRepeats: true });
+        }
         stopPolling();
         startPolling();
       } else if (connected && pad?.controllerKind && pad.controllerKind !== state.controllerKind) {
@@ -12725,7 +13225,7 @@ function startGamepadControllerLoop() {
       if (lb && !prev.lb) cycleTab(-1);
       if (rb && !prev.rb) cycleTab(1);
       if (x && !prev.x) {
-        applyCouchMode(!state.couchMode, true);
+        toggleCouchMode(!state.couchMode, true);
         showToast(state.couchMode ? "Duke Deck 10-Foot Mode enabled." : "Couch Mode disabled.", "info", 2000);
       }
 
@@ -12758,6 +13258,7 @@ function startGamepadControllerLoop() {
     }
   }
 
+  state.gamepadStopPollingFn = stopPolling;
   state.gamepadPollingRateFn = () => {
     stopPolling();
     startPolling();
@@ -12767,6 +13268,11 @@ function startGamepadControllerLoop() {
     if (document.visibilityState === "visible") {
       startPolling();
     } else {
+      clearControllerFocus({
+        disconnect: !state.controllerConnected,
+        blurNonText: false,
+        resetRepeats: true
+      });
       stopPolling();
     }
   });
@@ -12901,25 +13407,56 @@ async function init() {
       }
     }),
     listenEvent("library-updated", (lib) => {
-      if (Array.isArray(lib)) {
-        const activeIds = new Set(lib.map((g) => g.id));
-        for (const cachedId of Object.keys(state.sidebarIcons)) {
-          if (!activeIds.has(cachedId)) {
-            delete state.sidebarIcons[cachedId];
-          }
+      if (!Array.isArray(lib)) return;
+      const prevList = state.pendingLibraryPayload || state.library || [];
+      const prevById = new Map(prevList.map((g) => [g.id, g]));
+      let structural = prevById.size !== lib.length;
+      for (let idx = 0; idx < lib.length; idx++) {
+        const g = lib[idx];
+        const prev = prevById.get(g.id);
+        if (!prev || prevList[idx]?.id !== g.id) {
+          structural = true;
+          state.pendingChangedGameIds.add(g.id);
+        } else if (
+          prev.coverUrl !== g.coverUrl ||
+          prev.coverDataUrl !== g.coverDataUrl ||
+          prev.dukePlaytimeSecs !== g.dukePlaytimeSecs ||
+          prev.importedPlaytimeSecs !== g.importedPlaytimeSecs ||
+          prev.playtimeSeconds !== g.playtimeSeconds ||
+          prev.lastPlayedTs !== g.lastPlayedTs ||
+          prev.lastPlayed !== g.lastPlayed ||
+          prev.sizeFormatted !== g.sizeFormatted ||
+          prev.isFavorite !== g.isFavorite ||
+          prev.title !== g.title ||
+          prev.updateAvailable !== g.updateAvailable
+        ) {
+          state.pendingChangedGameIds.add(g.id);
         }
-        for (const attemptedId of Array.from(state.sidebarIconsAttempted)) {
-          if (!activeIds.has(attemptedId)) {
-            state.sidebarIconsAttempted.delete(attemptedId);
-          }
-        }
-        state.library = lib;
-        renderSidebarGameList();
-        renderLibraryGrid();
-        if (state.catalog.loaded && state.activeTab === "catalog") {
-          renderCatalogView(true);
-        }
-        updateSidebarTelemetry();
+      }
+      state.pendingLibraryStructural = state.pendingLibraryStructural || structural;
+      state.pendingLibraryPayload = lib;
+      scheduleLibraryCoalescedFlush();
+    }),
+    listenEvent("cover-updated", (payload) => {
+      const gid = payload?.gameId;
+      const coverUrl = payload?.coverUrl;
+      if (!gid || !coverUrl) return;
+      const targetList = Array.isArray(state.pendingLibraryPayload) ? state.pendingLibraryPayload : state.library;
+      const match = targetList.find((g) => g.id === gid);
+      if (match && match.coverUrl !== coverUrl) {
+        match.coverUrl = coverUrl;
+        state.pendingChangedGameIds.add(gid);
+        scheduleLibraryCoalescedFlush();
+      }
+    }),
+    listenEvent("playtime-synced", (payload) => {
+      if (Number(payload?.updatedGames || 0) > 0 && state.libraryPatchTimer === null && state.activeTab === "library") {
+        if (state.libraryPatchRaf !== null) cancelAnimationFrame(state.libraryPatchRaf);
+        state.libraryPatchRaf = requestAnimationFrame(() => {
+          state.libraryPatchRaf = null;
+          patchChangedLibraryCards(null);
+          updateSidebarTelemetry();
+        });
       }
     }),
     listenEvent("catalog-sync-progress", (payload) => {

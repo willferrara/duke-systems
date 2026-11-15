@@ -26,6 +26,30 @@ static DOH_PROVIDER_MODE: AtomicU8 = AtomicU8::new(0); // 0 = auto race, 1 = clo
 static CUSTOM_PROXY_URL: OnceLock<RwLock<Option<String>>> = OnceLock::new();
 static EFFECTIVE_HTTP_CLIENT: OnceLock<Mutex<(u64, Client)>> = OnceLock::new();
 static PROXY_CONFIG_GENERATION: AtomicU64 = AtomicU64::new(1);
+static DOH_CACHE_EPOCH: AtomicU64 = AtomicU64::new(1);
+static DOH_POOL_ACCESS_TICK: AtomicU64 = AtomicU64::new(0);
+const MAX_DOH_CLIENT_POOL_ENTRIES: usize = 24;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct DohClientPoolKey {
+    use_doh: bool,
+    proxy_gen: u64,
+    doh_epoch: u64,
+    target_port: u16,
+    follow_redirects: bool,
+    is_burst: bool,
+    connect_ms: u64,
+    read_ms: u64,
+}
+
+#[derive(Clone)]
+struct PooledClientEntry {
+    client: Client,
+    last_used_tick: u64,
+}
+
+static DOH_CLIENT_POOL: OnceLock<Mutex<HashMap<DohClientPoolKey, PooledClientEntry>>> =
+    OnceLock::new();
 
 struct Socks5BridgeHandle {
     upstream_url: String,
@@ -45,6 +69,14 @@ pub const PRIVACY_USER_AGENTS: &[&str] = &[
 
 pub fn get_doh_cache() -> &'static Mutex<HashMap<String, Vec<SocketAddr>>> {
     DOH_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn doh_cache_epoch() -> u64 {
+    DOH_CACHE_EPOCH.load(Ordering::Acquire)
+}
+
+fn get_doh_client_pool() -> &'static Mutex<HashMap<DohClientPoolKey, PooledClientEntry>> {
+    DOH_CLIENT_POOL.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub fn cached_doh_host_count() -> usize {
@@ -117,7 +149,7 @@ pub fn set_network_privacy_config(doh_enabled: bool, proxy_url: Option<&str>) ->
             && let Some(prev) = bridge.take() {
                 prev.stop_flag.store(true, Ordering::Relaxed);
             }
-    PROXY_CONFIG_GENERATION.fetch_add(1, Ordering::Relaxed);
+    PROXY_CONFIG_GENERATION.fetch_add(1, Ordering::AcqRel);
     Ok(())
 }
 
@@ -135,8 +167,10 @@ pub fn set_doh_provider_mode(provider: &str) {
     let prev = DOH_PROVIDER_MODE.swap(mode, Ordering::Relaxed);
     if prev != mode
         && let Ok(mut cache) = get_doh_cache().lock()
+        && !cache.is_empty()
     {
         cache.clear();
+        DOH_CACHE_EPOCH.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -659,6 +693,7 @@ pub async fn resolve_domain_doh(domain: &str, port: u16) -> Vec<SocketAddr> {
     if !resolved_addrs.is_empty() {
         if let Ok(mut cache) = get_doh_cache().lock() {
             cache.insert(clean_domain, resolved_addrs.clone());
+            DOH_CACHE_EPOCH.fetch_add(1, Ordering::AcqRel);
         }
         return resolved_addrs
             .into_iter()
@@ -678,102 +713,66 @@ pub fn rotate_doh_cached_ips(raw_url: &str) {
                 && let Some(addrs) = cache.get_mut(&clean_host) {
                     if addrs.len() > 2 {
                         addrs.rotate_left(2);
+                        DOH_CACHE_EPOCH.fetch_add(1, Ordering::AcqRel);
                     } else if addrs.len() > 1 {
                         addrs.rotate_left(1);
+                        DOH_CACHE_EPOCH.fetch_add(1, Ordering::AcqRel);
                     }
                 }
         }
 }
 
-/// Builds a `reqwest::Client` pre-populated with encrypted DoH `SocketAddr` overrides
-/// (when DoH is enabled and no custom proxy handles DNS) and `DNT: 1` / `Sec-GPC: 1` privacy headers.
-pub async fn build_doh_client_for_url(
-    raw_url: &str,
-    is_burst: bool,
-    follow_redirects: bool,
-) -> Client {
-    let proxy_url = resolve_effective_http_proxy_async().await;
-    let use_doh = is_doh_enabled() && proxy_url.is_none();
-
-    let mut target_port = 443u16;
-    if use_doh
-        && let Ok(parsed) = Url::parse(raw_url)
-    {
-        target_port = parsed.port_or_known_default().unwrap_or(443);
-        if let Some(host) = parsed.host_str() {
-            let _ = resolve_domain_doh(host, target_port).await;
-        }
-    }
-
-    let cached_snapshot: Vec<(String, Vec<SocketAddr>)> = if use_doh {
-        get_doh_cache()
-            .lock()
-            .map(|c| c.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-            .unwrap_or_default()
+fn clamp_timeout_nonzero(d: Duration) -> Duration {
+    if d.is_zero() {
+        Duration::from_secs(1)
     } else {
-        Vec::new()
-    };
-
-    let mut builder = Client::builder()
-        .user_agent(get_session_user_agent())
-        .default_headers(build_privacy_headers())
-        .tcp_nodelay(true);
-
-    if let Some(ref effective_proxy) = proxy_url
-        && let Ok(proxy) = Proxy::all(effective_proxy)
-    {
-        builder = builder.proxy(proxy);
+        d
     }
-
-    if !follow_redirects {
-        builder = builder.redirect(reqwest::redirect::Policy::none());
-    }
-
-    if is_burst {
-        builder = builder
-            .http1_only()
-            .tcp_keepalive(Duration::from_secs(10))
-            .pool_max_idle_per_host(0)
-            .connect_timeout(Duration::from_secs(6))
-            .read_timeout(Duration::from_secs(5));
-    } else {
-        builder = builder
-            .tcp_keepalive(Duration::from_secs(15))
-            .pool_max_idle_per_host(12)
-            .pool_idle_timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(7))
-            .read_timeout(Duration::from_secs(8));
-    }
-
-    for (host, addrs) in cached_snapshot {
-        let port_addrs: Vec<SocketAddr> = addrs
-            .iter()
-            .filter(|sa| sa.port() == target_port)
-            .copied()
-            .collect();
-        if !port_addrs.is_empty() {
-            builder = builder.resolve_to_addrs(&host, &port_addrs);
-        } else if !addrs.is_empty() {
-            builder = builder.resolve_to_addrs(&host, &addrs);
-        }
-    }
-
-    builder.build().unwrap_or_else(|_| {
-        if is_burst && proxy_url.is_none() {
-            get_burst_http_client().clone()
-        } else {
-            get_configured_http_client()
-        }
-    })
 }
 
-/// Builds a DoH/proxy-backed `reqwest::Client` with explicit connect/read timeouts.
-pub async fn build_doh_client_with_timeouts(
+fn duration_to_pool_ms(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX).max(1)
+}
+
+fn prune_and_insert_pool_entry(
+    pool: &mut HashMap<DohClientPoolKey, PooledClientEntry>,
+    key: DohClientPoolKey,
+    client: Client,
+) {
+    pool.retain(|k, _| k.proxy_gen == key.proxy_gen && k.doh_epoch == key.doh_epoch);
+    while pool.len() >= MAX_DOH_CLIENT_POOL_ENTRIES && !pool.contains_key(&key) {
+        let Some(evict_key) = pool
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used_tick)
+            .map(|(k, _)| *k)
+        else {
+            break;
+        };
+        pool.remove(&evict_key);
+    }
+    let tick = DOH_POOL_ACCESS_TICK.fetch_add(1, Ordering::Relaxed);
+    pool.insert(
+        key,
+        PooledClientEntry {
+            client,
+            last_used_tick: tick,
+        },
+    );
+}
+
+async fn get_or_build_pooled_doh_client(
     raw_url: &str,
+    is_burst: bool,
     connect_timeout: Duration,
     read_timeout: Duration,
     follow_redirects: bool,
 ) -> Client {
+    let connect_timeout = clamp_timeout_nonzero(connect_timeout);
+    let read_timeout = clamp_timeout_nonzero(read_timeout);
+    let connect_ms = duration_to_pool_ms(connect_timeout);
+    let read_ms = duration_to_pool_ms(read_timeout);
+
+    let proxy_gen = PROXY_CONFIG_GENERATION.load(Ordering::Acquire);
     let proxy_url = resolve_effective_http_proxy_async().await;
     let use_doh = is_doh_enabled() && proxy_url.is_none();
 
@@ -787,13 +786,40 @@ pub async fn build_doh_client_with_timeouts(
         }
     }
 
-    let cached_snapshot: Vec<(String, Vec<SocketAddr>)> = if use_doh {
-        get_doh_cache()
-            .lock()
-            .map(|c| c.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-            .unwrap_or_default()
+    let doh_epoch = doh_cache_epoch();
+    let key = DohClientPoolKey {
+        use_doh,
+        proxy_gen,
+        doh_epoch,
+        target_port,
+        follow_redirects,
+        is_burst,
+        connect_ms,
+        read_ms,
+    };
+
+    if let Ok(mut pool) = get_doh_client_pool().lock()
+        && let Some(entry) = pool.get_mut(&key)
+    {
+        entry.last_used_tick = DOH_POOL_ACCESS_TICK.fetch_add(1, Ordering::Relaxed);
+        return entry.client.clone();
+    }
+
+    let (cached_snapshot, build_doh_epoch): (Vec<(String, Vec<SocketAddr>)>, u64) = if use_doh {
+        match get_doh_cache().lock() {
+            Ok(c) => (
+                c.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                doh_cache_epoch(),
+            ),
+            Err(_) => (Vec::new(), doh_epoch),
+        }
     } else {
-        Vec::new()
+        (Vec::new(), doh_epoch)
+    };
+
+    let build_key = DohClientPoolKey {
+        doh_epoch: build_doh_epoch,
+        ..key
     };
 
     let mut builder = Client::builder()
@@ -813,6 +839,18 @@ pub async fn build_doh_client_with_timeouts(
         builder = builder.redirect(reqwest::redirect::Policy::none());
     }
 
+    if is_burst {
+        builder = builder
+            .http1_only()
+            .tcp_keepalive(Duration::from_secs(10))
+            .pool_max_idle_per_host(0);
+    } else {
+        builder = builder
+            .tcp_keepalive(Duration::from_secs(15))
+            .pool_max_idle_per_host(12)
+            .pool_idle_timeout(Duration::from_secs(30));
+    }
+
     for (host, addrs) in cached_snapshot {
         let port_addrs: Vec<SocketAddr> = addrs
             .iter()
@@ -826,7 +864,55 @@ pub async fn build_doh_client_with_timeouts(
         }
     }
 
-    builder.build().unwrap_or_else(|_| get_configured_http_client())
+    if let Ok(client) = builder.build() {
+        if let Ok(mut pool) = get_doh_client_pool().lock() {
+            if let Some(existing) = pool.get_mut(&build_key) {
+                existing.last_used_tick = DOH_POOL_ACCESS_TICK.fetch_add(1, Ordering::Relaxed);
+                return existing.client.clone();
+            }
+            prune_and_insert_pool_entry(&mut pool, build_key, client.clone());
+        }
+        return client;
+    }
+
+    if is_burst && proxy_url.is_none() {
+        get_burst_http_client().clone()
+    } else {
+        get_configured_http_client()
+    }
+}
+
+/// Builds a `reqwest::Client` pre-populated with encrypted DoH `SocketAddr` overrides
+/// (when DoH is enabled and no custom proxy handles DNS) and `DNT: 1` / `Sec-GPC: 1` privacy headers.
+pub async fn build_doh_client_for_url(
+    raw_url: &str,
+    is_burst: bool,
+    follow_redirects: bool,
+) -> Client {
+    let (connect_timeout, read_timeout) = if is_burst {
+        (Duration::from_secs(6), Duration::from_secs(5))
+    } else {
+        (Duration::from_secs(7), Duration::from_secs(8))
+    };
+    get_or_build_pooled_doh_client(
+        raw_url,
+        is_burst,
+        connect_timeout,
+        read_timeout,
+        follow_redirects,
+    )
+    .await
+}
+
+/// Builds a DoH/proxy-backed `reqwest::Client` with explicit connect/read timeouts.
+pub async fn build_doh_client_with_timeouts(
+    raw_url: &str,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+    follow_redirects: bool,
+) -> Client {
+    get_or_build_pooled_doh_client(raw_url, false, connect_timeout, read_timeout, follow_redirects)
+        .await
 }
 
 #[cfg(test)]
@@ -847,5 +933,89 @@ mod tests {
         );
         assert!(validate_proxy_url(Some("ftp://127.0.0.1:21")).is_err());
         assert!(validate_proxy_url(Some("socks5://")).is_err());
+    }
+
+    #[test]
+    fn doh_client_pool_epoch_increments_and_keys_are_bounded() {
+        assert_eq!(clamp_timeout_nonzero(Duration::ZERO), Duration::from_secs(1));
+        assert_eq!(
+            clamp_timeout_nonzero(Duration::from_millis(250)),
+            Duration::from_millis(250)
+        );
+
+        let host = "pool-test.example.invalid";
+        let e0 = doh_cache_epoch();
+        if let Ok(mut cache) = get_doh_cache().lock() {
+            cache.insert(
+                host.to_string(),
+                vec![
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)), 443),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)), 443),
+                ],
+            );
+        }
+        rotate_doh_cached_ips("https://pool-test.example.invalid/archive.bin");
+        let e1 = doh_cache_epoch();
+        assert!(e1 > e0, "rotating cached DoH IPs must increment DOH_CACHE_EPOCH");
+        if let Ok(mut cache) = get_doh_cache().lock() {
+            cache.remove(host);
+        }
+
+        // Verify stale epoch/proxy_gen pruning and strict 24-entry bound.
+        let mut local_pool: HashMap<DohClientPoolKey, PooledClientEntry> = HashMap::new();
+        let dummy_client = Client::new();
+        let stale_key = DohClientPoolKey {
+            use_doh: true,
+            proxy_gen: 1,
+            doh_epoch: 1,
+            target_port: 443,
+            follow_redirects: true,
+            is_burst: false,
+            connect_ms: 5000,
+            read_ms: 5000,
+        };
+        prune_and_insert_pool_entry(&mut local_pool, stale_key, dummy_client.clone());
+        assert_eq!(local_pool.len(), 1);
+
+        for idx in 0..32u64 {
+            let key = DohClientPoolKey {
+                use_doh: true,
+                proxy_gen: 2,
+                doh_epoch: 2,
+                target_port: 443,
+                follow_redirects: true,
+                is_burst: false,
+                connect_ms: 1000 + idx,
+                read_ms: 5000,
+            };
+            prune_and_insert_pool_entry(&mut local_pool, key, dummy_client.clone());
+            assert!(local_pool.len() <= MAX_DOH_CLIENT_POOL_ENTRIES);
+        }
+        assert!(!local_pool.contains_key(&stale_key));
+        assert_eq!(local_pool.len(), MAX_DOH_CLIENT_POOL_ENTRIES);
+
+        // Verify pooled client reuse and bounded global pool via IP literal (no network calls).
+        if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            rt.block_on(async {
+                let _c1 = build_doh_client_with_timeouts(
+                    "http://127.0.0.1:8080/health",
+                    Duration::ZERO,
+                    Duration::ZERO,
+                    false,
+                )
+                .await;
+                let count_after_first = get_doh_client_pool().lock().map(|p| p.len()).unwrap_or(0);
+                let _c2 = build_doh_client_with_timeouts(
+                    "http://127.0.0.1:8080/health",
+                    Duration::ZERO,
+                    Duration::ZERO,
+                    false,
+                )
+                .await;
+                let count_after_second = get_doh_client_pool().lock().map(|p| p.len()).unwrap_or(0);
+                assert_eq!(count_after_first, count_after_second);
+                assert!(count_after_second <= MAX_DOH_CLIENT_POOL_ENTRIES);
+            });
+        }
     }
 }

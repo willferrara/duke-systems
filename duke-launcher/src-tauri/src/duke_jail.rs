@@ -320,6 +320,7 @@ mod win_ac {
     #[link(name = "kernel32")]
     extern "system" {
         fn LoadLibraryW(name: *const u16) -> isize;
+        fn FreeLibrary(h_lib_module: isize) -> i32;
         fn GetProcAddress(module: isize, name: *const u8) -> *const c_void;
         fn LocalFree(h_mem: *mut c_void) -> *mut c_void;
         fn CloseHandle(h_object: isize) -> i32;
@@ -431,6 +432,7 @@ mod win_ac {
                     .cast::<u8>(),
             );
             if p_create.is_null() || p_delete.is_null() || p_derive.is_null() {
+                let _ = FreeLibrary(hmod);
                 return None;
             }
             Some(UserenvApi {

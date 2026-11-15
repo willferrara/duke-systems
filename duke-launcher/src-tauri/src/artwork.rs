@@ -265,7 +265,7 @@ pub(crate) async fn search_steamgriddb_artwork(
         .map(|v| parse_sgdb_assets(v, 12))
         .unwrap_or_default();
 
-    crate::trim_process_working_set();
+    duke_core::win32_ffi::trim_current_working_set();
     Ok(SteamGridDbSearchResult {
         has_api_key: true,
         matched_game: Some(matched_game),
@@ -286,7 +286,7 @@ async fn download_binary_asset(url: &str, max_bytes: usize) -> Result<Vec<u8>, S
     )
     .await;
 
-    let resp = client
+    let mut resp = client
         .get(parsed.as_str())
         .send()
         .await
@@ -297,17 +297,29 @@ async fn download_binary_asset(url: &str, max_bytes: usize) -> Result<Vec<u8>, S
             resp.status().as_u16()
         ));
     }
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed reading artwork bytes: {}", e))?;
-    if bytes.len() > max_bytes {
-        return Err(format!(
-            "Artwork file exceeds maximum allowed size ({} bytes).",
-            max_bytes
-        ));
+    if let Some(cl) = resp.content_length() {
+        if cl > max_bytes as u64 {
+            return Err(format!(
+                "Artwork file exceeds maximum allowed size ({} bytes).",
+                max_bytes
+            ));
+        }
     }
-    Ok(bytes.to_vec())
+    let mut out = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("Failed reading artwork bytes: {}", e))?
+    {
+        if out.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(format!(
+                "Artwork file exceeds maximum allowed size ({} bytes).",
+                max_bytes
+            ));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
 #[tauri::command]
@@ -319,6 +331,7 @@ pub(crate) async fn apply_custom_artwork(
     icon_url: Option<String>,
 ) -> Result<crate::GameEntry, String> {
     let clean_cover = cover_url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let cover_updated = clean_cover.is_some();
     let clean_hero = hero_url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let clean_icon = icon_url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
 
@@ -427,7 +440,17 @@ pub(crate) async fn apply_custom_artwork(
         let _ = app.emit("library-updated", &full_lib);
     }
 
-    crate::trim_process_working_set();
+    if cover_updated {
+        let _ = app.emit(
+            "cover-updated",
+            serde_json::json!({
+                "gameId": &updated_entry.id,
+                "coverUrl": &updated_entry.cover_url,
+            }),
+        );
+    }
+
+    duke_core::win32_ffi::trim_current_working_set();
     Ok(updated_entry)
 }
 
@@ -919,6 +942,15 @@ fn find_cached_cover_on_disk(covers_dir: &Path, keys: &[String]) -> Option<PathB
         }
         for ext in EXTS {
             let candidate = covers_dir.join(format!("{}.{}", stem, ext));
+            let Ok(meta) = std::fs::metadata(&candidate) else {
+                continue;
+            };
+            if !meta.is_file()
+                || meta.len() < MIN_VALID_COVER_BYTES as u64
+                || meta.len() > MAX_COVER_DOWNLOAD_BYTES as u64
+            {
+                continue;
+            }
             if let Ok(bytes) = std::fs::read(&candidate) {
                 if verify_image_bytes(&bytes).is_some() {
                     return Some(candidate);
@@ -998,7 +1030,7 @@ async fn download_verified_image_doh(
     if let Some(rf) = referer {
         req = req.header(reqwest::header::REFERER, rf);
     }
-    let resp = req.send().await.ok()?;
+    let mut resp = req.send().await.ok()?;
     if !resp.status().is_success() {
         return None;
     }
@@ -1007,12 +1039,18 @@ async fn download_verified_image_doh(
             return None;
         }
     }
-    let bytes = resp.bytes().await.ok()?.to_vec();
-    if bytes.len() < min_bytes {
+    let mut out = Vec::new();
+    while let Some(chunk) = resp.chunk().await.ok()? {
+        if out.len().saturating_add(chunk.len()) > MAX_COVER_DOWNLOAD_BYTES {
+            return None;
+        }
+        out.extend_from_slice(&chunk);
+    }
+    if out.len() < min_bytes {
         return None;
     }
-    let (ext, _) = verify_image_bytes(&bytes)?;
-    Some((bytes, ext))
+    let (ext, _) = verify_image_bytes(&out)?;
+    Some((out, ext))
 }
 
 async fn search_steam_app_ids_doh(clean_title: &str) -> Vec<u32> {
@@ -1491,6 +1529,15 @@ pub(crate) async fn resolve_and_cache_cover_in_dirs(
         });
     }
 
+    // Trim freed download/decode heap buffers once the remote cascade returns (or fails).
+    struct WorkingSetTrimGuard;
+    impl Drop for WorkingSetTrimGuard {
+        fn drop(&mut self) {
+            duke_core::win32_ffi::trim_current_working_set();
+        }
+    }
+    let _trim_guard = WorkingSetTrimGuard;
+
     let clean_title = clean_cover_query(&req.title);
     let mut resolved: Option<(Vec<u8>, &'static str, &'static str)> = None;
 
@@ -1667,7 +1714,17 @@ pub(crate) async fn resolve_catalog_cover(
     if let Some(outcome) =
         resolve_and_cache_cover_in_dirs(&req, &covers_dir, &sidebar_icons_dir).await
     {
-        return Ok(Some(outcome.cover_path.to_string_lossy().to_string()));
+        let cover_path_str = outcome.cover_path.to_string_lossy().to_string();
+        if outcome.source_tier != "cache" {
+            let _ = app.emit(
+                "cover-updated",
+                serde_json::json!({
+                    "gameId": req.cache_id,
+                    "coverUrl": &cover_path_str,
+                }),
+            );
+        }
+        return Ok(Some(cover_path_str));
     }
     Ok(None)
 }
@@ -1724,6 +1781,7 @@ pub(crate) async fn search_web_covers_for_game(
         push_candidate(url, "Web Image", &clean);
     }
 
+    duke_core::win32_ffi::trim_current_working_set();
     Ok(out.into_iter().take(18).collect())
 }
 
