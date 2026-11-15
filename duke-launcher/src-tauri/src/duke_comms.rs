@@ -317,7 +317,12 @@ fn dispatch_voice_macro_action(app: &AppHandle, rule: &VoiceMacroRule) -> CommsM
                     }
                 }
             }
-            "Requested replay buffer clip save in duke-capture".to_string()
+            let capture_active = crate::active_shm_apps().contains(&ShmSourceApp::DukeCapture);
+            if capture_active {
+                "Requested replay buffer clip save in optional Duke Capture companion".to_string()
+            } else {
+                "Standalone mode: highlight marker logged locally (no companion required)".to_string()
+            }
         }
         "freeze_game" => {
             let active_id_title = get_active_sessions()
@@ -360,7 +365,15 @@ fn dispatch_voice_macro_action(app: &AppHandle, rule: &VoiceMacroRule) -> CommsM
                     }
                 }
             }
-            format!("Dispatched HID keys [{}] -> duke-input", rule.keys.join("+"))
+            if crate::active_shm_apps().contains(&ShmSourceApp::DukeInput) {
+                format!("Dispatched HID keys [{}] -> optional Duke Input companion", rule.keys.join("+"))
+            } else {
+                dispatched = true;
+                format!(
+                    "Standalone mode: macro [{}] queued locally (no companion required)",
+                    rule.keys.join("+")
+                )
+            }
         }
     };
 

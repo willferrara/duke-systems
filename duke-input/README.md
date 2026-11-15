@@ -1,5 +1,7 @@
 # Duke Input
 
+> **Status: Experimental / Paused — Active development is focused exclusively on `Duke Launcher`. Please download and use `Duke Launcher` from Releases.**
+
 Zero-bloat, sub-10 MB RAM native Windows input engine, controller remapper, mouse tuner, and FPV transmitter configurator built with Tauri v2, Rust, Win32 XInput/RawInput/SendInput, and `hidapi`.
 
 ## Features

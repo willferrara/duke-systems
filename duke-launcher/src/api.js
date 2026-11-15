@@ -1210,6 +1210,14 @@ export async function sendCoOpInputP2(input) {
   return invokeCommand("send_coop_input_p2", { input });
 }
 
+export async function sendCoOpInputSlot(slot = 1, controllerKind = "xinput", input) {
+  return invokeCommand("send_coop_input_slot", {
+    slot: Number(slot || 0),
+    controllerKind: controllerKind || null,
+    input
+  });
+}
+
 export async function getGameTimeMachine(gameId) {
   return invokeCommand("get_game_time_machine", { gameId: String(gameId || "") });
 }
@@ -1399,12 +1407,19 @@ export async function scanGameDeepShrink(gameId, keepLanguages = ["english"]) {
   });
 }
 
-export async function applyGameDeepShrink(gameId, stripLanguages = [], dedupInternalMedia = true, keepLanguages = ["english"]) {
+export async function applyGameDeepShrink(
+  gameId,
+  stripLanguages = [],
+  dedupInternalMedia = true,
+  keepLanguages = ["english"],
+  conditionTexturesBler = true
+) {
   return invokeCommand("apply_game_deep_shrink", {
     gameId: String(gameId || ""),
     stripLanguages: Array.isArray(stripLanguages) ? stripLanguages : [],
     dedupInternalMedia: Boolean(dedupInternalMedia),
-    keepLanguages: Array.isArray(keepLanguages) ? keepLanguages : ["english"]
+    keepLanguages: Array.isArray(keepLanguages) ? keepLanguages : ["english"],
+    conditionTexturesBler: Boolean(conditionTexturesBler)
   });
 }
 
@@ -2006,6 +2021,81 @@ export async function sandboxSetSpeedhackScale(pid = null, scale = 1.0) {
     pid: typeof pid === "number" && pid > 0 ? pid : null,
     scale: Number(scale || 1.0)
   });
+}
+
+export async function getFseShellStatus() {
+  return invokeCommand("get_fse_shell_status");
+}
+
+export async function setFseGamingHome(enabled, suspendBloat = true) {
+  return invokeCommand("set_fse_gaming_home", {
+    enabled: Boolean(enabled),
+    suspendBloat: Boolean(suspendBloat)
+  });
+}
+
+export async function suspendWindowsBloatNow() {
+  return invokeCommand("suspend_windows_bloat_now");
+}
+
+export async function resumeWindowsBloatNow() {
+  return invokeCommand("resume_windows_bloat_now");
+}
+
+export async function listWasmPlugins() {
+  return invokeCommand("list_wasm_plugins");
+}
+
+export async function installWasmPlugin(
+  filePath,
+  customName = null,
+  requestedDomains = [],
+  requestedHooks = ["metadata_lookup"]
+) {
+  return invokeCommand("install_wasm_plugin", {
+    filePath: String(filePath || ""),
+    customName: customName ? String(customName) : null,
+    requestedDomains: Array.isArray(requestedDomains) ? requestedDomains : [],
+    requestedHooks: Array.isArray(requestedHooks) ? requestedHooks : ["metadata_lookup"]
+  });
+}
+
+export async function installDemoWasmPlugin() {
+  return invokeCommand("install_demo_wasm_plugin");
+}
+
+export async function setWasmPluginCapabilities(
+  pluginId,
+  enabled,
+  allowedDomains = [],
+  allowedHooks = [],
+  allowReadOnlyLibraryTitles = false
+) {
+  return invokeCommand("set_wasm_plugin_capabilities", {
+    pluginId: String(pluginId || ""),
+    enabled: Boolean(enabled),
+    allowedDomains: Array.isArray(allowedDomains) ? allowedDomains : [],
+    allowedHooks: Array.isArray(allowedHooks) ? allowedHooks : [],
+    allowReadOnlyLibraryTitles: Boolean(allowReadOnlyLibraryTitles)
+  });
+}
+
+export async function executeWasmPlugin(pluginId, hook = "metadata_lookup", query = "") {
+  return invokeCommand("execute_wasm_plugin", {
+    pluginId: String(pluginId || ""),
+    hook: hook ? String(hook) : "metadata_lookup",
+    query: query != null ? String(query) : ""
+  });
+}
+
+export async function removeWasmPlugin(pluginId) {
+  return invokeCommand("remove_wasm_plugin", {
+    pluginId: String(pluginId || "")
+  });
+}
+
+export async function runChaosStressHarness() {
+  return invokeCommand("run_chaos_stress_harness");
 }
 
 

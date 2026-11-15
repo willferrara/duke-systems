@@ -283,7 +283,21 @@ pub fn write_exe_registry_preferences(profile: &LatencyLabGameProfile) -> Result
     }
     let existing = reg_read_string(false, REG_USER_GPU_PREFS, clean_exe);
     let formatted = format_user_gpu_preferences(existing.as_deref(), profile);
-    reg_write_string(false, REG_USER_GPU_PREFS, clean_exe, &formatted)?;
+    #[cfg(target_os = "windows")]
+    {
+        reg_write_string(false, REG_USER_GPU_PREFS, clean_exe, &formatted)?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = duke_core::platform_backend::active_platform_backend().bind_gpu_preferences(
+            &duke_core::platform_backend::GpuPreferenceBinding {
+                exe_path: std::path::PathBuf::from(clean_exe),
+                high_performance: profile.gpu_preference >= 2,
+                auto_hdr: profile.auto_hdr_enable,
+                auto_sr_mode: profile.auto_sr_mode.clone(),
+            },
+        )?;
+    }
     Ok(formatted)
 }
 

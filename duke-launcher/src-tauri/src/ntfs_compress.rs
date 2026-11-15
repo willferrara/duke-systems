@@ -528,7 +528,7 @@ pub fn run_wof_operation_sync(
                     let _ = changed;
                     let done_now = files_processed.fetch_add(1, Ordering::Relaxed) + 1;
                     if let Some(app_h) = app {
-                        if done_now == 1 || done_now % 24 == 0 || done_now as usize == files_total {
+                        if done_now == 1 || done_now.is_multiple_of(24) || done_now as usize == files_total {
                             let _ = app_h.emit(
                                 "wof-compress-progress",
                                 WofCompressProgress {

@@ -34,6 +34,7 @@ nvme-prefetch = [
     "windows?/Win32_System_Memory",
     "windows?/Win32_System_SystemInformation",
 ]
+platform-backend = ["dep:serde", "win32-trim"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"], optional = true }

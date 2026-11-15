@@ -52,6 +52,14 @@ pub struct DeepShrinkScanReport {
     pub total_reclaimable_formatted: String,
     pub candidates: Vec<DeepShrinkCandidateFile>,
     pub elapsed_ms: u64,
+    #[serde(default)]
+    pub texture_pack_files: usize,
+    #[serde(default)]
+    pub texture_pack_bytes: u64,
+    #[serde(default)]
+    pub estimated_bler_savings_bytes: u64,
+    #[serde(default)]
+    pub estimated_bler_savings_formatted: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +75,10 @@ pub struct DeepShrinkApplyReport {
     pub new_game_formatted: String,
     pub elapsed_ms: u64,
     pub message: String,
+    #[serde(default)]
+    pub textures_conditioned_bler: usize,
+    #[serde(default)]
+    pub bler_bytes_saved: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -612,6 +624,9 @@ fn scan_game_deep_shrink_internal(
     let mut bucket_map: HashMap<String, (usize, u64, Vec<String>)> = HashMap::new();
     let mut candidates = Vec::new();
     let mut foreign_rel_set = HashSet::new();
+    let mut texture_pack_files = 0usize;
+    let mut texture_pack_bytes = 0u64;
+    let mut estimated_bler_savings_bytes = 0u64;
 
     for entry in WalkDir::new(game_root)
         .follow_links(false)
@@ -628,6 +643,30 @@ fn scan_game_deep_shrink_internal(
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
+        if path
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("dds"))
+        {
+            if let Some((_info, len, gain)) =
+                crate::direct_storage::probe_dds_bcn_savings(path)
+            {
+                if len >= 16 * 1024 {
+                    texture_pack_files += 1;
+                    texture_pack_bytes = texture_pack_bytes.saturating_add(len);
+                    estimated_bler_savings_bytes =
+                        estimated_bler_savings_bytes.saturating_add(gain);
+                    if gain > 0 {
+                        candidates.push(DeepShrinkCandidateFile {
+                            rel_path: rel.clone(),
+                            language: "bler_texture".to_string(),
+                            size_bytes: gain,
+                            kind: "texture_bler".to_string(),
+                        });
+                    }
+                }
+            }
+        }
         if let Some((lang, kind)) = classify_foreign_media_path(&rel, keep_languages) {
             let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
             if len == 0 {
@@ -679,7 +718,9 @@ fn scan_game_deep_shrink_internal(
     candidates.truncate(500);
 
     let foreign_total: u64 = language_buckets.iter().map(|b| b.total_bytes).sum();
-    let total_reclaimable_bytes = foreign_total.saturating_add(duplicate_media_bytes);
+    let total_reclaimable_bytes = foreign_total
+        .saturating_add(duplicate_media_bytes)
+        .saturating_add(estimated_bler_savings_bytes);
 
     DeepShrinkScanReport {
         game_id: game_id.to_string(),
@@ -693,6 +734,10 @@ fn scan_game_deep_shrink_internal(
         total_reclaimable_formatted: format_bytes(total_reclaimable_bytes),
         candidates,
         elapsed_ms: started.elapsed().as_millis() as u64,
+        texture_pack_files,
+        texture_pack_bytes,
+        estimated_bler_savings_bytes,
+        estimated_bler_savings_formatted: format_bytes(estimated_bler_savings_bytes),
     }
 }
 
@@ -725,6 +770,7 @@ pub async fn apply_game_deep_shrink(
     strip_languages: Vec<String>,
     dedup_internal_media: bool,
     keep_languages: Option<Vec<String>>,
+    condition_textures_bler: Option<bool>,
 ) -> Result<DeepShrinkApplyReport, String> {
     tokio::task::spawn_blocking(move || {
         let started = Instant::now();
@@ -815,6 +861,55 @@ pub async fn apply_game_deep_shrink(
             }
         }
 
+        let mut textures_conditioned_bler = 0usize;
+        let mut bler_bytes_saved = 0u64;
+        if condition_textures_bler.unwrap_or(false) {
+            let ds_dir = root.join(".duke-ds");
+            for entry in WalkDir::new(&root)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(|e| !should_skip_shrink_walk(e, &root))
+                .flatten()
+                .take(4096)
+            {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                if !path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("dds"))
+                {
+                    continue;
+                }
+                let src_len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                if src_len < 16 * 1024 {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(&root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace(['/', '\\'], "__");
+                let dst_stream = ds_dir.join(format!("{}.dkds", rel));
+                if dst_stream.is_file() {
+                    continue;
+                }
+                if let Ok(stats) =
+                    crate::direct_storage::encode_dkds_stream_with_bler(path, &dst_stream, 3)
+                {
+                    if stats.bler_conditioned_chunks > 0 && stats.packed_len < src_len {
+                        textures_conditioned_bler += 1;
+                        bler_bytes_saved =
+                            bler_bytes_saved.saturating_add(stats.bler_extra_saved_bytes);
+                    } else {
+                        let _ = fs::remove_file(&dst_stream);
+                    }
+                }
+            }
+        }
+
         let stats = measure_game_storage_stats(&game.id, &root);
         let new_game_bytes = stats.compressed_bytes;
         if let Ok(mut mut_lib) = load_library_from_disk(&app) {
@@ -836,11 +931,15 @@ pub async fn apply_game_deep_shrink(
             new_game_formatted: format_bytes(new_game_bytes),
             elapsed_ms: started.elapsed().as_millis() as u64,
             message: format!(
-                "Deep Shrink reclaimed {} ({} language files stripped, {} duplicate .wem/.bik linked; .duke-cas backup saved).",
+                "Deep Shrink reclaimed {} ({} language files stripped, {} duplicate media linked, {} BLER BC1-BC5 textures packed saving {} extra; .duke-cas backup saved).",
                 format_bytes(reclaimed_bytes),
                 files_removed,
-                duplicates_hardlinked
+                duplicates_hardlinked,
+                textures_conditioned_bler,
+                format_bytes(bler_bytes_saved)
             ),
+            textures_conditioned_bler,
+            bler_bytes_saved,
         })
     })
     .await

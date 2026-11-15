@@ -290,7 +290,7 @@ fn capture_160x90_thumbnail_data_url() -> Option<String> {
     };
 
     let mut rgb = Vec::with_capacity((sw * sh * 3) as usize);
-    for px in bgra.chunks_exact(4) {
+    for px in bgra.as_chunks::<4>().0 {
         rgb.push(px[2]);
         rgb.push(px[1]);
         rgb.push(px[0]);

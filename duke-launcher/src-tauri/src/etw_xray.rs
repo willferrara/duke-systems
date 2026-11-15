@@ -974,6 +974,7 @@ mod win_etw {
 
     pub fn probe_capability() -> super::EtwXrayCapability {
         let procs = get_procs();
+        let platform_probe = duke_core::platform_backend::active_platform_backend().probe_frame_telemetry();
         super::EtwXrayCapability {
             etw_api_loaded: procs.etw_loaded,
             dwm_api_loaded: procs.dwm_loaded,
@@ -981,9 +982,12 @@ mod win_etw {
             zero_dll_injection: true,
             anti_cheat_safe: true,
             mode_label: if procs.etw_loaded {
-                "Pure-Rust ETW (advapi32 OpenTraceW/ProcessTrace) + DWM Fallback".to_string()
+                format!(
+                    "Pure-Rust ETW ({}) + DWM Fallback",
+                    platform_probe.arch
+                )
             } else {
-                "DWM Composition Fallback".to_string()
+                format!("DWM Composition Fallback ({})", platform_probe.arch)
             },
         }
     }
@@ -996,7 +1000,7 @@ mod win_etw {
     use std::sync::{Arc, Mutex};
 
     pub fn query_qpc_freq() -> i64 {
-        1_000_000
+        1_000_000_000
     }
 
     pub fn run_kernel_dxgi_etw_or_dwm(
@@ -1005,8 +1009,9 @@ mod win_etw {
         _state: Arc<XrayCollectorState>,
         telemetry_source: Arc<Mutex<String>>,
     ) {
+        let probe = duke_core::platform_backend::active_platform_backend().probe_frame_telemetry();
         if let Ok(mut s) = telemetry_source.lock() {
-            *s = "Non-Windows Fallback".to_string();
+            *s = probe.frame_time_source;
         }
         while !stop.load(Ordering::Relaxed) {
             std::thread::sleep(std::time::Duration::from_millis(200));
@@ -1014,13 +1019,14 @@ mod win_etw {
     }
 
     pub fn probe_capability() -> super::EtwXrayCapability {
+        let probe = duke_core::platform_backend::active_platform_backend().probe_frame_telemetry();
         super::EtwXrayCapability {
-            etw_api_loaded: false,
-            dwm_api_loaded: false,
-            kernel_dxgi_etw_permitted: false,
-            zero_dll_injection: true,
-            anti_cheat_safe: true,
-            mode_label: "Non-Windows Stub".to_string(),
+            etw_api_loaded: probe.hardware_telemetry_supported,
+            dwm_api_loaded: probe.gamescope_detected,
+            kernel_dxgi_etw_permitted: probe.hardware_telemetry_supported,
+            zero_dll_injection: probe.zero_injection,
+            anti_cheat_safe: probe.anti_cheat_safe,
+            mode_label: format!("{} ({})", probe.backend_name, probe.frame_time_source),
         }
     }
 

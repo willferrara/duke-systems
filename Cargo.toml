@@ -11,6 +11,9 @@ members = [
     "duke-companion",
 ]
 
+[profile.dev]
+incremental = true
+
 [profile.release]
 opt-level = 3
 lto = "fat"

@@ -1,141 +1,124 @@
 <div align="center">
-  <img src="duke-launcher/src/assets/dukeflaglogo.png" alt="Duke Launcher v1.0.0 Emblem" width="96" />
-  <h1>The Duke Suite &amp; Duke Launcher <code>v1.0.0</code></h1>
+  <img src="duke-launcher/src/assets/dukeflaglogo.png" alt="Duke Launcher v2.0.0" width="108" />
+  <h1>Duke Launcher <code>v2.0.0</code></h1>
   <p>
-    <strong>Zero-Telemetry Windows 11 Native Game Hub, Security Shield &amp; Retro Cockpit</strong><br />
-    Engineered in pure Rust + Win32 FFI + Tauri v2 (Zero Electron / Chromium runtime).
+    <strong>All Your Games. Maximum FPS. Zero Bloat.</strong><br />
+    One tiny, free Windows 11 game launcher for PC, Steam, Xbox, Epic, GOG, Nintendo &amp; retro classics.
   </p>
   <p>
-    <a href=".github/workflows/ci.yml"><img src="https://img.shields.io/badge/Version-v1.0.0-0078d4?style=flat-square" alt="Duke Launcher v1.0.0" /></a>
-    <a href=".github/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-Cargo%20Workspace-2ea043?style=flat-square" alt="CI Workflow" /></a>
-    <a href=".github/workflows/release.yml"><img src="https://img.shields.io/badge/Platform-Windows%2011%20x64%20%7C%20SteamOS-1f6feb?style=flat-square" alt="Windows 11 x64 and SteamOS" /></a>
-    <a href="#zero-account-privacy-security"><img src="https://img.shields.io/badge/Telemetry-Zero%20%7C%20DPAPI%20Vault-8957e5?style=flat-square" alt="Zero Telemetry" /></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-success?style=flat-square" alt="License MIT" /></a>
+    <a href="https://github.com/willferrara/duke-systems/releases/latest"><img src="https://img.shields.io/badge/Version-v2.0.0-0078d4?style=flat-square" alt="v2.0.0" /></a>
+    <a href="https://github.com/willferrara/duke-systems/releases/latest"><img src="https://img.shields.io/badge/Platform-Windows%2011-1f6feb?style=flat-square" alt="Windows 11" /></a>
+    <a href="https://github.com/willferrara/duke-systems/releases/latest"><img src="https://img.shields.io/badge/Size-~8.7%20MB%20Portable-2ea043?style=flat-square" alt="~8.7 MB Portable" /></a>
+    <a href="https://github.com/willferrara/duke-systems/releases/latest"><img src="https://img.shields.io/badge/RAM-~20%20MB%20Idle-0e8a16?style=flat-square" alt="~20 MB Idle RAM" /></a>
+    <a href="#why-gamers-switch"><img src="https://img.shields.io/badge/Privacy-Zero%20Accounts-8957e5?style=flat-square" alt="Zero Accounts" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/Open%20Source-MIT-success?style=flat-square" alt="Open Source" /></a>
+  </p>
+  <p>
+    <a href="https://github.com/willferrara/duke-systems/releases/latest">
+      <img src="https://img.shields.io/badge/%E2%AC%87%20Download%20Duke%20Launcher%20(v2.0.0)-0078d4?style=for-the-badge" alt="Download Duke Launcher v2.0.0" />
+    </a>
   </p>
 </div>
 
 ---
 
-## Why Duke Launcher `v1.0.0`?
-
-**Duke Launcher** is the flagship desktop application of **The Duke Suite** (`duke-core`, `duke-launcher`, `duke-systems`, `duke-input`, `duke-monitor`, `duke-capture`, and `duke-companion`). Designed as a strictly local, zero-account replacement for bloated Chromium launchers, it pairs native Windows 11 APIs (`AppContainer`, `WinVerifyTrust`, `DPAPI`, `ETW`, `CreateHardLinkW`, `PrefetchVirtualMemory`, `NtSuspendProcess`, `NtSetTimerResolution`) with 10 opaque zero-bloat CSS themes.
-
-| Capability | Duke Launcher `v1.0.0` | Steam | Playnite | Hydra Launcher | Heroic |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Runtime Architecture** | **Rust + Win32 FFI + WebView2** | CEF (Chromium) | .NET / WPF | Electron + Chromium | Electron + Chromium |
-| **Idle Working-Set Target** | **&lt; 25 MB** (&lt;8 MB in Tray) | ~350–600 MB | ~150–300 MB | ~250–450 MB | ~250–450 MB |
-| **Account Login Required** | **Never (100% Local + DPAPI)** | Required | Optional | Optional | Store Login |
-| **OS AppContainer Game Jail &amp; Offline Lock** | **Built-In Per-Game ACL + WFP** | No | No | No | No |
-| **PE32/PE32+ Malware X-Ray &amp; Authenticode** | **Built-In (`WinVerifyTrust` + Entropy)** | No | No | No | No |
-| **Crash-to-Fix Engine + PCGamingWiki API** | **Auto Exit-Code Repair + Live Links** | No | Extension | No | No |
-| **Zero-Injection Frame-Time X-Ray (`ETW`)** | **Kernel DXGI / DxgKrnl (AC-Safe)** | Overlay Injection | No | No | MangoHud |
-| **BIOS Validator, RetroAchievements &amp; ROM Patcher** | **MD5/SHA-1 + `rc_hash` + IPS/BPS/UPS/XDelta** | No | Plugins | No | No |
-| **CoW Snapshots &amp; `WOF` Disk Autopilot** | **BLAKE3 + Hardlinks + LZX Shrink** | No | No | No | No |
-| **100% Portable USB Mode** | **Drop `portable.txt` Beside `.exe`** | Partial | Yes | Partial | AppImage / Zip |
+**Duke Launcher** is a tiny, super-fast, free game launcher that puts all of your **Steam, Xbox, Epic, GOG, and Nintendo/retro games** into one clean app. Most modern launchers keep heavy web browsers running in the background that quietly eat hundreds of megabytes of memory, pester you to log in, track your habits, and still leave you to troubleshoot broken downloads or missing DLLs on your own. **Duke Launcher (`v2.0.0`)** uses almost zero memory (~20 MB idle, or just a few MB in the system tray) so your games get **maximum FPS**, **never forces you to create an account or collects any data**, **downloads, unpacks, and sets up games automatically**, **scans and blocks viruses or malware before you launch anything**, and **fixes broken or crashing games in one click**.
 
 ---
 
-## System Architecture
+## Why Gamers Switch
+
+| Everyday Question | Duke Launcher (`v2.0.0`) | Steam | Xbox App | Playnite | Hydra |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Memory Used While You Play** | **~20 MB** (stays out of your way) | ~350–600 MB | ~250–500 MB | ~150–300 MB | ~250–450 MB |
+| **Account Login or Tracking?** | **Never — 100% private &amp; local** | Account required | Microsoft account required | Optional | Optional |
+| **Every Store &amp; Console in One App?** | **Steam, Xbox, Epic, GOG, Nintendo &amp; Retro** | Steam + manual shortcuts | Xbox + PC Game Pass | Yes (via plugins) | Limited |
+| **Sets Up Downloads &amp; Retro Games For You?** | **Auto-downloads, extracts, groups discs &amp; configures** | Store games only | Store games only | Manual setup | Partial |
+| **Malware &amp; Virus Shield Before Launch?** | **Built-in safety scanner &amp; isolated game jail** | No | No | No | No |
+| **Fixes Crashing or Broken Games (`0xC000007B`)?** | **1-click automatic repair + missing DLL installer** | Basic file verify | Basic repair | No | No |
+| **Play Couch Co-Op With Friends Online (Zero Port Forwarding)?** | **Built-in 4-player Duke Link v2 streaming** | Remote Play (account required) | No | No | No |
+| **Turn Any Windows 11 PC / Handheld Into a Console?** | **1-click Windows Gaming Home (`FSE`) console mode** | Big Picture Mode | Compact Mode | Fullscreen Mode | No |
+
+---
+
+## Everyday Features Made Simple
+
+- **All Your Games in One Clean Screen:** Click **Import Existing Libraries** to pull in Steam, Xbox, Epic, and GOG games automatically, or drag and drop `.exe` files, folders, shortcuts, and ROMs straight onto the window.
+- **Zero-Hassle Retro &amp; Nintendo Gaming:** Automatically groups multi-disc games (`Disc 1`, `Disc 2`), checks BIOS/firmware hashes so emulators work on the first try, applies ROM patches safely without ruining your originals, and supports RetroAchievements.
+- **1-Click Crash &amp; Missing DLL Fixer:** If a game closes in under 5 seconds or throws confusing errors like `0xC000007B`, Duke Launcher tells you why in plain English and repairs missing runtime DLLs or compatibility settings in one click.
+- **Game-Save Time Machine:** Back up and roll back your game files and saves anytime without wasting drive space.
+- **Shrink Huge Games Without Losing Quality:** Automatically compresses older games and textures so you can fit far more games on your SSD.
+- **Safe By Default:** Scans downloaded `.exe` and `.dll` mod files before launching, optionally runs untrusted games inside an isolated Windows sandbox, and keeps your API keys encrypted locally on your PC.
+- **Take Your Library on a USB Drive:** Drop an empty `portable.txt` file next to `Duke Launcher.exe` to store everything neatly in `./data/` with zero Registry or AppData clutter.
+
+---
+
+> [!NOTE]
+> **Active Focus:** **Duke Launcher** (`duke-launcher/`) is the active, recommended flagship application in this repository. Experimental companion folders (`duke-systems/`, `duke-monitor/`, `duke-capture/`, `duke-input/`, `duke-swarm-node/`, and `duke-companion/`) are currently **paused** — please download and use **Duke Launcher** from [Releases](https://github.com/willferrara/duke-systems/releases/latest).
+
+---
+
+<details>
+<summary><strong>Under the Hood (For Developers &amp; Systems Engineers)</strong></summary>
+
+### Architecture Overview (`v2.0.0`)
+
+**Duke Launcher** is built in Rust + Win32 FFI + Tauri v2 (`WebView2` UI rendered with Vanilla ES2022 JS and 10 zero-bloat CSS themes — zero Electron, zero Chromium bundling, zero runtime `.unwrap()` calls under `panic = "abort"`). It uses the workspace `duke-core` library with a cross-platform `PlatformBackend` abstraction supporting Windows `x86_64` / `aarch64` (ARM64) and feature-gated Linux / SteamOS targets.
 
 ```mermaid
 flowchart TD
-    User["Windows 11 Desktop / Controller (Duke Deck)"] -->|"Vanilla ES2022 + 10 Solid Themes"| UI["Tauri v2 WebView2 Shell (Main + Overlay Windows)"]
-    AI["AI Agents (--mcp stdio JSON-RPC 2.0)"] -->|"0 MB GUI RAM"| Engine["duke-launcher Rust Core"]
-    UI -->|"Tauri IPC Commands"| Engine
+    UI["Vanilla ES2022 UI (10 Solid CSS Themes + Inline SVG Sprites)"] -->|"Tauri v2 IPC"| CoreEngine["duke-launcher Rust Core (v2.0.0 Standalone)"]
+    CLI["Headless CLI Modes (--mcp / --bench / --stress-test)"] -->|"0 MB WebView2 RAM"| CoreEngine
 
-    subgraph Core["duke-core Shared Workspace Library"]
-        SHM["Lock-Free 64B SHM Bus (Local\\duke-suite-shm-v1)"]
-        Pipe["Named Pipe Control Bus (\\\\.\\pipe\\duke-suite)"]
+    subgraph PlatformLayer["duke-core PlatformBackend & Win32 FFI"]
+        Backend["PlatformBackend (Windows x64/ARM64 + Linux/SteamOS)"]
         DoH["DoH Resolver (Cloudflare / Quad9 / Direct) + Proxy"]
         NVMe["NVMe Pre-Launch Standby Warmer (PrefetchVirtualMemory)"]
-        Win32["Win32 FFI (Job Objects, NtSuspendProcess, Hardlinks, EcoQoS)"]
     end
 
-    Engine --> Core
-    Engine --> Companion["duke-companion (SteamOS / Bazzite Linux Tailscale 100.64.0.0/10)"]
-    Pipe --> Input["duke-input (1000 Hz Gyro / Ghost Playback / Remap)"]
-    Pipe --> Systems["duke-systems (Suite Command Hub & Tray Orchestrator)"]
-    Pipe --> Monitor["duke-monitor (Telemetry & Process Watch)"]
-    Pipe --> Capture["duke-capture (Low-Overhead Clips & Time-Machine Thumbs)"]
-
-    subgraph SecurityFix["Zero-Trust Security, Privacy & Repair"]
-        Jail["duke_jail.rs (AppContainer ACLs + Offline WFP Lock)"]
-        PE["pe_inspect.rs (WinVerifyTrust + PE API X-Ray + MOTW + Quarantine)"]
-        Vault["privacy_vault.rs (Windows DPAPI Keys + Anti-Telemetry Env)"]
-        Fix["fix_finder.rs (Crash Code Auto-Fix + Live PCGamingWiki API)"]
+    subgraph FrontierV2["v2.0.0 Frontier Engines"]
+        FSE["fse_shell.rs (Windows 11 FSE Console Home + Gamepad Guide + Bloat Guard)"]
+        Link["duke_link.rs (QUIC quinn+rustls Datagram Stream + AV1/HEVC + 4 Gamepads)"]
+        BLER["direct_storage.rs + deep_shrink.rs (GACL BLER BC1-BC5 Texture Conditioning)"]
+        Wasm["wasm_plugins.rs (Fuel-Metered wasmtime + Domain-Allowlisted Sandbox)"]
+        Chaos["stress_harness.rs (Deterministic Chaos + UI/DOM/IPC Parity Gate)"]
     end
 
-    subgraph RetroAutopilot["Retro Completeness, Autopilot & Frontier"]
-        Retro["bios_vault.rs · retro_achievements.rs · rom_patcher.rs · mod_dropper.rs"]
-        Pilot["duke_verified.rs · Ctrl+K Command Palette · Disk Pressure Autopilot"]
-        Frontier["etw_xray.rs (Kernel DXGI) · duke_ghost.rs (.dkghost) · duke_sandbox.rs (AC Guarded)"]
-        Uninst["uninstaller.rs (Zstd Save Archive + Orphan AppData Sweep)"]
+    subgraph SecurityRetro["Zero-Trust Security, Repair & Retro Preservation"]
+        Security["duke_jail.rs (AppContainer ACLs) + pe_inspect.rs (WinVerifyTrust + PE X-Ray)"]
+        Vault["privacy_vault.rs (DPAPI Vault) + fix_finder.rs (Crash Diagnostics + PCGamingWiki)"]
+        Preservation["bios_vault.rs + retro_achievements.rs + rom_patcher.rs + snapshots.rs (BLAKE3 CoW)"]
     end
 
-    Engine --> SecurityFix
-    Engine --> RetroAutopilot
+    CoreEngine --> PlatformLayer
+    CoreEngine --> FrontierV2
+    CoreEngine --> SecurityRetro
 ```
 
----
+### Key `v2.0.0` Engineering Systems
 
-## Quick Start
+- **Cross-Platform `PlatformBackend` (`duke-core/src/platform_backend.rs`):** Unifies OS sandbox isolation and frame-time telemetry across Windows `x86_64` / `aarch64-pc-windows-msvc` (`AppContainer`, `ETW`, `UserGpuPreferences`) and `x86_64-unknown-linux-gnu` (`Landlock` + `seccomp` + `bwrap` namespace stubs & `DRM`/`Gamescope` telemetry).
+- **Windows 11 Full Screen Experience (`fse_shell.rs`):** Registers `Duke Launcher.exe --couch` alongside Windows 11's `FSE` gaming shell, binds Xbox/PlayStation Guide triggers (`Win+G` / `VK_GAMEPAD_VIEW`), and trims/suspends non-essential background bloat while protecting critical Windows system processes via `is_safe_to_suspend_bloat_exe`.
+- **`Duke Link` v2 (`duke_link.rs`):** Replaces raw UDP with **QUIC (`quinn` + `rustls` with ephemeral self-signed certs)** unreliable datagrams, drops stale frames immediately on loss, probes hardware **AV1 / HEVC** encoders, adapts bitrate on a `50 ms` loop over Tailscale/LAN, and multiplexes up to **4 concurrent virtual XInput/DualSense gamepads**.
+- **DirectStorage 1.4 `GACL` / `BLER` `BC1`–`BC5` (`direct_storage.rs` & `deep_shrink.rs`):** Applies bijective block-level entropy reduction (`BLER` `DKDS_VERSION_V2`) to `.dds` `BC1`–`BC5` color/alpha/normal planes before Zstd streaming, yielding bit-exact GPU decompression and extra storage shrinkage.
+- **Capability-Gated `wasmtime` Plugin Sandbox (`wasm_plugins.rs`):** Runs community `.wasm` plugins inside a strict fuel-metered (`consume_fuel`) and memory-capped (`StoreLimitsBuilder`) sandbox with zero filesystem/WASI/credential access and HTTPS-only domain allowlisting (redirects disabled).
+- **Deterministic Chaos & Parity Stress Harness (`stress_harness.rs` + `--stress-test`):** Exercises corrupt `.zip` archives, multi-disc `.cue`/`.bin` `.m3u` sets, wrong-hash/missing BIOS dumps, disabled `Client-ProjFS`, malformed `library.json`/`settings.json`/Hydra/`.dkcat` recovery, `0xC000007B` crash repair, `BC1` BLER corruption detection, `wasmtime` HTTP exfil denial, and 100% DOM ID / SVG sprite / 10-theme / Tauri IPC parity.
+- **Security, Snapshots & Preservation:** `AppContainer` + WFP offline jails (`duke_jail.rs`), PE32/PE32+ import X-Ray + `WinVerifyTrust` (`pe_inspect.rs`), DPAPI secrets vault (`privacy_vault.rs`), `BLAKE3` + `CreateHardLinkW` CoW snapshots (`snapshots.rs`), `memmap2` trigram catalog (`catalog_mmap.rs`), `ETW` zero-injection frame-time telemetry (`etw_xray.rs`), and `portable.txt` portable storage (`./data/`).
 
-1. **Install or Extract:** Run the Duke Launcher NSIS/MSI installer, or extract the ZIP archive anywhere for portable execution.
-2. **Import Libraries Automatically:** Click **Import Existing Libraries** to scan Steam (VDF/ACF), Epic (`.item`), GOG (Registry), Xbox (`XboxGames`), or drop `.exe` files, folders, shortcuts, and ROMs directly onto the window.
-3. **Use Clean 1-Screen Cards:** Every game exposes **Play**, **Fix Game**, **Save Backup**, and **Settings** without cluttered menus.
-4. **Press `Ctrl+K` Anytime:** Open the unified **Everything Command Palette** to search installed games, the offline `.dkcat` catalog, online friends, settings toggles, save restore points, and 1-click security/fix actions.
-
----
-
-## Zero-Account Privacy & Security
-
-- **OS-Enforced AppContainer Game Jail (`duke_jail.rs`):** Confines untrusted or DRM-free titles via `userenv.dll` AppContainer tokens (`PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`) restricting file writes strictly to the game directory and `.duke-profile/`, with a **1-Click Offline Mode Network Lock** omitting `internetClient` and adding a per-executable Windows Filtering Platform (`WFP`) outbound block rule.
-- **Pre-Launch Malware X-Ray (`pe_inspect.rs`):** Analyzes PE32/PE32+ import tables for high-risk APIs (`VirtualAllocEx` + `WriteProcessMemory` + `CreateRemoteThread`, DPAPI/LSASS access, hidden PowerShell droppers, Run-key persistence), checks `WinVerifyTrust` Authenticode signatures, strips `:Zone.Identifier` safely on verified files, supports optional SHA-256 hash lookups, and quarantines suspicious payloads.
-- **Windows DPAPI Privacy Vault (`privacy_vault.rs`):** Encrypts optional Steam, Xbox (`xbl.io`), RetroAchievements, and SteamGridDB API keys under local user credentials (`CryptProtectData`), strips analytics env vars (`DO_NOT_TRACK=1`, `SENTRY_DSN=`, `UNITY_DISABLE_ANALYTICS=1`, `UE_DISABLE_CRASH_REPORTER=1`), and supports encrypted DoH + 1-click Tor / SOCKS5 / WireGuard proxy presets.
-- **Automatic Crash-to-Fix Engine (`fix_finder.rs`):** Detects `&lt;5s` premature exits and common Windows error codes (`0xC000007B`, `0xC0000005`, `0xC0000135`, `0x8007007E`), applies reversible fixes backed by `.duke-cas/` snapshots (missing DirectX/VC++ DLLs, 4 GB LAA patch, DXVK toggle, High-DPI/compatibility shims), and fetches live **PCGamingWiki** workaround/ultrawide/controller intelligence alongside **ProtonDB**, **Steam Discussions**, and **GitHub Issues** links.
-
----
-
-## Retro & PC Completeness
-
-- **1-Click BIOS & Firmware Vault (`bios_vault.rs`):** Scans archives (`.zip`/`.7z`) and folders, verifies exact MD5/SHA-1 checksums against Libretro `.info` manifests, routes valid BIOS images into DuckStation, PCSX2, melonDS, Azahar, and RetroArch `system/` paths, backs up verified dumps into `.duke-cas/`, and quarantines bad dumps.
-- **Native RetroAchievements (`retro_achievements.rs`):** Implements `rc_hash`-compatible hashing (stripping 16-byte iNES headers on NES, hashing internal executables on PS1/PS2/PSP/GameCube) with DPAPI-encrypted read-only API keys, Hardcore badges, and Windows 11 unlock notifications.
-- **Multi-Disc `.m3u` Grouping & Pure-Rust ROM Patcher (`rom_patcher.rs`):** Automatically groups `(Disc 1)`, `(Disc 2)` images into unified cards with generated `.m3u` playlists and applies `.ips`, `.bps`, `.ups`, and `.xdelta` patches natively in pure Rust with source CRC32/SHA-1 verification and non-destructive patched launch profiles.
-- **Clean Game Uninstaller (`uninstaller.rs`):** Optionally archives saves into `&lt;5 MB` Zstd bundles before removing the game folder, `.duke-profile/`, orphaned `%LOCALAPPDATA%` / `Documents\My Games` directories, dead Uninstall registry entries, firewall rules, and unreferenced `.duke-cas/` blobs.
-- **Workshop & Mod Archive Dropper (`mod_dropper.rs`):** Accepts Steam Workshop URLs or dragged Nexus `.zip`/`.7z` archives, scanning every dropped `.dll` and `.asi` with `pe_inspect.rs` heuristics before mod-graph staging.
-
----
-
-## Invisible Autopilot & Frontier Engines
-
-- **"Duke Verified" Compatibility Matrix (`duke_verified.rs`):** Keyed anonymously by binary BLAKE3 hash (hardware/OS identifiers stripped before export), auto-applying proven DXVK / 4 GB LAA / emulator core flags and mapping crashes to PCGamingWiki workarounds.
-- **Disk-Space Pressure Autopilot (`deep_shrink.rs` + `ntfs_compress.rs`):** Watches free space on your primary library drive against a configurable threshold (default `50 GB`), ranking untouched `60+` day games by reclaimable `WOF/LZX` compression + foreign language pack savings before user-confirmed compression and `.duke-cas/` cleanup.
-- **Zero-Injection ETW Performance Scorecard (`etw_xray.rs`):** Consumes `Microsoft-Windows-DXGI` &amp; `DxgKrnl` ETW events without injecting DLLs, computing `1%` / `0.1%` frame-time lows, CPU vs. GPU bottleneck percentages, shader-stutter counts, background-process spike correlations, GPU TDR resets, and actionable 1-click optimizations.
-- **Deterministic Input Ghost (`duke_ghost.rs` + `duke-input`):** Compresses 60 Hz delta controller streams into `~10 KB/min` Zstd `.dkghost` files synced with `Duke Time-Machine` checkpoints and automatically pauses playback if the game loses focus.
-- **Single-Player Overlay Trainer (`duke_sandbox.rs`):** Provides live value scanning/editing and `NtSetTimerResolution` speedhack pacing in the Guide overlay, immediately disarming whenever `EasyAntiCheat`, `BattlEye`, `Riot Vanguard`, or `FACEIT` is detected.
-- **Headless Linux / Steam Deck Companion (`duke-companion`):** Lightweight pure-Rust daemon for SteamOS and Bazzite nodes over Tailscale (`100.64.0.0/10`), streaming `64 KiB` heap-buffered BLAKE3 chunks and mapping `.duke-profile/` saves bidirectionally to Proton `compatdata/&lt;app_id&gt;/pfx/`.
-
----
-
-## 100% Portable USB Mode (`portable.txt`)
-
-Drop an empty **`portable.txt`** file (or `portable.flag`, or create a `./data/` folder) next to `Duke Launcher.exe`:
-- Zero files are written to host `%LOCALAPPDATA%`, AppData, or user Registry paths.
-- **`library.json`**, **`settings.json`**, **`catalog.dkcat`**, **`.duke-cas/`**, **`ghosts/`**, and **`emulators/`** resolve relative to the executable (`./data/`).
-
----
-
-## Headless CLI Modes (`--bench` &amp; `--mcp`)
+### Headless CLI Modes (`0 MB` WebView2 RAM)
 
 ```powershell
-# Self-contained hardware & throughput benchmark (0 MB WebView2 RAM)
+# Self-contained hardware & throughput benchmark
 duke-launcher.exe --bench
 
-# Headless Model Context Protocol (JSON-RPC 2.0 over stdio)
+# Deterministic chaos, fallback recovery & UI/IPC parity test suite
+duke-launcher.exe --stress-test
+
+# Headless Model Context Protocol server (JSON-RPC 2.0 over stdin/stdout)
 duke-launcher.exe --mcp
 ```
 
-Example MCP client entry:
+Example `mcp_config.json` entry:
 
 ```json
 {
@@ -148,24 +131,24 @@ Example MCP client entry:
 }
 ```
 
----
-
-## Build &amp; Verification From Source (Windows 11 / MSVC)
+### Build & Verification From Source (Windows 11 / MSVC)
 
 ```powershell
-# 1. Frontend syntax verification
+# 1. Frontend syntax check
 node --check duke-launcher/src/api.js
 node --check duke-launcher/src/main.js
 
-# 2. Workspace strict lint & unit tests
+# 2. Strict workspace lint & unit/integration test suite
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
-# 3. Optimized Windows x64 release build
+# 3. Optimized Windows release build
 Set-Location duke-launcher
 npm ci
 npm run tauri build
 ```
+
+</details>
 
 ---
 

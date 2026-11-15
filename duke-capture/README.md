@@ -1,5 +1,7 @@
 # Duke Capture
 
+> **Status: Experimental / Paused — Active development is focused exclusively on `Duke Launcher`. Please download and use `Duke Launcher` from Releases.**
+
 Zero-bloat **Instant Replay & Clip Studio** built with **Tauri v2**, **Rust**, and **Vanilla ES2022 JS/CSS**. Engineered as a fast, privacy-respecting replacement for Medal.tv, OBS Replay Buffer, and GeForce ShadowPlay.
 
 ## Key Capabilities

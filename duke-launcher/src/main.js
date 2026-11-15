@@ -266,7 +266,17 @@ import {
   getSandboxTrainerStatus,
   sandboxScanMemory,
   sandboxWriteMemoryValue,
-  sandboxSetSpeedhackScale
+  sandboxSetSpeedhackScale,
+  getFseShellStatus,
+  setFseGamingHome,
+  resumeWindowsBloatNow,
+  listWasmPlugins,
+  installWasmPlugin,
+  installDemoWasmPlugin,
+  setWasmPluginCapabilities,
+  executeWasmPlugin,
+  removeWasmPlugin,
+  runChaosStressHarness
 } from "./api.js";
 
 const BOOKMARKLET_HREF =
@@ -2270,9 +2280,10 @@ async function refreshSuiteAutonomyStrip() {
     if (busPill) {
       const conn = Number(status?.connectedCount || 0);
       const total = Number(status?.totalCount || 3);
-      const busTxt = status?.shmReady ? "SHM Bus Active" : "SHM Initializing";
-      const pipeTxt = status?.pipeOnline ? "Pipe Online" : "Pipe Standby";
-      busPill.textContent = `${busTxt} · ${pipeTxt} · ${conn}/${total} Suite Daemons Linked`;
+      busPill.textContent =
+        conn > 0
+          ? `100% Standalone Active · ${conn}/${total} Optional Companions Linked`
+          : "100% Standalone Active · Zero Companion Daemons Required";
     }
     const row = el("suite-autonomy-daemons-row");
     if (row && Array.isArray(status?.daemons)) {
@@ -2592,10 +2603,11 @@ function renderDetailDirectStorage(scan) {
     return;
   }
   const candCount = Array.isArray(scan.candidates) ? scan.candidates.length : 0;
+  const blerTex = Number(scan.blerTextureCandidates || 0);
   if (status) {
     status.textContent = `${candCount} asset archive${candCount === 1 ? "" : "s"} · ${formatBytesJs(
       scan.eligibleUncompressedBytes || 0
-    )} eligible for Zstd stream repack`;
+    )} eligible (${blerTex} BC1–BC5 BLER)`;
   }
   if (readout) {
     readout.textContent = `${Number(scan.existingPackedStreams || 0)} .dkds streams (${formatBytesJs(
@@ -2651,11 +2663,11 @@ function renderDetailDeepShrink(report) {
   }
   const buckets = Array.isArray(report.languageBuckets) ? report.languageBuckets : [];
   if (statusEl) {
+    const texCount = Number(report.texturePackFiles || 0);
+    const blerFmt = report.estimatedBlerSavingsFormatted || formatBytesJs(report.estimatedBlerSavingsBytes || 0);
     statusEl.textContent = `${report.totalReclaimableFormatted || "0 B"} reclaimable (${
       buckets.length
-    } non-English packs · ${Number(report.duplicateMediaFiles || 0)} duplicate media files / ${
-      report.duplicateMediaFormatted || "0 B"
-    })`;
+    } non-English packs · ${Number(report.duplicateMediaFiles || 0)} duplicate media · ${texCount} BCn BLER [${blerFmt}])`;
   }
   if (!bucketsEl) return;
   if (buckets.length === 0) {
@@ -3462,7 +3474,9 @@ function renderDukeLinkUi(snap) {
     el("coop-telemetry-kbps").textContent = active ? `Bitrate: ${Number(snap?.bitrateKbps || 0)} kbps` : "Bitrate: -- kbps";
   }
   if (el("coop-telemetry-p2")) {
-    el("coop-telemetry-p2").textContent = `P2 Inputs: ${Number(snap?.p2InputPackets || 0)}`;
+    const pCount = Number(snap?.activePlayers || 1);
+    const maxP = Number(snap?.maxPlayers || 4);
+    el("coop-telemetry-p2").textContent = `Pads ${pCount}/${maxP} · Inputs: ${Number(snap?.p2InputPackets || 0)}`;
   }
   if (!active) {
     el("coop-canvas-empty")?.classList.remove("hidden");
@@ -6419,6 +6433,109 @@ function applyCouchMode(enabled, persist = false, controllerKind = null) {
   }
 }
 
+function syncFseShellUi(fse) {
+  if (!fse) return;
+  const chk = el("setting-fse-gaming-home");
+  if (chk) chk.checked = Boolean(fse.gamingHomeEnabled);
+  const pill = el("setting-fse-bloat-pill");
+  if (pill) {
+    const cnt = Number(fse.suspendedCount || 0);
+    pill.textContent = fse.gamingHomeEnabled
+      ? cnt > 0
+        ? `FSE Active · ${cnt} Bloat Paused (${Number(fse.totalFreedMb || 0).toFixed(0)} MB)`
+        : "FSE Gaming Home Active"
+      : "Desktop Mode";
+    pill.className = `pill mono-num ${fse.gamingHomeEnabled ? "emerald" : ""}`;
+  }
+  const desc = el("setting-fse-status-desc");
+  if (desc && fse.statusSummary) {
+    desc.textContent = fse.statusSummary;
+  }
+}
+
+function renderWasmPluginsList(plugins) {
+  const listEl = el("settings-wasm-plugins-list");
+  const countPill = el("wasm-plugins-count-pill");
+  const list = Array.isArray(plugins) ? plugins : [];
+  if (countPill) {
+    countPill.textContent = `${list.length} Sandboxed Plugin${list.length === 1 ? "" : "s"}`;
+  }
+  if (!listEl) return;
+  if (list.length === 0) {
+    listEl.innerHTML = `<div class="panel-sub">No community .wasm/.wat plugins installed yet. Click Install Demo Metadata Provider to inspect zero-trust capability sandboxing.</div>`;
+    return;
+  }
+
+  const hookOptions = ["metadata_lookup", "rom_database", "storefront_feed"];
+  listEl.innerHTML = list
+    .map((p) => {
+      const grants = p.grantedCapabilities || {};
+      const domainsVal = Array.isArray(grants.allowedDomains) ? grants.allowedDomains.join(", ") : "";
+      const grantedHooks = new Set(Array.isArray(grants.allowedHooks) ? grants.allowedHooks : []);
+      const hookChecks = hookOptions
+        .map(
+          (hk) => `
+          <label class="wave2-check-chip">
+            <input type="checkbox" data-wasm-hook="${escapeHtml(hk)}" ${grantedHooks.has(hk) ? "checked" : ""} />
+            <span class="mono-num">${escapeHtml(hk)}</span>
+          </label>`
+        )
+        .join("");
+      const shortSha = (p.sha256 || "").slice(0, 12);
+      const errHtml = p.lastError
+        ? `<div class="panel-sub mono-num">Last Capability Notice: ${escapeHtml(p.lastError)}</div>`
+        : "";
+      return `
+        <div class="wave2-subpanel" data-wasm-plugin-card="${escapeHtml(p.id)}">
+          <div class="detail-field-head">
+            <strong>${escapeHtml(p.name || p.id)}</strong>
+            <span class="pill mono-num ${p.enabled ? "emerald" : ""}">${p.enabled ? "Enabled" : "Disabled"} · SHA256:${escapeHtml(shortSha)}</span>
+          </div>
+          <p class="panel-sub">${escapeHtml(p.description || "")}</p>
+          ${errHtml}
+          <div class="wave2-form-grid">
+            <label>
+              <span>Explicitly Approved HTTPS Domains (No Wildcards)</span>
+              <input type="text" class="input-control mono-num" data-wasm-domains value="${escapeHtml(domainsVal)}" placeholder="api.rawg.io, metadata.example.org" />
+            </label>
+            <div class="wave2-inline-checks">
+              <label class="wave2-check-chip">
+                <input type="checkbox" data-wasm-enabled ${p.enabled ? "checked" : ""} />
+                <span>Plugin Enabled</span>
+              </label>
+              <label class="wave2-check-chip">
+                <input type="checkbox" data-wasm-titles ${grants.allowReadOnlyLibraryTitles ? "checked" : ""} />
+                <span>Read-Only Game Titles</span>
+              </label>
+              ${hookChecks}
+            </div>
+          </div>
+          <div class="detail-save-actions">
+            <button type="button" class="btn btn-primary btn-xs" data-wasm-action="save" data-wasm-id="${escapeHtml(p.id)}">Save Capabilities</button>
+            <button type="button" class="btn btn-secondary btn-xs" data-wasm-action="run" data-wasm-id="${escapeHtml(p.id)}">
+              <svg class="icon" aria-hidden="true"><use href="#icon-play"/></svg>
+              <span>Run Hook</span>
+            </button>
+            <button type="button" class="btn btn-secondary btn-xs" data-wasm-action="remove" data-wasm-id="${escapeHtml(p.id)}">
+              <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
+              <span>Remove</span>
+            </button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+async function refreshWasmPluginsUi() {
+  try {
+    const plugins = await listWasmPlugins();
+    renderWasmPluginsList(plugins);
+  } catch {
+    renderWasmPluginsList([]);
+  }
+}
+
 const PILOT_EXAMPLES = [
   "Shrink my biggest games over 50 GB",
   "Set up Cemu and import my Wii U folder",
@@ -8980,6 +9097,133 @@ async function openCleanUninstallModalForGame(game) {
 
   el("setting-couch-mode")?.addEventListener("change", (e) => {
     applyCouchMode(Boolean(e.target.checked), true);
+  });
+
+  el("setting-fse-gaming-home")?.addEventListener("change", async (e) => {
+    const enabled = Boolean(e.target.checked);
+    try {
+      const fse = await setFseGamingHome(enabled, true);
+      syncFseShellUi(fse);
+      if (enabled) applyCouchMode(true, false);
+      showToast(fse?.statusSummary || (enabled ? "Duke Deck set as Windows Gaming Home." : "Desktop shell restored."), "success");
+    } catch (err) {
+      e.target.checked = !enabled;
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-fse-resume-bloat")?.addEventListener("click", async () => {
+    try {
+      const rep = await resumeWindowsBloatNow();
+      const fse = await getFseShellStatus().catch(() => null);
+      if (fse) syncFseShellUi(fse);
+      showToast(rep?.message || "Resumed background Windows processes.", "info");
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-wasm-install-file")?.addEventListener("click", async () => {
+    try {
+      const picked = await pickBiosOrPatchFile([
+        { name: "WebAssembly Plugin (.wasm / .wat)", extensions: ["wasm", "wat"] }
+      ]);
+      if (!picked) return;
+      const plugin = await installWasmPlugin(picked, null, [], ["metadata_lookup"]);
+      await refreshWasmPluginsUi();
+      showToast(
+        `Installed sandboxed plugin "${plugin?.name || "Plugin"}" with 0 domain grants. Approve explicit capabilities below before execution.`,
+        "success",
+        4200
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-wasm-install-demo")?.addEventListener("click", async () => {
+    try {
+      const plugin = await installDemoWasmPlugin();
+      await refreshWasmPluginsUi();
+      showToast(
+        `Installed "${plugin?.name || "Demo Plugin"}" inside Wasmtime zero-trust sandbox.`,
+        "success",
+        3400
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-wasm-refresh")?.addEventListener("click", () => refreshWasmPluginsUi());
+
+  el("btn-run-chaos-harness")?.addEventListener("click", async () => {
+    const btn = el("btn-run-chaos-harness");
+    if (btn) btn.disabled = true;
+    showToast("Running v2.0.0 chaos & UI/IPC verification harness...", "info", 2800);
+    try {
+      const rep = await runChaosStressHarness();
+      const ok = Number(rep?.failedCases || 0) === 0;
+      showToast(
+        `Chaos Self-Test: ${rep?.passedCases || 0}/${rep?.totalCases || 0} checks passed in ${rep?.elapsedMs || 0} ms.`,
+        ok ? "success" : "error",
+        4600
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  el("settings-wasm-plugins-list")?.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-wasm-action]");
+    if (!btn) return;
+    const action = btn.dataset.wasmAction;
+    const pluginId = btn.dataset.wasmId;
+    const card = btn.closest("[data-wasm-plugin-card]");
+    if (!pluginId || !card) return;
+
+    if (action === "save") {
+      const domainsRaw = card.querySelector("[data-wasm-domains]")?.value || "";
+      const allowedDomains = domainsRaw
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const allowedHooks = Array.from(card.querySelectorAll("input[data-wasm-hook]:checked")).map(
+        (cb) => cb.dataset.wasmHook
+      );
+      const enabled = Boolean(card.querySelector("[data-wasm-enabled]")?.checked);
+      const allowTitles = Boolean(card.querySelector("[data-wasm-titles]")?.checked);
+      try {
+        await setWasmPluginCapabilities(pluginId, enabled, allowedDomains, allowedHooks, allowTitles);
+        await refreshWasmPluginsUi();
+        showToast("Updated WebAssembly plugin capability grants.", "success");
+      } catch (err) {
+        showToast(String(err), "error");
+      }
+    } else if (action === "run") {
+      try {
+        const res = await executeWasmPlugin(pluginId, "metadata_lookup", "");
+        await refreshWasmPluginsUi();
+        showToast(
+          `WASM executed (${res?.fuelConsumed || 0} fuel, ${res?.emittedRecords?.length || 0} records, ${res?.capabilityDenials?.length || 0} denied calls).`,
+          res?.capabilityDenials?.length ? "info" : "success",
+          4200
+        );
+      } catch (err) {
+        await refreshWasmPluginsUi();
+        showToast(String(err), "error");
+      }
+    } else if (action === "remove") {
+      try {
+        const updated = await removeWasmPlugin(pluginId);
+        renderWasmPluginsList(updated);
+        showToast("Removed WebAssembly plugin from sandbox.", "info");
+      } catch (err) {
+        showToast(String(err), "error");
+      }
+    }
   });
 
   el("btn-settings-import-libraries")?.addEventListener("click", runImportLibrariesFlow);
@@ -11635,9 +11879,12 @@ async function openCleanUninstallModalForGame(game) {
         document.querySelectorAll('#detail-shrink-buckets input[type="checkbox"][data-shrink-lang]:checked')
       ).map((inp) => inp.dataset.shrinkLang);
       const dedupInternalMedia = Boolean(el("detail-shrink-dedup-media")?.checked);
-      showToast("Saving .duke-cas restore point & stripping selected language packs...", "info", 3200);
+      const conditionBler = el("detail-shrink-bler-textures")
+        ? Boolean(el("detail-shrink-bler-textures").checked)
+        : true;
+      showToast("Saving .duke-cas restore point & running Deep Shrink + BLER pass...", "info", 3200);
       try {
-        const rep = await applyGameDeepShrink(g.id, stripLanguages, dedupInternalMedia, ["english"]);
+        const rep = await applyGameDeepShrink(g.id, stripLanguages, dedupInternalMedia, ["english"], conditionBler);
         await refreshAllData().catch(() => {});
         const rescan = await scanGameDeepShrink(g.id, ["english"]).catch(() => null);
         if (rescan) renderDetailDeepShrink(rescan);
@@ -12704,6 +12951,10 @@ async function init() {
       }
     })
     .catch(() => {});
+  getFseShellStatus()
+    .then((fse) => syncFseShellUi(fse))
+    .catch(() => {});
+  refreshWasmPluginsUi().catch(() => {});
   listenCouchStateChanged((cs) => {
     if (!cs) return;
     if (Array.isArray(cs.radialSlots)) state.radialSlots = cs.radialSlots;

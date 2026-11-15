@@ -1,10 +1,15 @@
 # Local Design Rulebooks & Scratch Tooling
 .design-tools/
 
-# Rust / Tauri Build Artifacts
+# Rust / Tauri / Node Build & Log Artifacts
 **/target/
+**/node_modules/
 **/WixTools/
 **/*.rs.bk
+*.log
+*.tmp
+task-*.log
+release-assets/
 
 # Environment & OS Metadata
 .env

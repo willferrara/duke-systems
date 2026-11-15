@@ -1,16 +1,17 @@
-﻿name: Release Windows x64
+﻿name: Release Duke Launcher (Flagship)
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   build-duke-launcher:
-    name: Build Duke Launcher (windows-latest)
+    name: Build Flagship Duke Launcher (windows-latest)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -18,33 +19,47 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
-            duke-core -> target
-            duke-launcher/src-tauri -> target
+            . -> target
+      - name: Verify frontend syntax
+        run: |
+          node --check duke-launcher/src/api.js
+          node --check duke-launcher/src/main.js
+      - name: Run Duke Launcher verification tests
+        run: |
+          cargo clippy --manifest-path duke-launcher/src-tauri/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path duke-launcher/src-tauri/Cargo.toml
       - name: Install frontend dependencies
         working-directory: duke-launcher
         run: npm ci
-      - name: Build Tauri Windows x64 release
+      - name: Build Tauri Windows x64 release (Duke Launcher)
         working-directory: duke-launcher
         run: npm run tauri build
-      - name: Stage release binaries
+      - name: Stage flagship Duke Launcher release binaries
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path release-assets -Force | Out-Null
-          Copy-Item "duke-launcher/src-tauri/target/release/duke-launcher.exe" "release-assets/Duke-Launcher-x64.exe" -Force
-          $nsis = Get-ChildItem "duke-launcher/src-tauri/target/release/bundle/nsis/*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $targetRoot = if (Test-Path "target/release/duke-launcher.exe") { "target/release" } else { "duke-launcher/src-tauri/target/release" }
+          Copy-Item "$targetRoot/duke-launcher.exe" "release-assets/Duke-Launcher-x64.exe" -Force
+          $nsis = Get-ChildItem "$targetRoot/bundle/nsis/*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($nsis) { Copy-Item $nsis.FullName "release-assets/Duke-Launcher-x64-setup.exe" -Force }
-      - name: Upload assets to GitHub Release
+          $msi = Get-ChildItem "$targetRoot/bundle/msi/*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($msi) { Copy-Item $msi.FullName "release-assets/Duke-Launcher-x64.msi" -Force }
+      - name: Upload flagship Duke Launcher assets to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
+          $notes = "Flagship standalone release of **Duke Launcher** ($env:TAG_NAME) — zero accounts, sub-25 MB RAM, Windows 11 FSE console mode, QUIC/AV1 Duke Link v2, DirectStorage BLER conditioning, and sandboxed WebAssembly plugins."
           gh release view $env:TAG_NAME *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $env:TAG_NAME release-assets/* --clobber
           } else {
-            gh release create $env:TAG_NAME release-assets/* --title "Duke Launcher $env:TAG_NAME" --generate-notes
+            gh release create $env:TAG_NAME release-assets/* --title "Duke Launcher $env:TAG_NAME" --notes $notes
           }

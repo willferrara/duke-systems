@@ -1,5 +1,7 @@
 # Duke Systems
 
+> **Status: Experimental / Paused — Active development is focused exclusively on `Duke Launcher`. Please download and use `Duke Launcher` from Releases.**
+
 **Unified Low-RAM Windows Systems Suite Command Deck** (`Duke Systems.exe`) built with **Tauri v2 + Rust + Vanilla JS/CSS** and powered by **`duke-core`**.
 
 Duke Systems acts as the lightweight central launcher, live process telemetry console, and persistent **`\\.\pipe\duke-suite`** Named Pipe IPC hub coordinating the four specialized Duke Suite applications:

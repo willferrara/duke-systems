@@ -609,8 +609,8 @@ fn extract_gaming_root_subdir(bytes: &[u8]) -> Option<String> {
     }
     let slice = &bytes[8..];
     let mut u16_units = Vec::with_capacity(slice.len() / 2);
-    for pair in slice.chunks_exact(2) {
-        let code = u16::from_le_bytes([pair[0], pair[1]]);
+    for pair in slice.as_chunks::<2>().0 {
+        let code = u16::from_le_bytes(*pair);
         if code == 0 {
             if !u16_units.is_empty() {
                 break;

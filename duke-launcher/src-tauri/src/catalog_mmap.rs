@@ -1598,8 +1598,8 @@ impl MappedCatalog {
         }
 
         let mut fetched_pages = Vec::with_capacity(pages_count);
-        for chunk in bytes[pages_start..pages_end].chunks_exact(4) {
-            fetched_pages.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        for chunk in bytes[pages_start..pages_end].as_chunks::<4>().0 {
+            fetched_pages.push(u32::from_le_bytes(*chunk));
         }
 
         let trigram_table_offset = pages_end;
@@ -1941,8 +1941,8 @@ impl MappedCatalog {
             } else {
                 posting_slices.sort_by_key(|s| s.len());
                 let mut acc = Vec::with_capacity(posting_slices[0].len() / 4);
-                for chunk in posting_slices[0].chunks_exact(4) {
-                    acc.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                for chunk in posting_slices[0].as_chunks::<4>().0 {
+                    acc.push(u32::from_le_bytes(*chunk));
                 }
                 for other in posting_slices.into_iter().skip(1) {
                     intersect_sorted_u32_bytes_in_place(&mut acc, other);
@@ -2766,8 +2766,8 @@ pub fn try_migrate_dkcat_legacy_to_v3(dkcat_path: &Path) -> Result<bool, String>
                 return Err("Truncated legacy page list".to_string());
             }
             let mut fetched_pages = Vec::with_capacity(pages_count);
-            for chunk in bytes[pages_start..pages_end].chunks_exact(4) {
-                fetched_pages.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+            for chunk in bytes[pages_start..pages_end].as_chunks::<4>().0 {
+                fetched_pages.push(u32::from_le_bytes(*chunk));
             }
 
             let mut entries = Vec::with_capacity(header.record_count as usize);

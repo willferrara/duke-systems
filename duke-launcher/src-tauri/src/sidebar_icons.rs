@@ -179,7 +179,7 @@ fn decode_png_to_rgba(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
                 return None;
             }
             let mut out = Vec::with_capacity(pixel_count * 4);
-            for rgb in frame[..pixel_count * 3].chunks_exact(3) {
+            for rgb in frame[..pixel_count * 3].as_chunks::<3>().0 {
                 out.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
             }
             out
@@ -189,7 +189,7 @@ fn decode_png_to_rgba(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
                 return None;
             }
             let mut out = Vec::with_capacity(pixel_count * 4);
-            for ga in frame[..pixel_count * 2].chunks_exact(2) {
+            for ga in frame[..pixel_count * 2].as_chunks::<2>().0 {
                 out.extend_from_slice(&[ga[0], ga[0], ga[0], ga[1]]);
             }
             out
@@ -352,7 +352,12 @@ pub(crate) fn lanczos3_resize_rgba(
 
     // Convert to premultiplied linear float RGBA `[r*a, g*a, b*a, a]` in 0..1
     let mut premul = vec![0.0f64; sw * sh * 4];
-    for (dst_px, src_px) in premul.chunks_exact_mut(4).zip(rgba[..expected].chunks_exact(4)) {
+    for (dst_px, src_px) in premul
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(rgba[..expected].as_chunks::<4>().0.iter())
+    {
         let a = src_px[3] as f64 / 255.0;
         dst_px[0] = (src_px[0] as f64 / 255.0) * a;
         dst_px[1] = (src_px[1] as f64 / 255.0) * a;
@@ -556,11 +561,11 @@ fn hicon_to_rgba(hicon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Optio
             }
 
             // Convert BGRA -> RGBA
-            for px in pixels.chunks_exact_mut(4) {
+            for px in pixels.as_chunks_mut::<4>().0 {
                 px.swap(0, 2);
             }
 
-            let has_alpha = pixels.chunks_exact(4).any(|px| px[3] != 0);
+            let has_alpha = pixels.as_chunks::<4>().0.iter().any(|px| px[3] != 0);
             if !has_alpha {
                 if !mask_guard.0.is_invalid() {
                     let mut mask_pixels = vec![0u8; byte_len];
@@ -574,8 +579,11 @@ fn hicon_to_rgba(hicon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Optio
                         DIB_RGB_COLORS,
                     );
                     if mask_lines != 0 {
-                        for (px, mpx) in
-                            pixels.chunks_exact_mut(4).zip(mask_pixels.chunks_exact(4))
+                        for (px, mpx) in pixels
+                            .as_chunks_mut::<4>()
+                            .0
+                            .iter_mut()
+                            .zip(mask_pixels.as_chunks::<4>().0.iter())
                         {
                             // In the AND mask: 0 = opaque icon pixel, non-zero = transparent background
                             if mpx[0] == 0 {
@@ -588,18 +596,18 @@ fn hicon_to_rgba(hicon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Optio
                             }
                         }
                     } else {
-                        for px in pixels.chunks_exact_mut(4) {
+                        for px in pixels.as_chunks_mut::<4>().0 {
                             px[3] = 255;
                         }
                     }
                 } else {
-                    for px in pixels.chunks_exact_mut(4) {
+                    for px in pixels.as_chunks_mut::<4>().0 {
                         px[3] = 255;
                     }
                 }
             }
 
-            if !pixels.chunks_exact(4).any(|px| px[3] > 0) {
+            if !pixels.as_chunks::<4>().0.iter().any(|px| px[3] > 0) {
                 return None;
             }
             return Some((pixels, width as u32, height as u32));
@@ -641,9 +649,11 @@ fn hicon_to_rgba(hicon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Optio
             let (and_slice, xor_slice) = mask_pixels.split_at(half_bytes);
             let mut rgba = vec![0u8; half_bytes];
             for ((out_px, and_px), xor_px) in rgba
-                .chunks_exact_mut(4)
-                .zip(and_slice.chunks_exact(4))
-                .zip(xor_slice.chunks_exact(4))
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(and_slice.as_chunks::<4>().0.iter())
+                .zip(xor_slice.as_chunks::<4>().0.iter())
             {
                 if and_px[0] == 0 {
                     let v = if xor_px[0] != 0 { 255 } else { 0 };
@@ -653,7 +663,7 @@ fn hicon_to_rgba(hicon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Optio
                     out_px[3] = 255;
                 }
             }
-            if !rgba.chunks_exact(4).any(|px| px[3] > 0) {
+            if !rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0) {
                 return None;
             }
             return Some((rgba, width as u32, height as u32));
@@ -790,12 +800,12 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
         .bytes()
         .filter(|&b| !b.is_ascii_whitespace())
         .collect();
-    if cleaned.is_empty() || cleaned.len() % 4 != 0 {
+    if cleaned.is_empty() || !cleaned.len().is_multiple_of(4) {
         return None;
     }
 
     let mut out = Vec::with_capacity((cleaned.len() / 4) * 3);
-    for chunk in cleaned.chunks_exact(4) {
+    for chunk in cleaned.as_chunks::<4>().0 {
         let a = lut[chunk[0] as usize];
         let b = lut[chunk[1] as usize];
         if a < 0 || b < 0 {
@@ -1174,7 +1184,7 @@ mod tests {
             .expect("Expected Win32 icon extraction for notepad.exe");
         let (rgba, w, h) = decode_png_to_rgba(&fs::read(&out_path).unwrap()).unwrap();
         assert_eq!((w, h), (32, 32));
-        assert!(rgba.chunks_exact(4).any(|px| px[3] > 0));
+        assert!(rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0));
 
         let _ = fs::remove_dir_all(&root);
     }

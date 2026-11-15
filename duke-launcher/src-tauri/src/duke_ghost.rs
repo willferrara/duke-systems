@@ -264,11 +264,11 @@ pub fn decode_dkghost_bytes(bytes: &[u8]) -> Result<(GhostHeaderMetadata, Vec<Gh
         .take(MAX_GHOST_BYTES as u64)
         .read_to_end(&mut raw)
         .map_err(|e| format!("Failed decoding Zstd ghost stream: {e}"))?;
-    if raw.len() % 10 != 0 {
+    if !raw.len().is_multiple_of(10) {
         return Err("Corrupt .dkghost frame alignment.".to_string());
     }
     let mut frames = Vec::with_capacity(raw.len() / 10);
-    for chunk in raw.chunks_exact(10) {
+    for chunk in raw.as_chunks::<10>().0 {
         let delta_ms = u16::from_le_bytes([chunk[0], chunk[1]]);
         let buttons = u16::from_le_bytes([chunk[2], chunk[3]]);
         frames.push(GhostDeltaFrame {

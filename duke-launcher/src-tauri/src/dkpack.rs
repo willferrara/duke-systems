@@ -658,11 +658,11 @@ pub fn apply_dkpack_recipe_in_dir(
 
 fn decode_hex_bytes(hex: &str) -> Result<Vec<u8>, String> {
     let clean = hex.trim();
-    if clean.len() % 2 != 0 {
+    if !clean.len().is_multiple_of(2) {
         return Err("Invalid odd-length hex patch payload".to_string());
     }
     let mut out = Vec::with_capacity(clean.len() / 2);
-    for pair in clean.as_bytes().chunks_exact(2) {
+    for pair in clean.as_bytes().as_chunks::<2>().0 {
         let s = std::str::from_utf8(pair).map_err(|_| "Non-UTF8 hex patch".to_string())?;
         let val = u8::from_str_radix(s, 16)
             .map_err(|_| format!("Invalid hex byte '{}' in .dkpack patch", s))?;

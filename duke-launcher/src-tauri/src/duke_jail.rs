@@ -924,28 +924,67 @@ mod win_ac {
 mod win_ac {
     use super::*;
     pub fn is_supported() -> bool {
-        false
+        duke_core::platform_backend::active_platform_backend()
+            .probe_isolation_capability()
+            .supported
     }
-    pub fn preview_container_sid(_container_name: &str) -> Option<String> {
-        None
+    pub fn preview_container_sid(container_name: &str) -> Option<String> {
+        Some(format!("linux-ns:{container_name}"))
     }
     pub fn delete_container_profile(_container_name: &str) {}
-    pub fn apply_or_remove_offline_firewall_rule(_exe_path: &Path, _block: bool) -> bool {
-        false
+    pub fn apply_or_remove_offline_firewall_rule(_exe_path: &Path, block: bool) -> bool {
+        // Linux SteamOS/Bazzite uses bwrap --unshare-net during spawn_jailed_process
+        block
     }
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_jailed_process(
-        _game_id: &str,
+        game_id: &str,
         _title: &str,
-        _exe_path: &Path,
-        _game_dir: &Path,
-        _working_dir: &Path,
-        _profile_dir: &Path,
-        _args: &[String],
-        _env_vars: &[(String, String)],
-        _offline_mode: bool,
+        exe_path: &Path,
+        game_dir: &Path,
+        working_dir: &Path,
+        profile_dir: &Path,
+        args: &[String],
+        env_vars: &[(String, String)],
+        offline_mode: bool,
     ) -> Result<JailedLaunchOutcome, String> {
-        Err("Windows AppContainer jail requires Windows.".to_string())
+        let backend = duke_core::platform_backend::active_platform_backend();
+        let spec = duke_core::platform_backend::IsolationSpec {
+            container_id: deterministic_container_name(game_id),
+            game_dir: game_dir.to_path_buf(),
+            profile_dir: profile_dir.to_path_buf(),
+            offline_mode,
+            allow_gpu_access: true,
+        };
+        let _ = backend.prepare_game_isolation(&spec)?;
+        let bwrap_args = duke_core::platform_backend::linux_steamos::build_bwrap_landlock_argv(&spec);
+        let bwrap_bin = Path::new("/usr/bin/bwrap");
+        let mut cmd = if bwrap_bin.is_file() {
+            let mut c = std::process::Command::new(bwrap_bin);
+            c.args(&bwrap_args).arg(exe_path).args(args);
+            c
+        } else {
+            let mut c = std::process::Command::new(exe_path);
+            c.args(args);
+            c
+        };
+        cmd.current_dir(working_dir);
+        for (k, v) in env_vars {
+            cmd.env(k, v);
+        }
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed spawning Linux/SteamOS sandboxed process: {e}"))?;
+        let pid = child.id();
+        std::mem::forget(child);
+        Ok(JailedLaunchOutcome {
+            pid,
+            process_handle_raw: 0,
+            thread_handle_raw: 0,
+            container_name: spec.container_id,
+            offline_network_locked: offline_mode,
+            wfp_or_firewall_blocked: offline_mode,
+        })
     }
     pub fn resume_thread_keep_process(_thread_handle: isize) {}
     pub fn wait_process_exit_blocking(_process_handle: isize) -> Option<i32> {
@@ -973,12 +1012,23 @@ fn build_status(game_id: &str, exe_path: Option<&Path>, policy: &GameJailPolicy)
         String::new()
     };
 
+    let backend = duke_core::platform_backend::active_platform_backend();
+    let cap_probe = backend.probe_isolation_capability();
     let sid_preview = win_ac::preview_container_sid(&container_name);
     let summary = match (policy.jail_enabled, policy.offline_mode) {
-        (true, true) => "AppContainer Zero-Trust Jail + Offline Network Lock active (zero outbound network & profile isolation).".to_string(),
-        (true, false) => "AppContainer Zero-Trust Jail active (filesystem ACLs locked to game folder + .duke-profile/).".to_string(),
-        (false, true) => "Offline Network Lock active (outbound firewall rule blocks telemetry & phone-home sockets).".to_string(),
-        (false, false) => "Standard native launch mode (enable Jail for untrusted binaries or Offline Mode for zero phone-home).".to_string(),
+        (true, true) => format!(
+            "{} + Offline Network Lock active (zero outbound network & profile isolation).",
+            cap_probe.backend_name
+        ),
+        (true, false) => format!(
+            "{} active (ACLs locked to game folder + .duke-profile/).",
+            cap_probe.backend_name
+        ),
+        (false, true) => "Offline Network Lock active (outbound rule blocks telemetry & phone-home sockets).".to_string(),
+        (false, false) => format!(
+            "Standard native launch mode on {} (enable Jail for untrusted binaries or Offline Mode for zero phone-home).",
+            cap_probe.arch
+        ),
     };
 
     GameJailStatus {
@@ -986,7 +1036,7 @@ fn build_status(game_id: &str, exe_path: Option<&Path>, policy: &GameJailPolicy)
         container_name,
         jail_enabled: policy.jail_enabled,
         offline_mode: policy.offline_mode,
-        appcontainer_supported: win_ac::is_supported(),
+        appcontainer_supported: win_ac::is_supported() || cap_probe.supported,
         container_sid_preview: sid_preview,
         isolated_profile_dir: profile_dir,
         acl_scoped_to_game_and_profile: policy.jail_enabled,

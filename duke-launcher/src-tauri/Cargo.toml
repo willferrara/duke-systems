@@ -1,18 +1,18 @@
 [package]
 name = "duke-launcher"
-version = "1.0.0"
+version = "2.0.0"
 description = "Duke Launcher - Turbo Download Manager, Malware Shield & Game Launcher"
 authors = ["Duke Launcher Contributors"]
 license = "MIT"
 repository = "https://github.com/duke-systems/duke-systems"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.92.0"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-duke-core = { version = "0.1.0", path = "../../duke-core", features = ["win32-trim", "eco-qos", "net-doh", "pipe-ipc", "tray-daemon", "shm-bus", "nvme-prefetch"] }
+duke-core = { version = "0.1.0", path = "../../duke-core", features = ["win32-trim", "eco-qos", "net-doh", "pipe-ipc", "tray-daemon", "shm-bus", "nvme-prefetch", "platform-backend"] }
 tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
@@ -37,6 +37,11 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 futures-util = "0.3"
 base64 = "0.22"
+bytes = "1"
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
+wasmtime = { version = "44", default-features = false, features = ["runtime", "cranelift", "std", "wat"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = [
@@ -67,13 +72,3 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
-
-[profile.dev]
-incremental = true
-
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-strip = true

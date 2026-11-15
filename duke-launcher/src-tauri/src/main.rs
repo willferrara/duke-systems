@@ -58,8 +58,11 @@ mod duke_jail;
 mod duke_pilot;
 mod duke_sandbox;
 mod fix_finder;
+mod fse_shell;
 mod privacy_vault;
+mod stress_harness;
 mod vhdx_stage;
+mod wasm_plugins;
 
 use duke_core::pipe_ipc::{DukeBus, DukeEvent};
 use duke_core::shm_bus::{DukeShmBus, ShmEventType, ShmSourceApp};
@@ -177,20 +180,20 @@ fn get_suite_autonomy_status() -> Value {
     let specs = [
         (
             "monitor",
-            "Monitor",
-            "GPU Power & EcoQoS",
+            "Monitor (Optional)",
+            "Standalone telemetry built-in",
             ShmSourceApp::DukeMonitor,
         ),
         (
             "capture",
-            "Capture",
-            "NVENC Replay & Clip Tagging",
+            "Capture (Optional)",
+            "Standalone highlight log active",
             ShmSourceApp::DukeCapture,
         ),
         (
             "input",
-            "Input",
-            "5-Point Bezier & Virtual P2",
+            "Input (Optional)",
+            "Standalone XInput/QUIC built-in",
             ShmSourceApp::DukeInput,
         ),
     ];
@@ -207,7 +210,7 @@ fn get_suite_autonomy_status() -> Value {
         } else if shm_linked {
             "SHM Linked"
         } else {
-            "Standby"
+            "Standalone Ready"
         };
         daemons.push(serde_json::json!({
             "id": id,
@@ -221,6 +224,7 @@ fn get_suite_autonomy_status() -> Value {
     }
 
     serde_json::json!({
+        "standalone": true,
         "shmReady": shm_ready,
         "pipeOnline": pipe_online,
         "connectedCount": connected_count,
@@ -1235,6 +1239,31 @@ pub(crate) fn extract_archive_to_folder_sync(archive_path: &Path, dest_dir: &Pat
             .map_err(|e| format!("Failed to create extraction folder: {}", e))?;
     }
 
+    if archive_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+    {
+        let mut file = File::open(archive_path)
+            .map_err(|e| format!("Failed to open ZIP archive: {}", e))?;
+        let file_len = file
+            .metadata()
+            .map_err(|e| format!("Failed to stat ZIP archive: {}", e))?
+            .len();
+        if file_len < 22 {
+            return Err("Corrupt ZIP archive: file smaller than 22-byte End of Central Directory.".to_string());
+        }
+        let tail_len = file_len.min(65_560) as usize;
+        file.seek(SeekFrom::End(-(tail_len as i64)))
+            .map_err(|e| format!("Failed seeking ZIP trailer: {}", e))?;
+        let mut tail = vec![0u8; tail_len];
+        file.read_exact(&mut tail)
+            .map_err(|e| format!("Failed reading ZIP trailer: {}", e))?;
+        if !tail.windows(4).any(|w| w == [0x50, 0x4B, 0x05, 0x06]) {
+            return Err("Corrupt ZIP archive: missing End of Central Directory signature.".to_string());
+        }
+    }
+
     let archive_str = archive_path.to_string_lossy().to_string();
     let dest_str = dest_dir.to_string_lossy().to_string();
     let dest_with_slash = format!("{}\\", dest_str.trim_end_matches('\\'));
@@ -1259,7 +1288,7 @@ pub(crate) fn extract_archive_to_folder_sync(archive_path: &Path, dest_dir: &Pat
             let out_arg = format!("-o{}", dest_str);
             let mut cmd = Command::new(sz_bin);
             cmd.creation_flags(CREATE_NO_WINDOW);
-            cmd.args(["x", "-y", "-spf-", &out_arg, &archive_str]);
+            cmd.args(["x", "-y", &out_arg, &archive_str]);
             if let Ok(status) = cmd.status() {
                 if status.success() {
                     validate_extracted_tree_against_zip_slip(dest_dir)?;
@@ -1274,7 +1303,7 @@ pub(crate) fn extract_archive_to_folder_sync(archive_path: &Path, dest_dir: &Pat
         let out_arg = format!("-o{}", dest_str);
         let mut cmd = Command::new("7z");
         cmd.creation_flags(CREATE_NO_WINDOW);
-        cmd.args(["x", "-y", "-spf-", &out_arg, &archive_str]);
+        cmd.args(["x", "-y", &out_arg, &archive_str]);
         if let Ok(status) = cmd.status() {
             if status.success() {
                 validate_extracted_tree_against_zip_slip(dest_dir)?;
@@ -1345,7 +1374,7 @@ pub(crate) fn extract_archive_to_folder_sync(archive_path: &Path, dest_dir: &Pat
     // 4. Fallback to PowerShell Expand-Archive for .zip files
     if archive_str.to_lowercase().ends_with(".zip") {
         let ps_cmd = format!(
-            "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+            "$ErrorActionPreference = 'Stop'; Expand-Archive -ErrorAction Stop -LiteralPath '{}' -DestinationPath '{}' -Force",
             archive_str.replace('\'', "''"),
             dest_str.replace('\'', "''")
         );
@@ -9129,7 +9158,7 @@ fn spawn_hotkey_watcher_if_needed(app: AppHandle) {
             }
 
             // Poll minimized window state ~every 1.2s after a 15s startup grace period
-            if AUTO_FREEZE_MINIMIZED.load(Ordering::Relaxed) && ticks_elapsed > 125 && ticks_elapsed % 10 == 0 {
+            if AUTO_FREEZE_MINIMIZED.load(Ordering::Relaxed) && ticks_elapsed > 125 && ticks_elapsed.is_multiple_of(10) {
                 for sess in &sessions_snapshot {
                     let mut pids = get_active_jobs_map()
                         .lock()
@@ -13795,10 +13824,18 @@ async fn trigger_replay_clip_ipc() -> Result<Value, String> {
         });
     }
 
+    let capture_active = active_shm_apps().contains(&ShmSourceApp::DukeCapture);
+    let message = if capture_active {
+        "Instant Replay save signal transmitted to optional Duke Capture companion."
+    } else {
+        "Standalone mode: highlight marker logged locally (no companion daemon required)."
+    };
+
     Ok(serde_json::json!({
         "dispatched": true,
+        "standaloneFallback": !capture_active,
         "gameTitle": active_title,
-        "message": "Instant Replay save signal transmitted over Duke SHM & IPC buses."
+        "message": message
     }))
 }
 
@@ -13868,11 +13905,16 @@ fn spawn_overlay_trigger_watcher(app: AppHandle) {
             let mut guide_was_down = false;
             let mut radial_chord_was_down = false;
             let mut vision_chord_was_down = false;
+            let mut fse_chord_was_down = false;
             loop {
                 let mut should_toggle_overlay = false;
                 let mut should_toggle_guide = false;
                 let mut should_toggle_radial = false;
                 let mut should_vision = false;
+
+                if fse_shell::poll_fse_guide_chord_edge(&mut fse_chord_was_down) {
+                    should_toggle_overlay = true;
+                }
 
                 if registered || vision_registered {
                     let mut msg = MSG::default();
@@ -14357,9 +14399,19 @@ fn main() {
         return;
     }
 
+    if std::env::args().any(|a| a == "--stress-test") {
+        if let Err(err) = stress_harness::run_cli_stress_test() {
+            eprintln!("duke-launcher --stress-test error: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let allow_multi_instance = raw_args.iter().any(|a| a == "--allow-multi-instance");
     couch_mode::init_cli_couch_flag(&raw_args);
-    if !win32_clipboard_protocol::acquire_single_instance_or_forward(&raw_args) {
+    fse_shell::init_cli_fse_flag(&raw_args);
+    if !allow_multi_instance && !win32_clipboard_protocol::acquire_single_instance_or_forward(&raw_args) {
         return;
     }
     let initial_protocol_urls: Vec<String> = raw_args
@@ -14388,8 +14440,10 @@ fn main() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
         .setup(move |app| {
-            win32_clipboard_protocol::register_duke_uri_protocol();
-            win32_clipboard_protocol::start_protocol_pipe_server(app.handle().clone());
+            if !allow_multi_instance {
+                win32_clipboard_protocol::register_duke_uri_protocol();
+                win32_clipboard_protocol::start_protocol_pipe_server(app.handle().clone());
+            }
 
             let exit_app = app.handle().clone();
             let on_exit_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
@@ -14458,10 +14512,11 @@ fn main() {
             let _ = catalog_mmap::ensure_catalog_mapped_standalone();
 
             let mut initial_settings = load_settings_from_disk(app.handle());
-            if couch_mode::is_cli_couch_booted() {
+            if couch_mode::is_cli_couch_booted() || fse_shell::is_cli_fse_booted() {
                 initial_settings.couch_mode = true;
             }
             apply_runtime_settings(&initial_settings);
+            fse_shell::apply_fse_boot_sequence_if_enabled(app.handle());
 
             if let Some(overlay) = app.get_webview_window("overlay") {
                 let _ = overlay.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
@@ -14575,7 +14630,7 @@ fn main() {
                     let should_trim = match ram_mode {
                         0 => false,                                       // Off
                         2 => !any_downloading || is_headless_or_minimized, // Aggressive: every 15s
-                        _ => (tick_count % 4 == 0) && (!any_downloading || is_headless_or_minimized), // Standard: every 60s
+                        _ => tick_count.is_multiple_of(4) && (!any_downloading || is_headless_or_minimized), // Standard: every 60s
                     };
                     if should_trim {
                         if ram_mode == 2 && is_headless_or_minimized {
@@ -14583,7 +14638,7 @@ fn main() {
                         }
                         trim_process_working_set();
                     }
-                    if !(ram_mode == 2 || tick_count % 4 == 0) {
+                    if !(ram_mode == 2 || tick_count.is_multiple_of(4)) {
                         continue;
                     }
 
@@ -14777,6 +14832,7 @@ fn main() {
             duke_link::invite_friend_to_coop,
             duke_link::join_coop_stream,
             duke_link::send_coop_input_p2,
+            duke_link::send_coop_input_slot,
             time_machine::get_game_time_machine,
             time_machine::create_time_machine_checkpoint,
             time_machine::create_time_machine_branch,
@@ -14876,7 +14932,18 @@ fn main() {
             duke_sandbox::get_sandbox_trainer_status,
             duke_sandbox::sandbox_scan_memory,
             duke_sandbox::sandbox_write_memory_value,
-            duke_sandbox::sandbox_set_speedhack_scale
+            duke_sandbox::sandbox_set_speedhack_scale,
+            fse_shell::get_fse_shell_status,
+            fse_shell::set_fse_gaming_home,
+            fse_shell::suspend_windows_bloat_now,
+            fse_shell::resume_windows_bloat_now,
+            wasm_plugins::list_wasm_plugins,
+            wasm_plugins::install_wasm_plugin,
+            wasm_plugins::install_demo_wasm_plugin,
+            wasm_plugins::set_wasm_plugin_capabilities,
+            wasm_plugins::execute_wasm_plugin,
+            wasm_plugins::remove_wasm_plugin,
+            stress_harness::run_chaos_stress_harness
         ])
         .build(tauri::generate_context!())
     {

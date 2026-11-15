@@ -84,7 +84,7 @@
         </button>
         <img src="assets/dukeflaglogo.png" alt="Duke Launcher" class="titlebar-emblem" />
         <span class="titlebar-title">Duke Launcher</span>
-        <span class="titlebar-version mono-num" id="app-version-pill">v1.0.0</span>
+        <span class="titlebar-version mono-num" id="app-version-pill">v2.0.0</span>
       </div>
 
       <div class="titlebar-center">
@@ -1263,6 +1263,10 @@
                     <label class="wave2-check-chip" for="detail-shrink-dedup-media">
                       <input type="checkbox" id="detail-shrink-dedup-media" class="setting-checkbox" checked />
                       <span>Hardlink Duplicate .wem / .bik Media</span>
+                    </label>
+                    <label class="wave2-check-chip" for="detail-shrink-bler-textures">
+                      <input type="checkbox" id="detail-shrink-bler-textures" class="setting-checkbox" checked />
+                      <span>Condition BC1–BC5 Textures (GACL BLER + Zstd)</span>
                     </label>
                     <div class="detail-save-actions">
                       <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-shrink-scan">
@@ -2509,6 +2513,18 @@
                   <input type="checkbox" id="setting-couch-mode" class="setting-checkbox" />
                 </label>
 
+                <label class="setting-toggle-row" for="setting-fse-gaming-home">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Set Duke Deck as Windows Gaming Home (FSE Console Shell)</div>
+                    <div class="setting-toggle-desc" id="setting-fse-status-desc">Registers <code>--couch --fse</code> on sign-in, binds Xbox/PS Guide (<code>Win+G</code> / <code>VK_GAMEPAD_VIEW</code>) to the HUD overlay, and suspends background bloat on boot.</div>
+                  </div>
+                  <div class="setting-inline-controls">
+                    <span class="pill mono-num" id="setting-fse-bloat-pill">Desktop Mode</span>
+                    <button type="button" class="btn btn-secondary btn-xs" id="btn-fse-resume-bloat">Resume Bloat</button>
+                    <input type="checkbox" id="setting-fse-gaming-home" class="setting-checkbox" />
+                  </div>
+                </label>
+
                 <div class="bookmarklet-card bookmarklet-card-settings">
                   <div class="bookmarklet-copy">
                     <div class="bookmarklet-title">
@@ -2861,6 +2877,41 @@
                     </div>
                   </div>
                   <div id="settings-bios-grid" class="bios-readiness-grid"></div>
+                </div>
+              </div>
+
+              <!-- Card 10: Capability-Gated WebAssembly Plugin Sandbox -->
+              <div class="panel-card" id="settings-wasm-plugins-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>WebAssembly Plugin Sandbox (Zero-Trust Capabilities)</h3>
+                    <p class="panel-sub">Community .wasm / .wat metadata &amp; ROM database providers run inside Wasmtime with an 8 MiB heap cap, deterministic fuel budgets, zero filesystem/credential access, and strictly explicit domain allowlists.</p>
+                  </div>
+                  <div class="settings-btn-group">
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-wasm-install-file">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-plus"/></svg>
+                      <span>Install .wasm / .wat</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-wasm-install-demo">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-sparkles"/></svg>
+                      <span>Install Demo Metadata Provider</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-wasm-refresh">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                      <span>Refresh Plugins</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-run-chaos-harness">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-shield-check"/></svg>
+                      <span>Run Chaos Self-Test</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="wave3-status-strip">
+                  <span class="pill emerald mono-num" id="wasm-plugins-count-pill">0 Sandboxed Plugins</span>
+                  <span class="pill mono-num" id="wasm-sandbox-policy-pill">Zero Filesystem · Zero Credentials · Explicit Domain Grants</span>
+                </div>
+                <div id="settings-wasm-plugins-list" class="save-paths-list">
+                  <div class="panel-sub">No community .wasm/.wat plugins installed yet.</div>
                 </div>
               </div>
             </div>
@@ -3252,8 +3303,8 @@
     <div class="modal-card modal-card-wide">
       <div class="modal-head">
         <div>
-          <h3 id="coop-stream-modal-title">Join Co-Op Stream (Duke Link P2P)</h3>
-          <p class="panel-sub" id="coop-stream-subtitle">Sub-15 ms peer-to-peer DXGI/NVENC game stream with Virtual Player 2 XInput injection via duke-input.</p>
+          <h3 id="coop-stream-modal-title">Join Co-Op Stream (Duke Link v2 QUIC)</h3>
+          <p class="panel-sub" id="coop-stream-subtitle">Sub-10 ms QUIC zero-HoL AV1/HEVC peer-to-peer stream with up to 4 concurrent Virtual XInput/DualSense gamepads.</p>
         </div>
         <div class="modal-head-actions">
           <span class="pill mono-num" id="coop-modal-status-pill">Idle</span>
@@ -3285,7 +3336,7 @@
         </div>
         <div class="coop-canvas-wrap">
           <canvas id="coop-stream-canvas" width="960" height="540"></canvas>
-          <div id="coop-canvas-empty" class="coop-canvas-empty">Paste a friend's dukelink:// invite link or Tailscale IP to watch their screen at &lt;15 ms latency and send Player 2 gamepad inputs.</div>
+          <div id="coop-canvas-empty" class="coop-canvas-empty">Paste a friend's dukelink:// invite link or Tailscale IP to stream via QUIC 0-HoL at &lt;10 ms latency with up to 4 virtual controllers.</div>
         </div>
         <div class="coop-p2-hint panel-sub mono-num" id="coop-p2-input-badge">P2 Controls: Connect USB/XInput gamepad or use WASD (LS) + Z/X/C/V (A/B/X/Y) + Enter (Start)</div>
       </div>

@@ -27,3 +27,5 @@ pub mod shm_bus;
 
 #[cfg(feature = "nvme-prefetch")]
 pub mod nvme_prefetch;
+
+pub mod platform_backend;

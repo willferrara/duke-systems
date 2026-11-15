@@ -11,10 +11,12 @@ use crate::{atomic_write_string, format_bytes, load_library_standalone, resolve_
 
 const DKDS_MAGIC: &[u8; 8] = b"DKDSZST1";
 const DKDS_VERSION: u32 = 1;
+const DKDS_VERSION_V2: u32 = 2;
 const DKDS_CHUNK_BYTES: usize = 64 * 1024;
 const DS_STREAMS_DIR: &str = ".duke-ds";
 const DS_MANIFEST_FILE: &str = "directstorage_streams.json";
 const DEFAULT_MIN_ARCHIVE_BYTES: u64 = 1024 * 1024; // 1 MiB
+const DEFAULT_MIN_DDS_TEXTURE_BYTES: u64 = 64 * 1024; // 64 KiB for emulator / DX11-12 HD textures
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +55,8 @@ pub struct DirectStorageAssetCandidate {
     pub already_packed: bool,
     pub packed_stream_bytes: u64,
     pub eligible_for_zstd_repack: bool,
+    #[serde(default)]
+    pub bler_codec: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +70,10 @@ pub struct DirectStorageScanReport {
     pub eligible_uncompressed_bytes: u64,
     pub existing_packed_streams: usize,
     pub existing_packed_bytes: u64,
+    #[serde(default)]
+    pub bler_texture_candidates: usize,
+    #[serde(default)]
+    pub bler_texture_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +88,12 @@ pub struct DirectStorageStreamRecord {
     pub compression_ratio_pct: f64,
     pub source_blake3: String,
     pub verified: bool,
+    #[serde(default)]
+    pub bler_conditioned_chunks: u32,
+    #[serde(default)]
+    pub bler_extra_saved_bytes: u64,
+    #[serde(default)]
+    pub detected_bcn: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -106,6 +120,69 @@ pub struct DirectStorageRepackReport {
     pub elapsed_ms: u64,
     pub active_backend: String,
     pub streams: Vec<DirectStorageStreamRecord>,
+    #[serde(default)]
+    pub bler_conditioned_chunks: u32,
+    #[serde(default)]
+    pub bler_extra_saved_bytes: u64,
+}
+
+/// GPU block-compressed texture format supported by GACL/BLER entropy conditioning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BcnFormat {
+    Bc1 = 1,
+    Bc2 = 2,
+    Bc3 = 3,
+    Bc4 = 4,
+    Bc5 = 5,
+}
+
+impl BcnFormat {
+    pub fn from_u8(val: u8) -> Option<Self> {
+        match val {
+            1 => Some(Self::Bc1),
+            2 => Some(Self::Bc2),
+            3 => Some(Self::Bc3),
+            4 => Some(Self::Bc4),
+            5 => Some(Self::Bc5),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Bc1 => "BC1/DXT1",
+            Self::Bc2 => "BC2/DXT3",
+            Self::Bc3 => "BC3/DXT5",
+            Self::Bc4 => "BC4/ATI1",
+            Self::Bc5 => "BC5/ATI2",
+        }
+    }
+
+    pub fn block_size(self) -> usize {
+        match self {
+            Self::Bc1 | Self::Bc4 => 8,
+            Self::Bc2 | Self::Bc3 | Self::Bc5 => 16,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DdsHeaderInfo {
+    pub header_bytes: usize,
+    pub width: u32,
+    pub height: u32,
+    pub format: BcnFormat,
+}
+
+#[derive(Debug, Clone)]
+pub struct DkdsEncodeStats {
+    pub packed_len: u64,
+    pub chunk_count: u32,
+    pub source_blake3: String,
+    pub bler_conditioned_chunks: u32,
+    pub bler_extra_saved_bytes: u64,
+    pub detected_bcn: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -395,9 +472,361 @@ pub fn sample_shannon_entropy(bytes: &[u8]) -> f64 {
     entropy
 }
 
+/// Parses standard and DX10-extended DDS headers for GPU BC1–BC5 block-compressed textures.
+pub fn parse_dds_bcn_header(bytes: &[u8]) -> Option<DdsHeaderInfo> {
+    if bytes.len() < 128 || &bytes[0..4] != b"DDS " {
+        return None;
+    }
+    let dw_size = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    if dw_size != 124 {
+        return None;
+    }
+    let height = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+    let width = u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let pf_size = u32::from_le_bytes([bytes[76], bytes[77], bytes[78], bytes[79]]);
+    if pf_size != 32 {
+        return None;
+    }
+    let fourcc = &bytes[84..88];
+    match fourcc {
+        b"DXT1" => Some(DdsHeaderInfo {
+            header_bytes: 128,
+            width,
+            height,
+            format: BcnFormat::Bc1,
+        }),
+        b"DXT2" | b"DXT3" => Some(DdsHeaderInfo {
+            header_bytes: 128,
+            width,
+            height,
+            format: BcnFormat::Bc2,
+        }),
+        b"DXT4" | b"DXT5" => Some(DdsHeaderInfo {
+            header_bytes: 128,
+            width,
+            height,
+            format: BcnFormat::Bc3,
+        }),
+        b"ATI1" | b"BC4U" | b"BC4S" => Some(DdsHeaderInfo {
+            header_bytes: 128,
+            width,
+            height,
+            format: BcnFormat::Bc4,
+        }),
+        b"ATI2" | b"BC5U" | b"BC5S" => Some(DdsHeaderInfo {
+            header_bytes: 128,
+            width,
+            height,
+            format: BcnFormat::Bc5,
+        }),
+        b"DX10" if bytes.len() >= 148 => {
+            let dxgi = u32::from_le_bytes([bytes[128], bytes[129], bytes[130], bytes[131]]);
+            let format = match dxgi {
+                70..=72 => BcnFormat::Bc1,
+                73..=75 => BcnFormat::Bc2,
+                76..=78 => BcnFormat::Bc3,
+                79..=81 => BcnFormat::Bc4,
+                82..=84 => BcnFormat::Bc5,
+                _ => return None,
+            };
+            Some(DdsHeaderInfo {
+                header_bytes: 148,
+                width,
+                height,
+                format,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn delta_encode_u16_le_planes(
+    blocks: &[u8],
+    bs: usize,
+    offset: usize,
+    lo_out: &mut [u8],
+    hi_out: &mut [u8],
+) {
+    let mut prev = 0u16;
+    for (idx, blk) in blocks.chunks_exact(bs).enumerate() {
+        let cur = u16::from_le_bytes([blk[offset], blk[offset + 1]]);
+        let d = cur.wrapping_sub(prev);
+        lo_out[idx] = (d & 0xFF) as u8;
+        hi_out[idx] = (d >> 8) as u8;
+        prev = cur;
+    }
+}
+
+fn delta_decode_u16_le_planes(
+    lo_in: &[u8],
+    hi_in: &[u8],
+    blocks: &mut [u8],
+    bs: usize,
+    offset: usize,
+) {
+    let mut prev = 0u16;
+    for (idx, blk) in blocks.chunks_exact_mut(bs).enumerate() {
+        let d = u16::from_le_bytes([lo_in[idx], hi_in[idx]]);
+        let cur = prev.wrapping_add(d);
+        let bytes = cur.to_le_bytes();
+        blk[offset] = bytes[0];
+        blk[offset + 1] = bytes[1];
+        prev = cur;
+    }
+}
+
+fn delta_encode_u8_plane(blocks: &[u8], bs: usize, offset: usize, out: &mut [u8]) {
+    let mut prev = 0u8;
+    for (idx, blk) in blocks.chunks_exact(bs).enumerate() {
+        let cur = blk[offset];
+        out[idx] = cur.wrapping_sub(prev);
+        prev = cur;
+    }
+}
+
+fn delta_decode_u8_plane(in_plane: &[u8], blocks: &mut [u8], bs: usize, offset: usize) {
+    let mut prev = 0u8;
+    for (idx, blk) in blocks.chunks_exact_mut(bs).enumerate() {
+        let cur = prev.wrapping_add(in_plane[idx]);
+        blk[offset] = cur;
+        prev = cur;
+    }
+}
+
+fn gather_byte_lanes(blocks: &[u8], bs: usize, offset: usize, lanes: usize, out: &mut [u8]) {
+    let n = blocks.len() / bs;
+    for lane in 0..lanes {
+        let dst = &mut out[lane * n..(lane + 1) * n];
+        for (idx, blk) in blocks.chunks_exact(bs).enumerate() {
+            dst[idx] = blk[offset + lane];
+        }
+    }
+}
+
+fn scatter_byte_lanes(in_lanes: &[u8], blocks: &mut [u8], bs: usize, offset: usize, lanes: usize) {
+    let n = blocks.len() / bs;
+    for lane in 0..lanes {
+        let src = &in_lanes[lane * n..(lane + 1) * n];
+        for (idx, blk) in blocks.chunks_exact_mut(bs).enumerate() {
+            blk[offset + lane] = src[idx];
+        }
+    }
+}
+
+/// Bit-exact GACL/BLER block-level entropy reduction transform for BC1–BC5 GPU texture streams.
+/// Separates smooth endpoint gradients from bitmask index selectors before Zstd compression.
+pub fn apply_bler_bcn_blocks(format: BcnFormat, blocks: &[u8]) -> Vec<u8> {
+    let bs = format.block_size();
+    if blocks.is_empty() || !blocks.len().is_multiple_of(bs) {
+        return blocks.to_vec();
+    }
+    let n = blocks.len() / bs;
+    let mut out = vec![0u8; blocks.len()];
+    match format {
+        BcnFormat::Bc1 => {
+            let (c0_lo, rest) = out.split_at_mut(n);
+            let (c0_hi, rest) = rest.split_at_mut(n);
+            let (c1_lo, rest) = rest.split_at_mut(n);
+            let (c1_hi, idx_planes) = rest.split_at_mut(n);
+            delta_encode_u16_le_planes(blocks, bs, 0, c0_lo, c0_hi);
+            delta_encode_u16_le_planes(blocks, bs, 2, c1_lo, c1_hi);
+            gather_byte_lanes(blocks, bs, 4, 4, idx_planes);
+        }
+        BcnFormat::Bc2 => {
+            let (alpha_planes, rest) = out.split_at_mut(8 * n);
+            for lane in 0..8 {
+                delta_encode_u8_plane(
+                    blocks,
+                    bs,
+                    lane,
+                    &mut alpha_planes[lane * n..(lane + 1) * n],
+                );
+            }
+            let (c0_lo, rest) = rest.split_at_mut(n);
+            let (c0_hi, rest) = rest.split_at_mut(n);
+            let (c1_lo, rest) = rest.split_at_mut(n);
+            let (c1_hi, idx_planes) = rest.split_at_mut(n);
+            delta_encode_u16_le_planes(blocks, bs, 8, c0_lo, c0_hi);
+            delta_encode_u16_le_planes(blocks, bs, 10, c1_lo, c1_hi);
+            gather_byte_lanes(blocks, bs, 12, 4, idx_planes);
+        }
+        BcnFormat::Bc3 => {
+            let (a0, rest) = out.split_at_mut(n);
+            let (a1, rest) = rest.split_at_mut(n);
+            let (a_idx, rest) = rest.split_at_mut(6 * n);
+            let (c0_lo, rest) = rest.split_at_mut(n);
+            let (c0_hi, rest) = rest.split_at_mut(n);
+            let (c1_lo, rest) = rest.split_at_mut(n);
+            let (c1_hi, c_idx) = rest.split_at_mut(n);
+            delta_encode_u8_plane(blocks, bs, 0, a0);
+            delta_encode_u8_plane(blocks, bs, 1, a1);
+            gather_byte_lanes(blocks, bs, 2, 6, a_idx);
+            delta_encode_u16_le_planes(blocks, bs, 8, c0_lo, c0_hi);
+            delta_encode_u16_le_planes(blocks, bs, 10, c1_lo, c1_hi);
+            gather_byte_lanes(blocks, bs, 12, 4, c_idx);
+        }
+        BcnFormat::Bc4 => {
+            let (r0, rest) = out.split_at_mut(n);
+            let (r1, idx) = rest.split_at_mut(n);
+            delta_encode_u8_plane(blocks, bs, 0, r0);
+            delta_encode_u8_plane(blocks, bs, 1, r1);
+            gather_byte_lanes(blocks, bs, 2, 6, idx);
+        }
+        BcnFormat::Bc5 => {
+            let (r0, rest) = out.split_at_mut(n);
+            let (r1, rest) = rest.split_at_mut(n);
+            let (g0, rest) = rest.split_at_mut(n);
+            let (g1, rest) = rest.split_at_mut(n);
+            let (r_idx, g_idx) = rest.split_at_mut(6 * n);
+            delta_encode_u8_plane(blocks, bs, 0, r0);
+            delta_encode_u8_plane(blocks, bs, 1, r1);
+            delta_encode_u8_plane(blocks, bs, 8, g0);
+            delta_encode_u8_plane(blocks, bs, 9, g1);
+            gather_byte_lanes(blocks, bs, 2, 6, r_idx);
+            gather_byte_lanes(blocks, bs, 10, 6, g_idx);
+        }
+    }
+    out
+}
+
+/// Bit-exact inverse of `apply_bler_bcn_blocks`, restoring GPU-native BC1–BC5 blocks for upload.
+pub fn restore_bler_bcn_blocks(format: BcnFormat, conditioned: &[u8]) -> Result<Vec<u8>, String> {
+    let bs = format.block_size();
+    if !conditioned.len().is_multiple_of(bs) {
+        return Err(format!(
+            "Unaligned BLER buffer len {} for {}",
+            conditioned.len(),
+            format.label()
+        ));
+    }
+    if conditioned.is_empty() {
+        return Ok(Vec::new());
+    }
+    let n = conditioned.len() / bs;
+    let mut blocks = vec![0u8; conditioned.len()];
+    match format {
+        BcnFormat::Bc1 => {
+            let (c0_lo, rest) = conditioned.split_at(n);
+            let (c0_hi, rest) = rest.split_at(n);
+            let (c1_lo, rest) = rest.split_at(n);
+            let (c1_hi, idx_planes) = rest.split_at(n);
+            delta_decode_u16_le_planes(c0_lo, c0_hi, &mut blocks, bs, 0);
+            delta_decode_u16_le_planes(c1_lo, c1_hi, &mut blocks, bs, 2);
+            scatter_byte_lanes(idx_planes, &mut blocks, bs, 4, 4);
+        }
+        BcnFormat::Bc2 => {
+            let (alpha_planes, rest) = conditioned.split_at(8 * n);
+            for lane in 0..8 {
+                delta_decode_u8_plane(
+                    &alpha_planes[lane * n..(lane + 1) * n],
+                    &mut blocks,
+                    bs,
+                    lane,
+                );
+            }
+            let (c0_lo, rest) = rest.split_at(n);
+            let (c0_hi, rest) = rest.split_at(n);
+            let (c1_lo, rest) = rest.split_at(n);
+            let (c1_hi, idx_planes) = rest.split_at(n);
+            delta_decode_u16_le_planes(c0_lo, c0_hi, &mut blocks, bs, 8);
+            delta_decode_u16_le_planes(c1_lo, c1_hi, &mut blocks, bs, 10);
+            scatter_byte_lanes(idx_planes, &mut blocks, bs, 12, 4);
+        }
+        BcnFormat::Bc3 => {
+            let (a0, rest) = conditioned.split_at(n);
+            let (a1, rest) = rest.split_at(n);
+            let (a_idx, rest) = rest.split_at(6 * n);
+            let (c0_lo, rest) = rest.split_at(n);
+            let (c0_hi, rest) = rest.split_at(n);
+            let (c1_lo, rest) = rest.split_at(n);
+            let (c1_hi, c_idx) = rest.split_at(n);
+            delta_decode_u8_plane(a0, &mut blocks, bs, 0);
+            delta_decode_u8_plane(a1, &mut blocks, bs, 1);
+            scatter_byte_lanes(a_idx, &mut blocks, bs, 2, 6);
+            delta_decode_u16_le_planes(c0_lo, c0_hi, &mut blocks, bs, 8);
+            delta_decode_u16_le_planes(c1_lo, c1_hi, &mut blocks, bs, 10);
+            scatter_byte_lanes(c_idx, &mut blocks, bs, 12, 4);
+        }
+        BcnFormat::Bc4 => {
+            let (r0, rest) = conditioned.split_at(n);
+            let (r1, idx) = rest.split_at(n);
+            delta_decode_u8_plane(r0, &mut blocks, bs, 0);
+            delta_decode_u8_plane(r1, &mut blocks, bs, 1);
+            scatter_byte_lanes(idx, &mut blocks, bs, 2, 6);
+        }
+        BcnFormat::Bc5 => {
+            let (r0, rest) = conditioned.split_at(n);
+            let (r1, rest) = rest.split_at(n);
+            let (g0, rest) = rest.split_at(n);
+            let (g1, rest) = rest.split_at(n);
+            let (r_idx, g_idx) = rest.split_at(6 * n);
+            delta_decode_u8_plane(r0, &mut blocks, bs, 0);
+            delta_decode_u8_plane(r1, &mut blocks, bs, 1);
+            delta_decode_u8_plane(g0, &mut blocks, bs, 8);
+            delta_decode_u8_plane(g1, &mut blocks, bs, 9);
+            scatter_byte_lanes(r_idx, &mut blocks, bs, 2, 6);
+            scatter_byte_lanes(g_idx, &mut blocks, bs, 10, 6);
+        }
+    }
+    Ok(blocks)
+}
+
+fn find_embedded_dds_span(chunk: &[u8]) -> Option<(usize, BcnFormat)> {
+    let mut pos = 0usize;
+    while pos + 136 <= chunk.len() {
+        let Some(rel) = chunk[pos..].windows(4).position(|w| w == b"DDS ") else {
+            break;
+        };
+        let abs_pos = pos + rel;
+        if let Some(info) = parse_dds_bcn_header(&chunk[abs_pos..]) {
+            let skip = abs_pos + info.header_bytes;
+            if chunk.len().saturating_sub(skip) >= info.format.block_size() * 16
+                && skip <= u16::MAX as usize
+            {
+                return Some((skip, info.format));
+            }
+        }
+        pos = abs_pos.saturating_add(4);
+    }
+    None
+}
+
+/// Samples a `.dds` texture and measures extra byte reduction from BLER conditioning + Zstd-3.
+pub fn probe_dds_bcn_savings(path: &Path) -> Option<(DdsHeaderInfo, u64, u64)> {
+    let mut file = File::open(path).ok()?;
+    let meta_len = file.metadata().ok()?.len();
+    let mut sample = vec![0u8; DKDS_CHUNK_BYTES];
+    let n = file.read(&mut sample).ok()?;
+    let slice = &sample[..n];
+    let info = parse_dds_bcn_header(slice)?;
+    let skip = info.header_bytes;
+    let bs = info.format.block_size();
+    let avail = slice.len().saturating_sub(skip);
+    let aligned = (avail / bs) * bs;
+    if aligned < bs * 16 {
+        return None;
+    }
+    let raw_z = zstd::bulk::compress(slice, 3).ok()?;
+    let mut cond_buf = Vec::with_capacity(slice.len());
+    cond_buf.extend_from_slice(&slice[..skip]);
+    cond_buf.extend_from_slice(&apply_bler_bcn_blocks(info.format, &slice[skip..skip + aligned]));
+    cond_buf.extend_from_slice(&slice[skip + aligned..]);
+    let bler_z = zstd::bulk::compress(&cond_buf, 3).ok()?;
+    let sample_gain = raw_z.len().saturating_sub(bler_z.len()) as u64;
+    let est_full_gain = if slice.is_empty() {
+        0
+    } else {
+        sample_gain.saturating_mul(meta_len).saturating_div(slice.len() as u64)
+    };
+    Some((info, meta_len, est_full_gain))
+}
+
 fn detect_archive_codec(header: &[u8], entropy: f64) -> String {
     if header.starts_with(DKDS_MAGIC) {
         return "DKDS-Zstd".to_string();
+    }
+    if let Some(dds) = parse_dds_bcn_header(header) {
+        return format!("DDS Texture ({})", dds.format.label());
     }
     if header.len() >= 4 && header[0..4] == [0x28, 0xB5, 0x2F, 0xFD] {
         return "Zstd Frame".to_string();
@@ -428,7 +857,7 @@ fn detect_archive_codec(header: &[u8], entropy: f64) -> String {
 fn is_candidate_archive_ext(ext: &str) -> bool {
     matches!(
         ext,
-        "pak" | "ba2" | "forge" | "ucas" | "utoc" | "bsa" | "vpk" | "bin" | "dat" | "assets" | "pck"
+        "pak" | "ba2" | "forge" | "ucas" | "utoc" | "bsa" | "vpk" | "bin" | "dat" | "assets" | "pck" | "dds"
     )
 }
 
@@ -492,11 +921,45 @@ fn should_skip_ds_walk(entry: &walkdir::DirEntry, root: &Path) -> bool {
             || name.eq_ignore_ascii_case("System Volume Information"))
 }
 
-pub fn encode_dkds_stream(
+fn compress_chunk_with_optional_bler(
+    chunk: &[u8],
+    level: i32,
+    bcn_hint: Option<(BcnFormat, usize)>,
+) -> Result<(Vec<u8>, u8, u16, u64), String> {
+    let raw_compressed = zstd::bulk::compress(chunk, level)
+        .map_err(|e| format!("Zstd chunk compression failed: {}", e))?;
+
+    let candidate = match bcn_hint {
+        Some((fmt, skip)) if skip < chunk.len() => Some((fmt, skip)),
+        _ => find_embedded_dds_span(chunk).map(|(skip, fmt)| (fmt, skip)),
+    };
+
+    if let Some((fmt, skip)) = candidate {
+        let bs = fmt.block_size();
+        let avail = chunk.len().saturating_sub(skip);
+        let aligned = (avail / bs) * bs;
+        if aligned >= bs * 8 && skip <= u16::MAX as usize {
+            let mut conditioned = Vec::with_capacity(chunk.len());
+            conditioned.extend_from_slice(&chunk[..skip]);
+            conditioned.extend_from_slice(&apply_bler_bcn_blocks(fmt, &chunk[skip..skip + aligned]));
+            conditioned.extend_from_slice(&chunk[skip + aligned..]);
+            if let Ok(bler_compressed) = zstd::bulk::compress(&conditioned, level) {
+                if bler_compressed.len() < raw_compressed.len() {
+                    let saved = (raw_compressed.len() - bler_compressed.len()) as u64;
+                    return Ok((bler_compressed, fmt as u8, skip as u16, saved));
+                }
+            }
+        }
+    }
+
+    Ok((raw_compressed, 0, 0, 0))
+}
+
+pub fn encode_dkds_stream_with_bler(
     src_path: &Path,
     dst_stream_path: &Path,
     zstd_level: i32,
-) -> Result<(u64, u32, String), String> {
+) -> Result<DkdsEncodeStats, String> {
     if let Some(parent) = dst_stream_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create stream folder {}: {}", parent.display(), e))?;
@@ -517,19 +980,19 @@ pub fn encode_dkds_stream(
     let level = zstd_level.clamp(1, 12);
     let mut full_hasher = blake3::Hasher::new();
 
-    // Header (32 bytes):
+    // Header (32 bytes, version 2 supports per-chunk GACL/BLER BC1-BC5 conditioning):
     // [0..8]   Magic b"DKDSZST1"
-    // [8..12]  Version u32 LE
+    // [8..12]  Version u32 LE (2)
     // [12..16] Chunk size u32 LE (65536)
     // [16..24] Total uncompressed bytes u64 LE
-    // [24..28] Chunk count u32 LE (patched at finish or written sequential)
+    // [24..28] Chunk count u32 LE
     // [28..32] Reserved flags u32 LE (zstd level)
     let expected_chunks = src_len.div_ceil(DKDS_CHUNK_BYTES as u64) as u32;
     writer
         .write_all(DKDS_MAGIC)
         .map_err(|e| format!("Header write error: {}", e))?;
     writer
-        .write_all(&DKDS_VERSION.to_le_bytes())
+        .write_all(&DKDS_VERSION_V2.to_le_bytes())
         .map_err(|e| format!("Header write error: {}", e))?;
     writer
         .write_all(&(DKDS_CHUNK_BYTES as u32).to_le_bytes())
@@ -546,6 +1009,11 @@ pub fn encode_dkds_stream(
 
     let mut raw_buf = vec![0u8; DKDS_CHUNK_BYTES];
     let mut actual_chunks = 0u32;
+    let mut file_pos = 0u64;
+    let mut file_dds_info: Option<DdsHeaderInfo> = None;
+    let mut bler_conditioned_chunks = 0u32;
+    let mut bler_extra_saved_bytes = 0u64;
+
     loop {
         let mut filled = 0usize;
         while filled < DKDS_CHUNK_BYTES {
@@ -561,12 +1029,37 @@ pub fn encode_dkds_stream(
             break;
         }
         let chunk = &raw_buf[..filled];
+        if actual_chunks == 0 {
+            file_dds_info = parse_dds_bcn_header(chunk);
+        }
         full_hasher.update(chunk);
         let chunk_digest = blake3::hash(chunk);
-        let compressed = zstd::bulk::compress(chunk, level)
-            .map_err(|e| format!("Zstd chunk compression failed: {}", e))?;
 
-        // Per-chunk frame: raw_len u32 LE | zstd_len u32 LE | chunk_blake3_head [u8; 8] | payload
+        let bcn_hint = file_dds_info.and_then(|info| {
+            let hdr_len = info.header_bytes as u64;
+            let bs = info.format.block_size();
+            let skip = if file_pos <= hdr_len {
+                (hdr_len - file_pos) as usize
+            } else {
+                let rem = ((file_pos - hdr_len) % (bs as u64)) as usize;
+                if rem == 0 { 0 } else { bs - rem }
+            };
+            if skip < chunk.len() {
+                Some((info.format, skip))
+            } else {
+                None
+            }
+        });
+
+        let (compressed, bler_codec, bler_skip, chunk_saved) =
+            compress_chunk_with_optional_bler(chunk, level, bcn_hint)?;
+        if bler_codec != 0 {
+            bler_conditioned_chunks = bler_conditioned_chunks.saturating_add(1);
+            bler_extra_saved_bytes = bler_extra_saved_bytes.saturating_add(chunk_saved);
+        }
+
+        // Per-chunk frame v2 (20 bytes):
+        // raw_len u32 LE | zstd_len u32 LE | chunk_blake3_head [u8; 8] | bler_codec u8 | bler_skip u16 LE | reserved u8
         writer
             .write_all(&(filled as u32).to_le_bytes())
             .map_err(|e| format!("Chunk write error: {}", e))?;
@@ -577,9 +1070,19 @@ pub fn encode_dkds_stream(
             .write_all(&chunk_digest.as_bytes()[..8])
             .map_err(|e| format!("Chunk write error: {}", e))?;
         writer
+            .write_all(&[bler_codec])
+            .map_err(|e| format!("Chunk write error: {}", e))?;
+        writer
+            .write_all(&bler_skip.to_le_bytes())
+            .map_err(|e| format!("Chunk write error: {}", e))?;
+        writer
+            .write_all(&[0u8])
+            .map_err(|e| format!("Chunk write error: {}", e))?;
+        writer
             .write_all(&compressed)
             .map_err(|e| format!("Chunk write error: {}", e))?;
 
+        file_pos = file_pos.saturating_add(filled as u64);
         actual_chunks = actual_chunks.saturating_add(1);
     }
 
@@ -611,11 +1114,14 @@ pub fn encode_dkds_stream(
     })?;
 
     let packed_len = fs::metadata(dst_stream_path).map(|m| m.len()).unwrap_or(0);
-    Ok((
+    Ok(DkdsEncodeStats {
         packed_len,
-        actual_chunks,
-        source_blake3.to_hex().to_string(),
-    ))
+        chunk_count: actual_chunks,
+        source_blake3: source_blake3.to_hex().to_string(),
+        bler_conditioned_chunks,
+        bler_extra_saved_bytes,
+        detected_bcn: file_dds_info.map(|d| d.format.label().to_string()),
+    })
 }
 
 pub fn verify_dkds_stream(
@@ -637,7 +1143,7 @@ pub fn verify_dkds_stream(
         ));
     }
     let version = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
-    if version != DKDS_VERSION {
+    if version != DKDS_VERSION && version != DKDS_VERSION_V2 {
         return Err(format!("Unsupported DKDS version {}", version));
     }
     let chunk_cap = u32::from_le_bytes([header[12], header[13], header[14], header[15]]) as usize;
@@ -654,22 +1160,61 @@ pub fn verify_dkds_stream(
     let mut full_hasher = blake3::Hasher::new();
     let mut verified_raw = 0u64;
     let mut comp_buf = Vec::<u8>::new();
-    let mut chunk_hdr = [0u8; 16];
+    let mut chunk_hdr_v1 = [0u8; 16];
+    let mut chunk_hdr_v2 = [0u8; 20];
 
     for idx in 0..chunk_count {
-        reader.read_exact(&mut chunk_hdr).map_err(|e| {
-            format!(
-                "Truncated chunk header #{} in {}: {}",
-                idx,
-                stream_path.display(),
-                e
-            )
-        })?;
-        let raw_len =
-            u32::from_le_bytes([chunk_hdr[0], chunk_hdr[1], chunk_hdr[2], chunk_hdr[3]]) as usize;
-        let zstd_len =
-            u32::from_le_bytes([chunk_hdr[4], chunk_hdr[5], chunk_hdr[6], chunk_hdr[7]]) as usize;
-        let expected_head = &chunk_hdr[8..16];
+        let (raw_len, zstd_len, expected_head, bler_codec, bler_skip) = if version == DKDS_VERSION_V2 {
+            reader.read_exact(&mut chunk_hdr_v2).map_err(|e| {
+                format!(
+                    "Truncated chunk header #{} in {}: {}",
+                    idx,
+                    stream_path.display(),
+                    e
+                )
+            })?;
+            let raw_l = u32::from_le_bytes([
+                chunk_hdr_v2[0],
+                chunk_hdr_v2[1],
+                chunk_hdr_v2[2],
+                chunk_hdr_v2[3],
+            ]) as usize;
+            let zstd_l = u32::from_le_bytes([
+                chunk_hdr_v2[4],
+                chunk_hdr_v2[5],
+                chunk_hdr_v2[6],
+                chunk_hdr_v2[7],
+            ]) as usize;
+            let mut head = [0u8; 8];
+            head.copy_from_slice(&chunk_hdr_v2[8..16]);
+            let codec = chunk_hdr_v2[16];
+            let skip = u16::from_le_bytes([chunk_hdr_v2[17], chunk_hdr_v2[18]]) as usize;
+            (raw_l, zstd_l, head, codec, skip)
+        } else {
+            reader.read_exact(&mut chunk_hdr_v1).map_err(|e| {
+                format!(
+                    "Truncated chunk header #{} in {}: {}",
+                    idx,
+                    stream_path.display(),
+                    e
+                )
+            })?;
+            let raw_l = u32::from_le_bytes([
+                chunk_hdr_v1[0],
+                chunk_hdr_v1[1],
+                chunk_hdr_v1[2],
+                chunk_hdr_v1[3],
+            ]) as usize;
+            let zstd_l = u32::from_le_bytes([
+                chunk_hdr_v1[4],
+                chunk_hdr_v1[5],
+                chunk_hdr_v1[6],
+                chunk_hdr_v1[7],
+            ]) as usize;
+            let mut head = [0u8; 8];
+            head.copy_from_slice(&chunk_hdr_v1[8..16]);
+            (raw_l, zstd_l, head, 0u8, 0usize)
+        };
 
         if raw_len == 0 || raw_len > chunk_cap || zstd_len == 0 || zstd_len > chunk_cap * 2 {
             return Err(format!(
@@ -690,7 +1235,7 @@ pub fn verify_dkds_stream(
                 e
             )
         })?;
-        let decompressed = zstd::bulk::decompress(&comp_buf, raw_len).map_err(|e| {
+        let mut decompressed = zstd::bulk::decompress(&comp_buf, raw_len).map_err(|e| {
             format!(
                 "Zstd decompression failed on chunk #{} in {}: {}",
                 idx,
@@ -706,8 +1251,28 @@ pub fn verify_dkds_stream(
                 raw_len
             ));
         }
+        if bler_codec != 0 {
+            let fmt = BcnFormat::from_u8(bler_codec).ok_or_else(|| {
+                format!("Unknown BLER codec {} in chunk #{}", bler_codec, idx)
+            })?;
+            let bs = fmt.block_size();
+            if bler_skip > decompressed.len() {
+                return Err(format!(
+                    "Invalid BLER skip offset {} > chunk len {} in chunk #{}",
+                    bler_skip,
+                    decompressed.len(),
+                    idx
+                ));
+            }
+            let avail = decompressed.len() - bler_skip;
+            let aligned = (avail / bs) * bs;
+            let restored =
+                restore_bler_bcn_blocks(fmt, &decompressed[bler_skip..bler_skip + aligned])?;
+            decompressed[bler_skip..bler_skip + aligned].copy_from_slice(&restored);
+        }
+
         let chunk_digest = blake3::hash(&decompressed);
-        if &chunk_digest.as_bytes()[..8] != expected_head {
+        if chunk_digest.as_bytes()[..8] != expected_head[..] {
             return Err(format!(
                 "Chunk #{} BLAKE3 digest mismatch in {}",
                 idx,
@@ -799,6 +1364,8 @@ pub async fn scan_direct_storage_assets(
         let mut candidates = Vec::new();
         let mut total_candidate_bytes = 0u64;
         let mut eligible_uncompressed_bytes = 0u64;
+        let mut bler_texture_candidates = 0usize;
+        let mut bler_texture_bytes = 0u64;
 
         for entry in WalkDir::new(&root)
             .follow_links(false)
@@ -826,11 +1393,24 @@ pub async fn scan_direct_storage_assets(
                 Err(_) => continue,
             };
             let size_bytes = meta.len();
-            if size_bytes < min_bytes {
+            let effective_min = if ext == "dds" && min_file_mb.is_none() {
+                DEFAULT_MIN_DDS_TEXTURE_BYTES
+            } else {
+                min_bytes
+            };
+            if size_bytes < effective_min {
                 continue;
             }
             let (entropy_bits, detected_codec) =
                 inspect_file_head(path).unwrap_or((7.5, "Unknown".to_string()));
+            let is_bcn_texture = detected_codec.starts_with("DDS Texture (BC");
+            let bler_codec = if is_bcn_texture {
+                bler_texture_candidates += 1;
+                bler_texture_bytes = bler_texture_bytes.saturating_add(size_bytes);
+                Some(detected_codec.clone())
+            } else {
+                None
+            };
             let rel_path = normalize_rel(&root, path);
             let already_packed = packed_by_rel.contains(&rel_path)
                 && root.join(stream_rel_for_source(&rel_path)).is_file();
@@ -841,8 +1421,9 @@ pub async fn scan_direct_storage_assets(
             } else {
                 0
             };
-            let eligible =
-                !already_packed && entropy_bits < 7.35 && detected_codec != "Zstd Frame";
+            let eligible = !already_packed
+                && detected_codec != "Zstd Frame"
+                && (entropy_bits < 7.35 || is_bcn_texture);
 
             total_candidate_bytes = total_candidate_bytes.saturating_add(size_bytes);
             if eligible {
@@ -860,6 +1441,7 @@ pub async fn scan_direct_storage_assets(
                 already_packed,
                 packed_stream_bytes,
                 eligible_for_zstd_repack: eligible,
+                bler_codec,
             });
         }
 
@@ -875,6 +1457,8 @@ pub async fn scan_direct_storage_assets(
             candidates,
             total_candidate_bytes,
             eligible_uncompressed_bytes,
+            bler_texture_candidates,
+            bler_texture_bytes,
         })
     })
     .await
@@ -940,7 +1524,12 @@ pub async fn repack_game_direct_storage_assets(
                 continue;
             }
             let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            if size_bytes < min_bytes {
+            let effective_min = if ext == "dds" && min_file_mb.is_none() {
+                DEFAULT_MIN_DDS_TEXTURE_BYTES
+            } else {
+                min_bytes
+            };
+            if size_bytes < effective_min {
                 continue;
             }
             let rel = normalize_rel(&root, path);
@@ -948,7 +1537,8 @@ pub async fn repack_game_direct_storage_assets(
                 continue;
             }
             let (entropy, codec) = inspect_file_head(path).unwrap_or((7.5, "Unknown".to_string()));
-            if entropy >= 7.35 || codec == "Zstd Frame" {
+            let is_bcn_texture = codec.starts_with("DDS Texture (BC");
+            if codec == "Zstd Frame" || (entropy >= 7.35 && !is_bcn_texture) {
                 continue;
             }
             targets.push((path.to_path_buf(), rel, size_bytes));
@@ -960,12 +1550,15 @@ pub async fn repack_game_direct_storage_assets(
         let mut files_skipped = 0usize;
         let mut source_bytes_total = 0u64;
         let mut packed_bytes_total = 0u64;
+        let mut bler_conditioned_chunks = 0u32;
+        let mut bler_extra_saved_bytes = 0u64;
 
         for (src_path, rel_path, src_bytes) in targets {
             let stream_rel = stream_rel_for_source(&rel_path);
             let stream_full = root.join(&stream_rel);
-            match encode_dkds_stream(&src_path, &stream_full, level) {
-                Ok((packed_len, chunk_count, source_blake3)) => {
+            match encode_dkds_stream_with_bler(&src_path, &stream_full, level) {
+                Ok(stats) => {
+                    let packed_len = stats.packed_len;
                     // Reject expansion if source unexpectedly resists Zstd beyond first 128 KiB sample.
                     if packed_len >= src_bytes {
                         let _ = fs::remove_file(&stream_full);
@@ -985,16 +1578,23 @@ pub async fn repack_game_direct_storage_assets(
                         stream_rel_path: stream_rel,
                         source_bytes: src_bytes,
                         packed_bytes: packed_len,
-                        chunk_count,
+                        chunk_count: stats.chunk_count,
                         chunk_size_bytes: DKDS_CHUNK_BYTES as u32,
                         compression_ratio_pct: ratio,
-                        source_blake3,
+                        source_blake3: stats.source_blake3,
                         verified: true,
+                        bler_conditioned_chunks: stats.bler_conditioned_chunks,
+                        bler_extra_saved_bytes: stats.bler_extra_saved_bytes,
+                        detected_bcn: stats.detected_bcn,
                     });
                     existing_map.insert(rel_path);
                     files_packed += 1;
                     source_bytes_total = source_bytes_total.saturating_add(src_bytes);
                     packed_bytes_total = packed_bytes_total.saturating_add(packed_len);
+                    bler_conditioned_chunks =
+                        bler_conditioned_chunks.saturating_add(stats.bler_conditioned_chunks);
+                    bler_extra_saved_bytes =
+                        bler_extra_saved_bytes.saturating_add(stats.bler_extra_saved_bytes);
                 }
                 Err(_) => {
                     files_skipped += 1;
@@ -1021,6 +1621,8 @@ pub async fn repack_game_direct_storage_assets(
             elapsed_ms: started.elapsed().as_millis() as u64,
             active_backend: cap.active_backend,
             streams: manifest.streams,
+            bler_conditioned_chunks,
+            bler_extra_saved_bytes,
         })
     })
     .await
@@ -1105,7 +1707,9 @@ mod tests {
         }
         fs::File::create(&src).unwrap().write_all(&payload).unwrap();
 
-        let (packed_len, chunk_count, digest) = encode_dkds_stream(&src, &dst, 3).unwrap();
+        let stats = encode_dkds_stream_with_bler(&src, &dst, 3).unwrap();
+        let (packed_len, chunk_count, digest) =
+            (stats.packed_len, stats.chunk_count, stats.source_blake3);
         assert!(packed_len < payload.len() as u64);
         assert_eq!(chunk_count, 3);
 
@@ -1135,5 +1739,112 @@ mod tests {
 
         let cap = probe_direct_storage_runtime(None);
         assert!(!cap.active_backend.is_empty());
+    }
+
+    fn build_synthetic_dds(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut buf = vec![0u8; 128 + payload.len()];
+        buf[0..4].copy_from_slice(b"DDS ");
+        buf[4..8].copy_from_slice(&124u32.to_le_bytes());
+        buf[12..16].copy_from_slice(&256u32.to_le_bytes());
+        buf[16..20].copy_from_slice(&256u32.to_le_bytes());
+        buf[76..80].copy_from_slice(&32u32.to_le_bytes());
+        buf[84..88].copy_from_slice(fourcc);
+        buf[128..].copy_from_slice(payload);
+        buf
+    }
+
+    #[test]
+    fn bler_bc1_to_bc5_roundtrip_is_bit_exact_and_shrinks_zstd() {
+        for (fmt, fourcc) in [
+            (BcnFormat::Bc1, *b"DXT1"),
+            (BcnFormat::Bc2, *b"DXT3"),
+            (BcnFormat::Bc3, *b"DXT5"),
+            (BcnFormat::Bc4, *b"ATI1"),
+            (BcnFormat::Bc5, *b"ATI2"),
+        ] {
+            let bs = fmt.block_size();
+            let num_blocks = 4096usize;
+            let mut raw = Vec::with_capacity(num_blocks * bs);
+            // Smooth terrain/normal-map gradient across blocks with noisy texel selector indices.
+            for idx in 0..num_blocks {
+                let mut blk = vec![0u8; bs];
+                let step = (idx as u16).wrapping_mul(3);
+                match fmt {
+                    BcnFormat::Bc1 => {
+                        blk[0..2].copy_from_slice(&step.to_le_bytes());
+                        blk[2..4].copy_from_slice(&step.wrapping_add(0x0841).to_le_bytes());
+                        blk[4..8].copy_from_slice(&((idx as u32).wrapping_mul(0x9E37_79B9)).to_le_bytes());
+                    }
+                    BcnFormat::Bc2 => {
+                        for (a, slot) in blk.iter_mut().enumerate().take(8) {
+                            *slot = ((idx + a) & 0xFF) as u8;
+                        }
+                        blk[8..10].copy_from_slice(&step.to_le_bytes());
+                        blk[10..12].copy_from_slice(&step.wrapping_add(0x0420).to_le_bytes());
+                        blk[12..16].copy_from_slice(&((idx as u32).wrapping_mul(0x1357_9BDF)).to_le_bytes());
+                    }
+                    BcnFormat::Bc3 => {
+                        blk[0] = (idx & 0xFF) as u8;
+                        blk[1] = (idx.wrapping_add(16) & 0xFF) as u8;
+                        for (k, slot) in blk.iter_mut().enumerate().take(8).skip(2) {
+                            *slot = ((idx.wrapping_mul(13) + k) & 0xFF) as u8;
+                        }
+                        blk[8..10].copy_from_slice(&step.to_le_bytes());
+                        blk[10..12].copy_from_slice(&step.wrapping_add(0x0210).to_le_bytes());
+                        blk[12..16].copy_from_slice(&((idx as u32).wrapping_mul(0x2468_ACE1)).to_le_bytes());
+                    }
+                    BcnFormat::Bc4 => {
+                        blk[0] = (idx & 0xFF) as u8;
+                        blk[1] = (idx.wrapping_add(12) & 0xFF) as u8;
+                        for (k, slot) in blk.iter_mut().enumerate().take(8).skip(2) {
+                            *slot = ((idx.wrapping_mul(17) + k) & 0xFF) as u8;
+                        }
+                    }
+                    BcnFormat::Bc5 => {
+                        blk[0] = (idx & 0xFF) as u8;
+                        blk[1] = (idx.wrapping_add(8) & 0xFF) as u8;
+                        blk[8] = ((idx / 2) & 0xFF) as u8;
+                        blk[9] = ((idx / 2).wrapping_add(10) & 0xFF) as u8;
+                        for k in 0..6 {
+                            blk[2 + k] = ((idx.wrapping_mul(7) + k) & 0xFF) as u8;
+                            blk[10 + k] = ((idx.wrapping_mul(11) + k) & 0xFF) as u8;
+                        }
+                    }
+                }
+                raw.extend_from_slice(&blk);
+            }
+
+            let conditioned = apply_bler_bcn_blocks(fmt, &raw);
+            let restored = restore_bler_bcn_blocks(fmt, &conditioned).unwrap();
+            assert_eq!(restored, raw, "BLER restore mismatch for {}", fmt.label());
+
+            let raw_z = zstd::bulk::compress(&raw, 3).unwrap();
+            let bler_z = zstd::bulk::compress(&conditioned, 3).unwrap();
+            assert!(
+                bler_z.len() * 100 <= raw_z.len() * 75,
+                "Expected >=25% extra BLER shrinkage for {}, got {} vs raw Zstd {}",
+                fmt.label(),
+                bler_z.len(),
+                raw_z.len()
+            );
+
+            // Also verify full DDS stream encode + verify_dkds_stream roundtrip!
+            let dir = unique_tmp_dir(fmt.label().replace('/', "_").as_str());
+            let dds_path = dir.join("tex.dds");
+            let dkds_path = dir.join("tex.dds.dkds");
+            let dds_bytes = build_synthetic_dds(&fourcc, &raw);
+            fs::write(&dds_path, &dds_bytes).unwrap();
+            let parsed = parse_dds_bcn_header(&dds_bytes).unwrap();
+            assert_eq!(parsed.format, fmt);
+            let enc = encode_dkds_stream_with_bler(&dds_path, &dkds_path, 3).unwrap();
+            assert!(enc.bler_conditioned_chunks >= 1);
+            assert!(enc.bler_extra_saved_bytes > 0);
+            let (v_raw, v_chunks, v_digest) =
+                verify_dkds_stream(&dkds_path, Some(&enc.source_blake3)).unwrap();
+            assert_eq!(v_raw, dds_bytes.len() as u64);
+            assert_eq!(v_chunks, enc.chunk_count);
+            assert_eq!(v_digest, enc.source_blake3);
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 }

@@ -1,5 +1,7 @@
 # Duke Monitor
 
+> **Status: Experimental / Paused — Active development is focused exclusively on `Duke Launcher`. Please download and use `Duke Launcher` from Releases.**
+
 Zero-bloat **System, GPU, Process & Clean Driver Cockpit** built with **Tauri v2**, **Rust**, and **Vanilla ES2022 JS/CSS**. Designed as a lightweight replacement for Windows Task Manager, HWMonitor, OEM gaming hubs, and telemetry-heavy driver updaters.
 
 ## Key Capabilities

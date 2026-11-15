@@ -212,7 +212,7 @@ pub fn inspect_rom_bytes(
             ));
         } else if m == [0x37, 0x80, 0x40, 0x12] {
             let mut swapped = head[0..0x40].to_vec();
-            for pair in swapped.chunks_exact_mut(2) {
+            for pair in swapped.as_chunks_mut::<2>().0 {
                 pair.swap(0, 1);
             }
             let internal = clean_ascii_slice(&swapped[0x20..0x34]);
@@ -227,7 +227,7 @@ pub fn inspect_rom_bytes(
             ));
         } else if m == [0x40, 0x12, 0x37, 0x80] {
             let mut swapped = head[0..0x40].to_vec();
-            for quad in swapped.chunks_exact_mut(4) {
+            for quad in swapped.as_chunks_mut::<4>().0 {
                 quad.reverse();
             }
             let internal = clean_ascii_slice(&swapped[0x20..0x34]);
@@ -992,7 +992,7 @@ mod tests {
         assert_eq!(r_z64.region, "USA");
 
         let mut v64 = z64.clone();
-        for p in v64.chunks_exact_mut(2) {
+        for p in v64.as_chunks_mut::<2>().0 {
             p.swap(0, 1);
         }
         let r_v64 = inspect_rom_bytes(&v64, None, 8_388_608, Path::new("sm64.rom")).unwrap();
