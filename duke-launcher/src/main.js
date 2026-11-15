@@ -1,3 +1,4 @@
+import { VirtualCardGrid } from "./virtual_grid.js";
 import {
   THEME_PRESETS,
   addSearchSite,
@@ -279,7 +280,24 @@ import {
   setWasmPluginCapabilities,
   executeWasmPlugin,
   removeWasmPlugin,
-  runChaosStressHarness
+  runChaosStressHarness,
+  getSelfHealDiagnostics,
+  resetSelfHealSubsystem,
+  listenStartupSelfHealReport,
+  scanShrinkableRoms,
+  compressRetroRom,
+  verifyRomArchive,
+  listenRomShrinkProgress,
+  scanRedistBloat,
+  cleanRedistBloat,
+  getDiscordPresenceStatus,
+  setDiscordPresenceEnabled,
+  getSaveWatcherStatus,
+  startSaveWatcher,
+  stopSaveWatcher,
+  getDesktopChordStatus,
+  setDesktopChordEnabled,
+  getNetEngineStats
 } from "./api.js";
 
 const BOOKMARKLET_HREF =
@@ -481,11 +499,20 @@ const state = {
     const saved = localStorage.getItem("duke_launcher_theme");
     return THEME_PRESETS.some((t) => t.id === saved) ? saved : "dark";
   })(),
+  libraryFiltered: [],
+  discordRpcEnabled: false,
+  realtimeSaveWatcherEnabled: true,
+  desktopChordEnabled: true,
+  selfHealToastShown: false,
+  lastRedistScan: null,
   catalog: {
+    items: [],
     itemsById: new Map(),
+    loadedChunks: new Set(),
+    loadingOffsets: new Set(),
     renderedCount: 0,
     totalMatches: 0,
-    batchSize: 60,
+    batchSize: 240,
     loaded: false,
     loading: false,
     loadingMore: false,
@@ -615,7 +642,9 @@ function pumpCatalogCoverQueue() {
         if (cachedPath) {
           CATALOG_COVER_CACHE[task.cacheKey] = cachedPath;
           task.entry.coverUrl = cachedPath;
-          applyCachedCatalogCoverToMedia(task.mediaEl, task.imgEl, cachedPath);
+          if (task.imgEl && task.imgEl.isConnected && task.imgEl.dataset.cacheKey === task.cacheKey) {
+            applyCachedCatalogCoverToMedia(task.mediaEl, task.imgEl, cachedPath);
+          }
         }
       })
       .catch(() => {})
@@ -673,6 +702,9 @@ function clampCardZoomPx(px) {
   return Math.max(125, Math.min(280, Math.round(n)));
 }
 
+let libraryVirtualGrid = null;
+let catalogVirtualGrid = null;
+
 function applyCardZoom(px, persistToBackend = false) {
   const next = clampCardZoomPx(px);
   state.cardZoomPx = next;
@@ -681,6 +713,8 @@ function applyCardZoom(px, persistToBackend = false) {
   if (el("library-zoom-label")) el("library-zoom-label").textContent = label;
   if (el("catalog-zoom-label")) el("catalog-zoom-label").textContent = label;
   localStorage.setItem("duke_launcher_card_zoom", String(next));
+  libraryVirtualGrid?.scheduleRender();
+  catalogVirtualGrid?.scheduleRender();
   if (persistToBackend) {
     if (cardZoomPersistTimer) clearTimeout(cardZoomPersistTimer);
     cardZoomPersistTimer = setTimeout(() => {
@@ -716,6 +750,7 @@ function applyCompactLibraryCards(enabled) {
   if (el("setting-compact-cards")) {
     el("setting-compact-cards").checked = state.compactLibraryCards;
   }
+  libraryVirtualGrid?.scheduleRender();
 }
 
 function snapNvmeBudgetPct(rawPct) {
@@ -1076,10 +1111,15 @@ function switchTab(tab, keepDetail = false) {
   } else {
     el(viewMap[tab] || "library-view")?.classList.remove("hidden");
     el("library-controls")?.classList.toggle("hidden", tab !== "library");
-    if (tab === "settings") {
+    if (tab === "library") {
+      libraryVirtualGrid?.scheduleRender();
+    } else if (tab === "catalog") {
+      catalogVirtualGrid?.scheduleRender();
+    } else if (tab === "settings") {
       loadEmulatorSettingsSection();
       refreshFrontierDiagnostics().catch(() => {});
       refreshWave3AiDiagnostics().catch(() => {});
+      refreshV22SubsystemStatuses().catch(() => {});
     }
   }
 }
@@ -1337,107 +1377,206 @@ function renderSidebarGameList() {
   scheduleSidebarIconsSync(sorted.map((g) => g.id));
 }
 
+function createLibraryCardElement() {
+  const card = document.createElement("article");
+  card.className = "game-card";
+  card.innerHTML = `
+    <div class="game-card-media">
+      <img alt="" class="game-card-img" loading="lazy" decoding="async" style="display:none" />
+      <div class="game-card-badges">
+        <span></span>
+        <button type="button" class="card-fav-btn" data-action="fav" title="Toggle Favorite">
+          ${svgIcon("icon-pin")}
+        </button>
+      </div>
+      <div class="game-card-overlay">
+        <div class="game-card-toolbar">
+          <button type="button" class="btn btn-steam-green btn-sm card-play-btn" data-action="play">
+            ${svgIcon("icon-play")}
+            <span>Play</span>
+          </button>
+          <button type="button" class="btn btn-secondary btn-xs card-action-btn" data-action="fix" title="Open Crash-to-Fix &amp; Compatibility Repairs">
+            ${svgIcon("icon-wrench")}
+            <span>Fix Game</span>
+          </button>
+          <button type="button" class="btn btn-secondary btn-xs card-action-btn" data-action="backup" title="Create Rolling Save Backup (.zip)">
+            ${svgIcon("icon-archive")}
+            <span>Save Backup</span>
+          </button>
+          <button type="button" class="btn btn-secondary btn-xs card-action-btn" data-action="settings" title="Game Settings, Jail, Launch Args &amp; Details">
+            ${svgIcon("icon-sliders")}
+            <span>Settings</span>
+          </button>
+        </div>
+      </div>
+    </div>
+    <div class="game-card-body">
+      <div class="game-card-title"></div>
+      <div class="game-card-meta">
+        <span class="mono-num"></span>
+        <span></span>
+      </div>
+      <div class="game-card-footer-tags">
+        <span class="card-footer-chip"></span>
+        <span class="card-footer-chip card-footer-chip-update hidden" title="Newer version detected on update feed">Update</span>
+        <span class="card-footer-chip mono-num"></span>
+      </div>
+      <div class="play-tonight-fit-pill hidden"></div>
+    </div>
+  `;
+
+  const mediaEl = card.querySelector(".game-card-media");
+  const imgEl = card.querySelector("img.game-card-img");
+  const metaSpans = card.querySelectorAll(".game-card-meta span");
+  const footerChips = card.querySelectorAll(".game-card-footer-tags .card-footer-chip");
+
+  imgEl.addEventListener("error", () => {
+    const g = card._vgCurrentGame;
+    if (!g) return;
+    const expectedCover = resolveMediaUrl(g.coverUrl) || resolveMediaUrl(g.coverDataUrl);
+    if (!expectedCover || imgEl.dataset.coverSrc !== expectedCover) return;
+    imgEl.style.display = "none";
+    const sourceLabel = resolveGameSourceLabel(g);
+    const procKey = `${g.title || ""}|${sourceLabel}|${g.source || ""}`;
+    if (!mediaEl.querySelector(".cover-fallback-card") || card._vgProcKey !== procKey) {
+      mediaEl.querySelector(".cover-fallback-card")?.remove();
+      mediaEl.prepend(createProceduralCoverCardEl(g.title || "Game", sourceLabel, g.source || ""));
+      card._vgProcKey = procKey;
+    }
+  });
+
+  card._vgRefs = {
+    mediaEl,
+    imgEl,
+    favBtn: card.querySelector('.card-fav-btn[data-action="fav"]'),
+    actionBtns: Array.from(card.querySelectorAll("[data-game-id], [data-action]")),
+    titleEl: card.querySelector(".game-card-title"),
+    playtimeEl: metaSpans[0] || null,
+    lastEl: metaSpans[1] || null,
+    sourceChip: footerChips[0] || null,
+    updateChip: footerChips[1] || null,
+    sizeChip: footerChips[2] || null,
+    tonightPill: card.querySelector(".play-tonight-fit-pill")
+  };
+  return card;
+}
+
+function updateLibraryCardElement(cardEl, game) {
+  const refs = cardEl?._vgRefs;
+  if (!refs || !game) return;
+  cardEl._vgCurrentGame = game;
+  const gid = String(game.id || "");
+  cardEl.dataset.gameId = gid;
+  for (const btn of refs.actionBtns) {
+    btn.dataset.gameId = gid;
+  }
+  refs.favBtn?.classList.toggle("is-fav", Boolean(game.isFavorite));
+
+  const title = String(game.title || "");
+  if (refs.titleEl && refs.titleEl.textContent !== title) {
+    refs.titleEl.textContent = title;
+    refs.titleEl.title = title;
+  }
+
+  const nextPlaytime = formatPlaytime(getTotalPlaytimeSecs(game));
+  const nextLast = formatLastPlayed(game.lastPlayedTs || game.lastPlayed);
+  if (refs.playtimeEl && refs.playtimeEl.textContent !== nextPlaytime) {
+    refs.playtimeEl.textContent = nextPlaytime;
+  }
+  if (refs.lastEl && refs.lastEl.textContent !== nextLast) {
+    refs.lastEl.textContent = nextLast;
+  }
+
+  const sourceLabel = resolveGameSourceLabel(game);
+  const sizeStr = game.sizeFormatted || formatBytesJs(game.sizeBytes);
+  if (refs.sourceChip && refs.sourceChip.textContent !== sourceLabel) {
+    refs.sourceChip.textContent = sourceLabel;
+  }
+  if (refs.updateChip) {
+    refs.updateChip.classList.toggle("hidden", !game.updateAvailable);
+  }
+  if (refs.sizeChip && refs.sizeChip.textContent !== sizeStr) {
+    refs.sizeChip.textContent = sizeStr;
+  }
+
+  if (refs.tonightPill) {
+    const tonightRec = state.filter === "play_tonight" ? state.playTonightMap.get(game.id) : null;
+    if (tonightRec) {
+      refs.tonightPill.textContent =
+        tonightRec.fitLabel || tonightRec.estimatedSessionFit || "Play Tonight Pick";
+      refs.tonightPill.title = (tonightRec.reasons || []).join(" · ");
+      refs.tonightPill.classList.remove("hidden");
+    } else {
+      refs.tonightPill.classList.add("hidden");
+    }
+  }
+
+  const cover = resolveMediaUrl(game.coverUrl) || resolveMediaUrl(game.coverDataUrl);
+  if (cover) {
+    refs.mediaEl.querySelector(".cover-fallback-card")?.remove();
+    cardEl._vgProcKey = "";
+    refs.imgEl.style.display = "";
+    refs.imgEl.alt = title;
+    if (refs.imgEl.dataset.coverSrc !== cover) {
+      refs.imgEl.dataset.coverSrc = cover;
+      refs.imgEl.src = cover;
+    }
+  } else {
+    refs.imgEl.dataset.coverSrc = "";
+    refs.imgEl.removeAttribute("src");
+    refs.imgEl.style.display = "none";
+    const procKey = `${title}|${sourceLabel}|${game.source || ""}`;
+    if (!refs.mediaEl.querySelector(".cover-fallback-card") || cardEl._vgProcKey !== procKey) {
+      refs.mediaEl.querySelector(".cover-fallback-card")?.remove();
+      refs.mediaEl.prepend(createProceduralCoverCardEl(title || "Game", sourceLabel, game.source || ""));
+      cardEl._vgProcKey = procKey;
+    }
+  }
+}
+
+function ensureLibraryVirtualGrid() {
+  if (libraryVirtualGrid) return libraryVirtualGrid;
+  const gridEl = el("library-grid");
+  const scrollerEl = document.querySelector(".workspace-scroll");
+  if (!gridEl || !scrollerEl) return null;
+  libraryVirtualGrid = new VirtualCardGrid({
+    gridEl,
+    scrollerEl,
+    maxDomNodes: 60,
+    overscanRows: 2,
+    defaultAspectRatio: 1.6,
+    defaultBodyHeight: 88,
+    compactBodyHeight: 72,
+    isGridVisible: () => state.activeTab === "library" && !state.selectedDetailId,
+    getZoomPx: () => state.cardZoomPx || 185,
+    isCompact: () => Boolean(state.compactLibraryCards),
+    isCouch: () => Boolean(state.couchMode),
+    getItemsCount: () => state.libraryFiltered.length,
+    getItem: (idx) => state.libraryFiltered[idx] || null,
+    createCard: () => createLibraryCardElement(),
+    updateCard: (cardEl, game) => updateLibraryCardElement(cardEl, game)
+  });
+  return libraryVirtualGrid;
+}
+
 function renderLibraryGrid() {
   const grid = el("library-grid");
   const empty = el("library-empty");
   if (!grid || !empty) return;
 
   const games = getFilteredSortedGames();
+  state.libraryFiltered = games;
   empty.classList.toggle("hidden", state.library.length > 0);
+  const vgrid = ensureLibraryVirtualGrid();
 
   if (games.length === 0 && state.library.length > 0) {
-    grid.innerHTML = `<div class="empty-card"><h3>No matching games</h3><p>Adjust your search filter to view your installed titles.</p></div>`;
+    vgrid?.showEmptyHtml(
+      `<div class="empty-card"><h3>No matching games</h3><p>Adjust your search filter to view your installed titles.</p></div>`
+    );
     return;
   }
 
-  const html = games
-    .map((game) => {
-      const cover =
-        resolveMediaUrl(game.coverUrl) ||
-        resolveMediaUrl(game.coverDataUrl);
-      const playtimeStr = formatPlaytime(getTotalPlaytimeSecs(game));
-      const lastStr = formatLastPlayed(game.lastPlayedTs || game.lastPlayed);
-      const favClass = game.isFavorite ? "is-fav" : "";
-      const sourceLabel = resolveGameSourceLabel(game);
-      const sizeStr = game.sizeFormatted || formatBytesJs(game.sizeBytes);
-      const updateBadge = game.updateAvailable
-        ? `<span class="card-footer-chip card-footer-chip-update" title="Newer version detected on update feed">Update</span>`
-        : "";
-      const tonightRec = state.filter === "play_tonight" ? state.playTonightMap.get(game.id) : null;
-      const tonightReasonHtml = tonightRec
-        ? `<div class="play-tonight-fit-pill" title="${escapeHtml((tonightRec.reasons || []).join(" · "))}">${escapeHtml(tonightRec.fitLabel || tonightRec.estimatedSessionFit || "Play Tonight Pick")}</div>`
-        : "";
-      const mediaContentHtml = cover
-        ? `<img src="${escapeHtml(cover)}" alt="${escapeHtml(game.title)}" class="game-card-img" loading="lazy" decoding="async" />`
-        : buildProceduralCoverCardHtml(game.title, sourceLabel, game.source || "");
-
-      return `
-        <article class="game-card" data-game-id="${escapeHtml(game.id)}">
-          <div class="game-card-media">
-            ${mediaContentHtml}
-            <div class="game-card-badges">
-              <span></span>
-              <button type="button" class="card-fav-btn ${favClass}" data-action="fav" data-game-id="${escapeHtml(game.id)}" title="Toggle Favorite">
-                ${svgIcon("icon-pin")}
-              </button>
-            </div>
-            <div class="game-card-overlay">
-              <div class="game-card-toolbar">
-                <button type="button" class="btn btn-steam-green btn-sm card-play-btn" data-action="play" data-game-id="${escapeHtml(game.id)}">
-                  ${svgIcon("icon-play")}
-                  <span>Play</span>
-                </button>
-                <button type="button" class="btn btn-secondary btn-xs card-action-btn" data-action="fix" data-game-id="${escapeHtml(game.id)}" title="Open Crash-to-Fix & Compatibility Repairs">
-                  ${svgIcon("icon-wrench")}
-                  <span>Fix Game</span>
-                </button>
-                <button type="button" class="btn btn-secondary btn-xs card-action-btn" data-action="backup" data-game-id="${escapeHtml(game.id)}" title="Create Rolling Save Backup (.zip)">
-                  ${svgIcon("icon-archive")}
-                  <span>Save Backup</span>
-                </button>
-                <button type="button" class="btn btn-secondary btn-xs card-action-btn" data-action="settings" data-game-id="${escapeHtml(game.id)}" title="Game Settings, Jail, Launch Args & Details">
-                  ${svgIcon("icon-sliders")}
-                  <span>Settings</span>
-                </button>
-              </div>
-            </div>
-          </div>
-          <div class="game-card-body">
-            <div class="game-card-title" title="${escapeHtml(game.title)}">${escapeHtml(game.title)}</div>
-            <div class="game-card-meta">
-              <span class="mono-num">${escapeHtml(playtimeStr)}</span>
-              <span>${escapeHtml(lastStr)}</span>
-            </div>
-            <div class="game-card-footer-tags">
-              <span class="card-footer-chip">${escapeHtml(sourceLabel)}</span>
-              ${updateBadge}
-              <span class="card-footer-chip mono-num">${escapeHtml(sizeStr)}</span>
-            </div>
-            ${tonightReasonHtml}
-          </div>
-        </article>
-      `;
-    })
-    .join("");
-
-  const tpl = document.createElement("template");
-  tpl.innerHTML = html;
-  const frag = tpl.content;
-  frag.querySelectorAll("img.game-card-img").forEach((imgEl) => {
-    imgEl.addEventListener(
-      "error",
-      () => {
-        const card = imgEl.closest(".game-card");
-        const gid = card?.dataset?.gameId || "";
-        const game = state.library.find((g) => g.id === gid);
-        const title = game?.title || imgEl.alt || "Game";
-        const platformLabel = game ? resolveGameSourceLabel(game) : "PC";
-        imgEl.replaceWith(createProceduralCoverCardEl(title, platformLabel, game?.source || ""));
-      },
-      { once: true }
-    );
-  });
-  grid.replaceChildren(frag);
+  vgrid?.invalidateAll();
 }
 
 function patchChangedLibraryCards(changedIds = null) {
@@ -1447,67 +1586,20 @@ function patchChangedLibraryCards(changedIds = null) {
   const empty = el("library-empty");
   if (empty) empty.classList.toggle("hidden", state.library.length > 0);
 
-  const cards = Array.from(grid.querySelectorAll(".game-card[data-game-id]"));
-  if (cards.length !== games.length || games.length === 0) {
+  if (games.length === 0 || games.length !== state.libraryFiltered.length) {
     return false;
   }
-  const byId = new Map();
   for (let i = 0; i < games.length; i++) {
-    const g = games[i];
-    if (!g || cards[i]?.dataset?.gameId !== g.id) {
+    if (!games[i] || state.libraryFiltered[i]?.id !== games[i].id) {
       return false;
     }
-    byId.set(g.id, g);
   }
+  state.libraryFiltered = games;
 
+  const vgrid = ensureLibraryVirtualGrid();
+  if (!vgrid) return false;
   const targetIds = changedIds && changedIds.size > 0 ? changedIds : null;
-  for (const card of cards) {
-    const game = byId.get(card.dataset.gameId);
-    if (!game) continue;
-    if (targetIds && !targetIds.has(game.id)) continue;
-
-    const favBtn = card.querySelector('.card-fav-btn[data-action="fav"]');
-    if (favBtn) favBtn.classList.toggle("is-fav", Boolean(game.isFavorite));
-
-    const titleEl = card.querySelector(".game-card-title");
-    if (titleEl && titleEl.textContent !== game.title) {
-      titleEl.textContent = game.title;
-      titleEl.title = game.title;
-    }
-
-    const metaEl = card.querySelector(".game-card-meta");
-    if (metaEl) {
-      const spans = metaEl.querySelectorAll("span");
-      const nextPlaytime = formatPlaytime(getTotalPlaytimeSecs(game));
-      const nextLast = formatLastPlayed(game.lastPlayedTs || game.lastPlayed);
-      if (spans[0] && spans[0].textContent !== nextPlaytime) spans[0].textContent = nextPlaytime;
-      if (spans[1] && spans[1].textContent !== nextLast) spans[1].textContent = nextLast;
-    }
-
-    const mediaEl = card.querySelector(".game-card-media");
-    const nextCover = resolveMediaUrl(game.coverUrl) || resolveMediaUrl(game.coverDataUrl);
-    if (mediaEl && nextCover) {
-      const curImg = mediaEl.querySelector("img.game-card-img");
-      if (!curImg || curImg.getAttribute("src") !== nextCover) {
-        const nextImg = document.createElement("img");
-        nextImg.src = nextCover;
-        nextImg.alt = game.title;
-        nextImg.className = "game-card-img";
-        nextImg.loading = "lazy";
-        nextImg.decoding = "async";
-        nextImg.addEventListener(
-          "error",
-          () => {
-            nextImg.replaceWith(createProceduralCoverCardEl(game.title, resolveGameSourceLabel(game), game.source || ""));
-          },
-          { once: true }
-        );
-        const oldMedia = curImg || mediaEl.querySelector(".procedural-cover-card");
-        if (oldMedia) oldMedia.replaceWith(nextImg);
-        else mediaEl.prepend(nextImg);
-      }
-    }
-  }
+  vgrid.patchMatched((item) => !targetIds || targetIds.has(item.id));
   return true;
 }
 
@@ -1729,6 +1821,11 @@ async function openGameDetail(gameId) {
   const isRetroGame = Number(game.platformId || 0) > 0;
   el("btn-detail-link-rom")?.classList.toggle("hidden", !isRetroGame);
   el("detail-rom-patcher-block")?.classList.toggle("hidden", !isRetroGame);
+  el("detail-rom-shrink-block")?.classList.toggle("hidden", !isRetroGame);
+  if (el("detail-rom-shrink-status")) {
+    el("detail-rom-shrink-status").textContent = "";
+    el("detail-rom-shrink-status").classList.add("hidden");
+  }
   el("detail-ra-progress-box")?.classList.toggle("hidden", !isRetroGame);
   if (el("detail-rom-patch-status")) {
     el("detail-rom-patch-status").textContent = "";
@@ -4128,10 +4225,19 @@ function syncSettingsUiFromBackend(settings) {
   state.projfsStreamingEnabled = Boolean(settings.projfsStreamingEnabled ?? true);
   state.shaderSwarmEnabled = Boolean(settings.shaderSwarmEnabled ?? true);
   state.framePacingEnabled = Boolean(settings.framePacingEnabled ?? true);
+  state.discordRpcEnabled = Boolean(settings.discordRpcEnabled ?? false);
+  state.realtimeSaveWatcherEnabled = Boolean(settings.realtimeSaveWatcherEnabled ?? true);
+  state.desktopChordEnabled = Boolean(settings.desktopChordEnabled ?? true);
   if (el("setting-projfs-streaming")) el("setting-projfs-streaming").checked = state.projfsStreamingEnabled;
   if (el("setting-shader-swarm")) el("setting-shader-swarm").checked = state.shaderSwarmEnabled;
   if (el("setting-frame-pacing")) el("setting-frame-pacing").checked = state.framePacingEnabled;
+  if (el("setting-discord-rpc")) el("setting-discord-rpc").checked = state.discordRpcEnabled;
+  if (el("setting-realtime-save-watcher")) {
+    el("setting-realtime-save-watcher").checked = state.realtimeSaveWatcherEnabled;
+  }
+  if (el("setting-desktop-chord")) el("setting-desktop-chord").checked = state.desktopChordEnabled;
   refreshPrivacyVaultUi();
+  refreshV22SubsystemStatuses().catch(() => {});
 }
 
 function renderPrivacyVaultStatus(st) {
@@ -5441,44 +5547,12 @@ function buildCatalogQueryParams(offset = 0) {
     platform: String(c.platform || "all"),
     genres: Array.isArray(c.selectedGenres) ? [...c.selectedGenres] : [],
     offset: Math.max(0, Number(offset || 0)),
-    limit: Number(c.batchSize || 60)
+    limit: Math.min(240, Math.max(1, Number(c.batchSize || 240)))
   };
 }
 
-function buildCatalogCardElement(entry, installedSet) {
-  const card = document.createElement("article");
-  card.className = "catalog-card";
-  card.dataset.appId = String(entry.appId);
-  card.tabIndex = 0;
-
-  const isRetro = Number(entry.platformId || 0) > 0;
-  const isInstalled = isCatalogGameInstalled(entry, installedSet);
-  const modeTags = [];
-  if (entry.isSingleplayer) modeTags.push("Single-Player");
-  if (entry.isCoop) modeTags.push("Co-op");
-  const modePill = isRetro
-    ? (entry.platformName || "Console")
-    : (modeTags.length > 0 ? modeTags.join(" · ") : (entry.genres?.[0] || "Steam"));
-
-  const priceText = isRetro
-    ? (entry.releaseDate || entry.platformSlug?.toUpperCase() || "Console")
-    : (entry.priceCents > 0 ? (entry.priceFormatted || `$${(entry.priceCents / 100).toFixed(2)}`) : "Free");
-  const ccuText = isRetro
-    ? (entry.platformName || "Console")
-    : (Number(entry.ccu || 0) > 0 ? `${Number(entry.ccu).toLocaleString()} live` : "Steam");
-  const ratingText = isRetro
-    ? (entry.developers?.[0] || "")
-    : (Number(entry.reviewPct || 0) > 0 ? `${Math.round(entry.reviewPct)}% pos` : (entry.ownersLabel || ""));
-
-  const media = document.createElement("div");
-  media.className = "catalog-card-media";
-
-  const img = document.createElement("img");
-  img.className = "catalog-card-img";
-  img.alt = "";
-  img.loading = "lazy";
-  img.decoding = "async";
-  img.dataset.fallbackStage = "0";
+function getCatalogEntryMediaUrls(entry) {
+  const isRetro = Number(entry?.platformId || 0) > 0;
   const cacheKey = isRetro ? `retro_${entry.appId}` : String(entry.appId);
   const cachedPath = CATALOG_COVER_CACHE[cacheKey];
   const primaryCover = isRetro
@@ -5489,48 +5563,58 @@ function buildCatalogCardElement(entry, installedSet) {
     ? (resolveMediaUrl(entry.headerUrl) || "")
     : (resolveMediaUrl(entry.headerUrl) ||
       `https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${entry.appId}/header.jpg`);
+  return { isRetro, cacheKey, primaryCover, headerFallback };
+}
 
-  const showCatalogFallbackCard = () => {
-    img.style.display = "none";
-    if (!media.querySelector(".cover-fallback-card")) {
-      media.prepend(
-        createProceduralCoverCardEl(
-          entry.name || (isRetro ? "Console Game" : "Steam Game"),
-          isRetro ? (entry.platformName || "Console") : "Steam",
-          entry.platformName || modePill
-        )
-      );
-    }
-  };
-
-  img.addEventListener("error", () => {
-    const stage = Number(img.dataset.fallbackStage || "0");
-    if (stage === 0 && headerFallback && img.src !== headerFallback) {
-      img.dataset.fallbackStage = "1";
-      img.src = headerFallback;
-    } else if (stage < 2) {
-      img.dataset.fallbackStage = "2";
-      showCatalogFallbackCard();
-      scheduleCatalogCoverResolve(entry, img, media);
-    }
-  });
-
-  media.appendChild(img);
-  if (primaryCover) {
-    img.src = primaryCover;
-  } else {
-    showCatalogFallbackCard();
-    scheduleCatalogCoverResolve(entry, img, media);
+function showCatalogEntryFallbackCard(card, entry) {
+  const refs = card?._vgRefs;
+  if (!refs || !entry) return;
+  const isRetro = Number(entry.platformId || 0) > 0;
+  const modeTags = [];
+  if (entry.isSingleplayer) modeTags.push("Single-Player");
+  if (entry.isCoop) modeTags.push("Co-op");
+  const modePill = isRetro
+    ? (entry.platformName || "Console")
+    : (modeTags.length > 0 ? modeTags.join(" · ") : (entry.genres?.[0] || "Steam"));
+  refs.imgEl.style.display = "none";
+  const key = `${entry.appId}|${entry.name || ""}|${modePill}`;
+  if (!refs.mediaEl.querySelector(".cover-fallback-card") || card._vgFallbackKey !== key) {
+    refs.mediaEl.querySelector(".cover-fallback-card")?.remove();
+    refs.mediaEl.prepend(
+      createProceduralCoverCardEl(
+        entry.name || (isRetro ? "Console Game" : "Steam Game"),
+        isRetro ? (entry.platformName || "Console") : "Steam",
+        entry.platformName || modePill
+      )
+    );
+    card._vgFallbackKey = key;
   }
+}
+
+function createCatalogCardElement() {
+  const card = document.createElement("article");
+  card.className = "catalog-card";
+  card.tabIndex = 0;
+
+  const media = document.createElement("div");
+  media.className = "catalog-card-media";
+
+  const img = document.createElement("img");
+  img.className = "catalog-card-img";
+  img.alt = "";
+  img.loading = "lazy";
+  img.decoding = "async";
+  img.dataset.fallbackStage = "0";
+  media.appendChild(img);
 
   const overlay = document.createElement("div");
   overlay.className = "catalog-card-overlay";
   overlay.innerHTML = `
     <div class="catalog-overlay-actions">
-      <button type="button" class="btn btn-primary btn-xs" data-catalog-action="details" data-app-id="${escapeHtml(String(entry.appId))}">
+      <button type="button" class="btn btn-primary btn-xs" data-catalog-action="details">
         ${svgIcon("icon-sliders")}<span>Details</span>
       </button>
-      <button type="button" class="btn btn-secondary btn-xs" data-catalog-action="sources" data-app-id="${escapeHtml(String(entry.appId))}">
+      <button type="button" class="btn btn-secondary btn-xs" data-catalog-action="sources">
         ${svgIcon("icon-search")}<span>Find &amp; Download</span>
       </button>
     </div>
@@ -5538,26 +5622,223 @@ function buildCatalogCardElement(entry, installedSet) {
   media.appendChild(overlay);
   card.appendChild(media);
 
-  const installedBadge = isInstalled ? '<span class="card-footer-chip">Installed</span>' : "";
-  const footerModeTag = isRetro
-    ? (entry.platformName || "Console")
-    : (modeTags.length > 0 ? modeTags.join(" / ") : (entry.genres?.[0] || "Steam"));
   const body = document.createElement("div");
   body.className = "catalog-card-body";
   body.innerHTML = `
-    <div class="catalog-card-title" title="${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</div>
+    <div class="catalog-card-title"></div>
     <div class="catalog-card-sub">
-      <span>${escapeHtml(footerModeTag)}</span>
-      <span class="mono-num">${escapeHtml(ccuText)}${ratingText ? ` · ${escapeHtml(ratingText)}` : ""}</span>
+      <span></span>
+      <span class="mono-num"></span>
     </div>
     <div class="catalog-card-footer-tags">
-      <span class="catalog-footer-price ${!isRetro && entry.priceCents === 0 ? "is-free" : ""} mono-num">${escapeHtml(priceText)}</span>
-      <span class="card-footer-chip">${escapeHtml(isRetro ? (entry.genres?.[0] || "Console") : "PC")}</span>
-      ${installedBadge}
+      <span class="catalog-footer-price mono-num"></span>
+      <span class="card-footer-chip"></span>
+      <span class="card-footer-chip hidden">Installed</span>
     </div>
   `;
   card.appendChild(body);
+
+  const subSpans = body.querySelectorAll(".catalog-card-sub span");
+  const footerChips = body.querySelectorAll(".catalog-card-footer-tags .card-footer-chip");
+  card._vgRefs = {
+    mediaEl: media,
+    imgEl: img,
+    actionBtns: Array.from(overlay.querySelectorAll("[data-catalog-action]")),
+    titleEl: body.querySelector(".catalog-card-title"),
+    subLeftEl: subSpans[0] || null,
+    subRightEl: subSpans[1] || null,
+    priceEl: body.querySelector(".catalog-footer-price"),
+    platformChip: footerChips[0] || null,
+    installedChip: footerChips[1] || null
+  };
+
+  img.addEventListener("error", () => {
+    const entry = card._vgCurrentEntry;
+    if (!entry) return;
+    const { headerFallback, cacheKey } = getCatalogEntryMediaUrls(entry);
+    if (img.dataset.cacheKey !== cacheKey) return;
+    const stage = Number(img.dataset.fallbackStage || "0");
+    if (stage === 0 && headerFallback && img.src !== headerFallback) {
+      img.dataset.fallbackStage = "1";
+      img.dataset.boundSrc = headerFallback;
+      img.src = headerFallback;
+    } else if (stage < 2) {
+      img.dataset.fallbackStage = "2";
+      showCatalogEntryFallbackCard(card, entry);
+      scheduleCatalogCoverResolve(entry, img, media);
+    }
+  });
+
   return card;
+}
+
+function updateCatalogCardElement(card, entry, installedSet = null) {
+  const refs = card?._vgRefs;
+  if (!refs) return;
+
+  if (!entry) {
+    card._vgCurrentEntry = null;
+    card._vgFallbackKey = "";
+    card.classList.add("is-skeleton");
+    card.tabIndex = -1;
+    delete card.dataset.appId;
+    for (const btn of refs.actionBtns) delete btn.dataset.appId;
+    refs.mediaEl.querySelector(".cover-fallback-card")?.remove();
+    refs.imgEl.dataset.cacheKey = "";
+    refs.imgEl.dataset.boundSrc = "";
+    refs.imgEl.removeAttribute("src");
+    refs.imgEl.style.display = "none";
+    if (refs.titleEl) {
+      refs.titleEl.textContent = "Loading title...";
+      refs.titleEl.title = "";
+    }
+    if (refs.subLeftEl) refs.subLeftEl.textContent = "Catalog";
+    if (refs.subRightEl) refs.subRightEl.textContent = "";
+    if (refs.priceEl) {
+      refs.priceEl.textContent = "";
+      refs.priceEl.classList.remove("is-free");
+    }
+    if (refs.platformChip) refs.platformChip.textContent = "...";
+    refs.installedChip?.classList.add("hidden");
+    return;
+  }
+
+  card.classList.remove("is-skeleton");
+  card.tabIndex = 0;
+  card._vgCurrentEntry = entry;
+  const appIdStr = String(entry.appId);
+  card.dataset.appId = appIdStr;
+  for (const btn of refs.actionBtns) btn.dataset.appId = appIdStr;
+
+  const isRetro = Number(entry.platformId || 0) > 0;
+  const matchers = installedSet || getInstalledCatalogMatchers();
+  const isInstalled = isCatalogGameInstalled(entry, matchers);
+  const modeTags = [];
+  if (entry.isSingleplayer) modeTags.push("Single-Player");
+  if (entry.isCoop) modeTags.push("Co-op");
+
+  const priceText = isRetro
+    ? (entry.releaseDate || entry.platformSlug?.toUpperCase() || "Console")
+    : (entry.priceCents > 0 ? (entry.priceFormatted || `$${(entry.priceCents / 100).toFixed(2)}`) : "Free");
+  const ccuText = isRetro
+    ? (entry.platformName || "Console")
+    : (Number(entry.ccu || 0) > 0 ? `${Number(entry.ccu).toLocaleString()} live` : "Steam");
+  const ratingText = isRetro
+    ? (entry.developers?.[0] || "")
+    : (Number(entry.reviewPct || 0) > 0 ? `${Math.round(entry.reviewPct)}% pos` : (entry.ownersLabel || ""));
+  const footerModeTag = isRetro
+    ? (entry.platformName || "Console")
+    : (modeTags.length > 0 ? modeTags.join(" / ") : (entry.genres?.[0] || "Steam"));
+
+  if (refs.titleEl) {
+    const title = String(entry.name || "");
+    if (refs.titleEl.textContent !== title) {
+      refs.titleEl.textContent = title;
+      refs.titleEl.title = title;
+    }
+  }
+  if (refs.subLeftEl && refs.subLeftEl.textContent !== footerModeTag) {
+    refs.subLeftEl.textContent = footerModeTag;
+  }
+  const subRightText = `${ccuText}${ratingText ? ` · ${ratingText}` : ""}`;
+  if (refs.subRightEl && refs.subRightEl.textContent !== subRightText) {
+    refs.subRightEl.textContent = subRightText;
+  }
+  if (refs.priceEl) {
+    if (refs.priceEl.textContent !== priceText) refs.priceEl.textContent = priceText;
+    refs.priceEl.classList.toggle("is-free", !isRetro && entry.priceCents === 0);
+  }
+  const platText = isRetro ? (entry.genres?.[0] || "Console") : "PC";
+  if (refs.platformChip && refs.platformChip.textContent !== platText) {
+    refs.platformChip.textContent = platText;
+  }
+  refs.installedChip?.classList.toggle("hidden", !isInstalled);
+
+  const { cacheKey, primaryCover } = getCatalogEntryMediaUrls(entry);
+  refs.imgEl.dataset.cacheKey = cacheKey;
+  if (primaryCover) {
+    refs.mediaEl.querySelector(".cover-fallback-card")?.remove();
+    card._vgFallbackKey = "";
+    refs.imgEl.style.display = "";
+    if (refs.imgEl.dataset.boundSrc !== primaryCover) {
+      refs.imgEl.dataset.fallbackStage = "0";
+      refs.imgEl.dataset.boundSrc = primaryCover;
+      refs.imgEl.src = primaryCover;
+    }
+  } else {
+    refs.imgEl.dataset.boundSrc = "";
+    refs.imgEl.removeAttribute("src");
+    showCatalogEntryFallbackCard(card, entry);
+    scheduleCatalogCoverResolve(entry, refs.imgEl, refs.mediaEl);
+  }
+}
+
+function ensureCatalogVirtualGrid() {
+  if (catalogVirtualGrid) return catalogVirtualGrid;
+  const gridEl = el("catalog-grid");
+  const scrollerEl = document.querySelector(".workspace-scroll");
+  if (!gridEl || !scrollerEl) return null;
+  catalogVirtualGrid = new VirtualCardGrid({
+    gridEl,
+    scrollerEl,
+    maxDomNodes: 60,
+    overscanRows: 2,
+    defaultAspectRatio: 0.75,
+    defaultBodyHeight: 96,
+    compactBodyHeight: 96,
+    isGridVisible: () => state.activeTab === "catalog",
+    getZoomPx: () => state.cardZoomPx || 185,
+    isCompact: () => false,
+    isCouch: () => Boolean(state.couchMode),
+    getItemsCount: () => Number(state.catalog.totalMatches || 0),
+    getItem: (idx) => state.catalog.items[idx] || null,
+    createCard: () => createCatalogCardElement(),
+    updateCard: (cardEl, entry) => updateCatalogCardElement(cardEl, entry),
+    onVisibleRange: (startIdx, endIdx, total) => {
+      ensureCatalogRangeLoaded(startIdx, endIdx, total);
+    }
+  });
+  return catalogVirtualGrid;
+}
+
+async function fetchCatalogChunk(offset, expectedReqId) {
+  const c = state.catalog;
+  if (c.loadingOffsets.has(offset) || c.loadedChunks.has(offset)) return;
+  if (expectedReqId !== c.queryRequestId) return;
+
+  c.loadingOffsets.add(offset);
+  try {
+    const page = await queryCatalogMmap(buildCatalogQueryParams(offset));
+    if (expectedReqId !== c.queryRequestId) return;
+    const items = Array.isArray(page?.items) ? page.items : [];
+    for (let i = 0; i < items.length; i++) {
+      const entry = items[i];
+      if (!entry) continue;
+      c.items[offset + i] = entry;
+      c.itemsById.set(Number(entry.appId), entry);
+    }
+    c.loadedChunks.add(offset);
+    c.renderedCount = c.itemsById.size;
+    catalogVirtualGrid?.patchMatched((_, __, idx) => idx >= offset && idx < offset + items.length);
+    updateCatalogResultsSummary();
+  } catch {
+    // Allow re-request if user scrolls back onto an unpopulated range
+  } finally {
+    c.loadingOffsets.delete(offset);
+  }
+}
+
+function ensureCatalogRangeLoaded(startIdx, endIdx, total) {
+  const c = state.catalog;
+  if (!total || total <= 0 || state.activeTab !== "catalog") return;
+  const chunkSize = Math.min(240, Math.max(60, Number(c.batchSize || 240)));
+  const firstChunk = Math.floor(Math.max(0, startIdx) / chunkSize) * chunkSize;
+  const lastChunk = Math.floor(Math.max(0, Math.min(total - 1, endIdx + 120)) / chunkSize) * chunkSize;
+  for (let off = firstChunk; off <= lastChunk; off += chunkSize) {
+    if (!c.loadedChunks.has(off) && !c.loadingOffsets.has(off)) {
+      fetchCatalogChunk(off, c.queryRequestId);
+    }
+  }
 }
 
 function updateCatalogResultsSummary() {
@@ -5570,13 +5851,17 @@ function updateCatalogResultsSummary() {
     if (c.loading && c.totalCached === 0 && c.renderedCount === 0) {
       summary.textContent = "Indexing SteamSpy & Steam Store catalog...";
     } else {
-      const shownCount = Math.min(c.renderedCount, c.totalMatches);
+      const stats = catalogVirtualGrid?.getStats();
+      const viewportShown =
+        stats && stats.endIndex >= stats.startIndex && c.totalMatches > 0
+          ? Math.min(c.totalMatches, stats.endIndex - stats.startIndex + 1)
+          : Math.min(c.renderedCount, c.totalMatches);
       const indexedDisplay = Math.max(c.totalCached, c.totalMatches).toLocaleString();
       const liveTag = c.enrichingLive ? " · Querying live Steam Store..." : "";
       const latencyTag =
         c.lastQueryTimeUs > 0 ? ` · ${(c.lastQueryTimeUs / 1000).toFixed(2)} ms` : "";
       const semanticTag = c.semanticMode && c.semanticSummary ? ` · DKCAT003: ${c.semanticSummary}` : "";
-      summary.textContent = `Showing ${shownCount.toLocaleString()} of ${c.totalMatches.toLocaleString()} matching titles across ${indexedDisplay} indexed${latencyTag}${semanticTag}${liveTag}`;
+      summary.textContent = `Virtual viewport: ${viewportShown.toLocaleString()} cards DOM-mounted across ${c.totalMatches.toLocaleString()} matches (${indexedDisplay} indexed)${latencyTag}${semanticTag}${liveTag}`;
     }
   }
 
@@ -5607,25 +5892,27 @@ async function runCatalogQuery(resetBatch = true) {
   if (!grid) return;
 
   if (!resetBatch) {
-    if (c.loadingMore || c.loading) return;
-    if (c.renderedCount >= c.totalMatches) return;
+    const stats = catalogVirtualGrid?.getStats();
+    const startIdx = Math.max(0, Number(stats?.startIndex || 0));
+    const endIdx = Math.max(startIdx + 60, Number(stats?.endIndex || 60));
+    ensureCatalogRangeLoaded(startIdx, endIdx, c.totalMatches);
+    return;
   }
 
   c.queryRequestId += 1;
   const qReqId = c.queryRequestId;
-  if (!resetBatch) {
-    c.loadingMore = true;
-  }
+  c.loadingOffsets.clear();
+  c.loadedChunks.clear();
+  c.loadingOffsets.add(0);
 
-  const offset = resetBatch ? 0 : c.renderedCount;
   if (loadingEl) loadingEl.classList.toggle("hidden", !(c.loading && c.totalCached === 0));
   if (errorEl) errorEl.classList.toggle("hidden", !(c.error && c.totalCached === 0));
   if (errorMsg && c.error) errorMsg.textContent = c.error;
+  el("catalog-scroll-sentinel")?.classList.add("hidden");
 
   try {
-    const page = await queryCatalogMmap(buildCatalogQueryParams(offset));
+    const page = await queryCatalogMmap(buildCatalogQueryParams(0));
     if (qReqId !== c.queryRequestId) {
-      if (!resetBatch) c.loadingMore = false;
       return;
     }
 
@@ -5642,30 +5929,32 @@ async function runCatalogQuery(resetBatch = true) {
     c.semanticMode = Boolean(page?.semanticMode);
     c.semanticSummary = String(page?.semanticSummary || "");
 
-    if (resetBatch) {
-      c.itemsById.clear();
-      c.renderedCount = 0;
-      grid.replaceChildren();
+    c.items = new Array(Math.max(0, c.totalMatches));
+    c.itemsById.clear();
+    for (let i = 0; i < items.length; i++) {
+      const entry = items[i];
+      if (!entry) continue;
+      c.items[i] = entry;
+      c.itemsById.set(Number(entry.appId), entry);
+    }
+    c.loadedChunks.add(0);
+    c.loadingOffsets.delete(0);
+    c.renderedCount = c.itemsById.size;
+
+    const vgrid = ensureCatalogVirtualGrid();
+    if (c.totalMatches === 0) {
+      vgrid?.clear();
+    } else {
+      vgrid?.invalidateAll();
+      vgrid?.render({ resetScroll: true });
     }
 
-    if (items.length > 0) {
-      const installedSet = getInstalledCatalogMatchers();
-      const frag = document.createDocumentFragment();
-      for (const entry of items) {
-        c.itemsById.set(Number(entry.appId), entry);
-        frag.appendChild(buildCatalogCardElement(entry, installedSet));
-      }
-      grid.appendChild(frag);
-      c.renderedCount += items.length;
-    }
-
-    if (!resetBatch) c.loadingMore = false;
-    if (loadingEl) loadingEl.classList.toggle("hidden", !(c.loading && c.renderedCount === 0 && c.totalCached === 0));
-    if (errorEl) errorEl.classList.toggle("hidden", !(c.error && c.renderedCount === 0 && c.totalCached === 0));
+    if (loadingEl) loadingEl.classList.toggle("hidden", !(c.loading && c.totalMatches === 0 && c.totalCached === 0));
+    if (errorEl) errorEl.classList.toggle("hidden", !(c.error && c.totalMatches === 0 && c.totalCached === 0));
     if (emptyEl) {
       emptyEl.classList.toggle(
         "hidden",
-        c.renderedCount > 0 || (c.loading && c.totalCached === 0) || Boolean(c.error && c.totalCached === 0)
+        c.totalMatches > 0 || (c.loading && c.totalCached === 0) || Boolean(c.error && c.totalCached === 0)
       );
     }
 
@@ -5673,9 +5962,9 @@ async function runCatalogQuery(resetBatch = true) {
     updateCatalogResultsSummary();
   } catch (err) {
     if (qReqId !== c.queryRequestId) return;
-    c.loadingMore = false;
+    c.loadingOffsets.delete(0);
     c.error = String(err || "Catalog mmap query failed.");
-    if (errorEl) errorEl.classList.toggle("hidden", c.renderedCount > 0);
+    if (errorEl) errorEl.classList.toggle("hidden", c.totalMatches > 0);
     if (errorMsg) errorMsg.textContent = c.error;
     updateCatalogResultsSummary();
   }
@@ -5736,33 +6025,12 @@ function handleCatalogSearchInput(nextQ) {
 
 function setupCatalogIntersectionObserver() {
   const sentinel = el("catalog-scroll-sentinel");
-  const scroller = document.querySelector(".workspace-scroll");
-  if (!sentinel || typeof IntersectionObserver === "undefined") return;
-
+  if (sentinel) sentinel.classList.add("hidden");
   if (state.catalog.observer) {
     state.catalog.observer.disconnect();
+    state.catalog.observer = null;
   }
-  state.catalog.observer = new IntersectionObserver(
-    (entries) => {
-      if (state.activeTab !== "catalog") return;
-      if (entries.some((entry) => entry.isIntersecting)) {
-        appendNextCatalogBatch();
-      }
-    },
-    { root: scroller || null, rootMargin: "320px 0px" }
-  );
-  state.catalog.observer.observe(sentinel);
-
-  scroller?.addEventListener(
-    "scroll",
-    () => {
-      if (state.activeTab !== "catalog") return;
-      if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 360) {
-        appendNextCatalogBatch();
-      }
-    },
-    { passive: true }
-  );
+  ensureCatalogVirtualGrid();
 }
 
 function syncCatalogFilterControlsToDom() {
@@ -6921,6 +7189,8 @@ function applyCouchMode(enabled, persist = false, controllerKind = null) {
   }
   updateControllerGlyphLegend(state.couchMode || state.controllerConnected ? state.controllerKind : "none");
   state.gamepadPollingRateFn?.(state.couchMode || state.radialOpen);
+  libraryVirtualGrid?.scheduleRender();
+  catalogVirtualGrid?.scheduleRender();
 
   try {
     if (state.couchMode && !document.fullscreenElement && document.documentElement?.requestFullscreen) {
@@ -10188,6 +10458,7 @@ async function openCleanUninstallModalForGame(game) {
     switchTab("library", false);
     renderSidebarGameList();
     renderLibraryGrid();
+    libraryVirtualGrid?.scheduleRender();
   });
 
   const withSelectedGame = (cb) => {
@@ -11648,6 +11919,92 @@ async function openCleanUninstallModalForGame(game) {
     await applyDroppedOrPickedRomPatch(game, patchPath);
   });
 
+  el("btn-detail-compress-rom")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-detail-compress-rom");
+      const verifyBtn = el("btn-detail-verify-rom");
+      const statusEl = el("detail-rom-shrink-status");
+      try {
+        if (btn) btn.disabled = true;
+        if (verifyBtn) verifyBtn.disabled = true;
+        if (statusEl) {
+          statusEl.classList.remove("hidden");
+          statusEl.textContent = `Compressing disc image for ${g.title}...`;
+        }
+        const rep = await compressRetroRom(g.id, false);
+        if (Array.isArray(rep?.items) && rep.items.length > 0) {
+          state.library = await invokeCommand("get_local_library");
+          renderSidebarGameList();
+          renderLibraryGrid();
+          if (state.selectedDetailId === g.id) {
+            openGameDetailView(g.id);
+          }
+          const savedText = formatBytesJs(Number(rep.totalSavedBytes || 0));
+          const fmt = String(rep.items[0]?.format || "compressed").toUpperCase();
+          if (statusEl) {
+            statusEl.classList.remove("hidden");
+            statusEl.textContent = `Converted ${rep.convertedCount} disc image (${fmt}) · Saved ${savedText}.`;
+          }
+          showToast(`Compressed ${g.title} to ${fmt} · Saved ${savedText}.`, "success", 4200);
+        } else if (Array.isArray(rep?.errors) && rep.errors.length > 0) {
+          const msg = rep.errors[0];
+          if (statusEl) {
+            statusEl.classList.remove("hidden");
+            statusEl.textContent = msg;
+          }
+          showToast(msg, "error", 4500);
+        } else {
+          const msg = "ROM is already compressed or not an eligible .bin/.cue/.iso disc image.";
+          if (statusEl) {
+            statusEl.classList.remove("hidden");
+            statusEl.textContent = msg;
+          }
+          showToast(msg, "info", 3200);
+        }
+      } catch (err) {
+        const msg = String(err || "ROM compression failed.");
+        if (statusEl) {
+          statusEl.classList.remove("hidden");
+          statusEl.textContent = msg;
+        }
+        showToast(msg, "error");
+      } finally {
+        if (btn) btn.disabled = false;
+        if (verifyBtn) verifyBtn.disabled = false;
+      }
+    })
+  );
+
+  el("btn-detail-verify-rom")?.addEventListener("click", () =>
+    withSelectedGame(async (g) => {
+      const btn = el("btn-detail-verify-rom");
+      const statusEl = el("detail-rom-shrink-status");
+      if (!g.exePath) {
+        showToast("No ROM path linked to verify.", "info");
+        return;
+      }
+      try {
+        if (btn) btn.disabled = true;
+        const rep = await verifyRomArchive(g.exePath);
+        const msg = `${String(rep?.format || "Archive").toUpperCase()}: ${rep?.summary || "Integrity verified"}`;
+        if (statusEl) {
+          statusEl.classList.remove("hidden");
+          statusEl.textContent = msg;
+        }
+        showToast(msg, rep?.verified ? "success" : "info", 3800);
+      } catch (err) {
+        const msg = String(err || "Archive verification failed.");
+        if (statusEl) {
+          statusEl.classList.remove("hidden");
+          statusEl.textContent = msg;
+        }
+        showToast(msg, "error");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    })
+  );
+
   el("btn-sync-retro-achievements")?.addEventListener("click", () =>
     withSelectedGame((g) => loadDetailRetroAchievements(g, state.activeDetailRequestId, true))
   );
@@ -12099,6 +12456,203 @@ async function openCleanUninstallModalForGame(game) {
       showToast(checked ? "0.5 ms Frame Pacing Runtime enabled." : "0.5 ms Frame Pacing Runtime disabled.", "info", 2200);
     } catch (err) {
       showToast(String(err), "error");
+    }
+  });
+
+  el("setting-desktop-chord")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const updated = await updateLauncherSettings({ desktopChordEnabled: checked });
+      await setDesktopChordEnabled(checked).catch(() => null);
+      syncSettingsUiFromBackend(updated);
+      showToast(checked ? "Universal Controller Desktop Chord layer enabled." : "Controller Desktop Chord layer disabled.", "info", 2400);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("setting-discord-rpc")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const updated = await updateLauncherSettings({ discordRpcEnabled: checked });
+      await setDiscordPresenceEnabled(checked).catch(() => null);
+      syncSettingsUiFromBackend(updated);
+      showToast(checked ? "Discord Rich Presence IPC enabled." : "Discord Rich Presence IPC disabled.", "info", 2400);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("setting-realtime-save-watcher")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const updated = await updateLauncherSettings({ realtimeSaveWatcherEnabled: checked });
+      if (!checked) {
+        await stopSaveWatcher(null).catch(() => null);
+      } else if (state.activeSessions?.length > 0 && state.activeSessions[0]?.gameId) {
+        await startSaveWatcher(state.activeSessions[0].gameId).catch(() => null);
+      }
+      syncSettingsUiFromBackend(updated);
+      showToast(
+        checked ? "Real-Time Save Auto-Snapshot Watcher enabled." : "Real-Time Save Auto-Snapshot Watcher paused.",
+        "info",
+        2400
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-v22-refresh-status")?.addEventListener("click", async () => {
+    await refreshV22SubsystemStatuses();
+    showToast("v2.2.0 subsystem telemetry refreshed.", "info", 1800);
+  });
+
+  el("btn-redist-scan")?.addEventListener("click", async () => {
+    const scanBtn = el("btn-redist-scan");
+    const cleanBtn = el("btn-redist-clean");
+    const statusEl = el("settings-redist-status");
+    const listEl = el("settings-redist-list");
+    try {
+      if (scanBtn) scanBtn.disabled = true;
+      if (cleanBtn) cleanBtn.disabled = true;
+      if (statusEl) statusEl.textContent = "Scanning installed folders for _CommonRedist / DirectX / crash dump bloat...";
+      const rep = await scanRedistBloat(null);
+      state.lastRedistScan = rep;
+      const games = Array.isArray(rep?.games) ? rep.games : [];
+      const bytes = Number(rep?.totalReclaimableBytes || 0);
+      if (statusEl) {
+        statusEl.textContent =
+          bytes > 0
+            ? `Found ${rep.totalReclaimableFormatted || formatBytesJs(bytes)} across ${rep.gamesWithBloat} game(s) (${rep.gamesScanned} scanned) — ready for .duke-cas-backed cleanup.`
+            : `Clean across ${rep?.gamesScanned || 0} installed game(s) · 0 reclaimable redistributable installers.`;
+      }
+      if (cleanBtn) cleanBtn.disabled = bytes <= 0;
+      if (listEl) {
+        if (games.length > 0) {
+          listEl.innerHTML = games
+            .slice(0, 12)
+            .map(
+              (g) => `
+              <div class="redist-preview-row">
+                <span class="redist-row-title">${escapeHtml(g.gameTitle || "Game")}</span>
+                <span class="mono-num">${Number(g.candidates?.length || 0)} item(s) · ${escapeHtml(g.reclaimableFormatted || formatBytesJs(g.reclaimableBytes || 0))}</span>
+              </div>`
+            )
+            .join("");
+          listEl.classList.remove("hidden");
+        } else {
+          listEl.innerHTML = "";
+          listEl.classList.add("hidden");
+        }
+      }
+      showToast(
+        bytes > 0 ? `Scan found ${rep.totalReclaimableFormatted || formatBytesJs(bytes)} reclaimable bloat.` : "No duplicate redistributable bloat found.",
+        bytes > 0 ? "info" : "success",
+        2800
+      );
+    } catch (err) {
+      if (statusEl) statusEl.textContent = String(err || "Redistributable scan failed.");
+      showToast(String(err), "error");
+    } finally {
+      if (scanBtn) scanBtn.disabled = false;
+    }
+  });
+
+  el("btn-redist-clean")?.addEventListener("click", async () => {
+    const scanBtn = el("btn-redist-scan");
+    const cleanBtn = el("btn-redist-clean");
+    const statusEl = el("settings-redist-status");
+    const listEl = el("settings-redist-list");
+    try {
+      if (scanBtn) scanBtn.disabled = true;
+      if (cleanBtn) cleanBtn.disabled = true;
+      if (statusEl) statusEl.textContent = "Creating .duke-cas snapshots and reclaiming bloat...";
+      const rep = await cleanRedistBloat(null);
+      state.lastRedistScan = null;
+      const reclaimed = rep?.bytesReclaimedFormatted || formatBytesJs(Number(rep?.bytesReclaimed || 0));
+      const snapCount = Array.isArray(rep?.snapshotIds) ? rep.snapshotIds.length : 0;
+      if (statusEl) {
+        statusEl.textContent = `Reclaimed ${reclaimed} (${rep?.filesRemoved || 0} files across ${rep?.gamesCleaned || 0} game(s); ${snapCount} .duke-cas backup(s)).`;
+      }
+      if (listEl) {
+        listEl.innerHTML = "";
+        listEl.classList.add("hidden");
+      }
+      state.library = await invokeCommand("get_local_library");
+      renderSidebarGameList();
+      renderLibraryGrid();
+      updateSidebarTelemetry();
+      showToast(`Reclaimed ${reclaimed} cleanly with .duke-cas rollback protection.`, "success", 4200);
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (scanBtn) scanBtn.disabled = false;
+      if (cleanBtn) cleanBtn.disabled = true;
+    }
+  });
+
+  el("btn-settings-retro-shrink-scan")?.addEventListener("click", async () => {
+    const btn = el("btn-settings-retro-shrink-scan");
+    const statusEl = el("settings-retro-shrink-status");
+    const labelSpan = btn?.querySelector("span");
+    if (!btn) return;
+    try {
+      btn.disabled = true;
+      if (btn.dataset.shrinkPhase === "ready") {
+        if (statusEl) statusEl.textContent = "Compressing eligible retro disc images (.chd / .rvz)...";
+        const rep = await compressRetroRom(null, false);
+        state.library = await invokeCommand("get_local_library");
+        renderSidebarGameList();
+        renderLibraryGrid();
+        const saved = formatBytesJs(Number(rep?.totalSavedBytes || 0));
+        if (statusEl) {
+          statusEl.textContent = `Converted ${rep?.convertedCount || 0} ROM(s) · Saved ${saved} (skipped ${rep?.skippedCount || 0}).`;
+        }
+        btn.dataset.shrinkPhase = "idle";
+        if (labelSpan) labelSpan.textContent = "Scan Discs";
+        showToast(`Retro compression finished · Saved ${saved}.`, "success", 4200);
+      } else {
+        if (statusEl) statusEl.textContent = "Scanning retro library for uncompressed .bin/.cue and GC/Wii .iso discs...";
+        const candidates = await scanShrinkableRoms();
+        const count = Array.isArray(candidates) ? candidates.length : 0;
+        const totalBytes = count > 0 ? candidates.reduce((acc, c) => acc + Number(c.sourceBytes || 0), 0) : 0;
+        if (count > 0) {
+          if (statusEl) {
+            statusEl.textContent = `Found ${count} uncompressed disc(s) (${formatBytesJs(totalBytes)}) ready for lossless .chd / .rvz.`;
+          }
+          btn.dataset.shrinkPhase = "ready";
+          if (labelSpan) labelSpan.textContent = `Compress ${count} Disc(s)`;
+        } else {
+          if (statusEl) statusEl.textContent = "All eligible retro discs are already compressed (or no .bin/.cue/.iso ROMs found).";
+          btn.dataset.shrinkPhase = "idle";
+          if (labelSpan) labelSpan.textContent = "Scan Discs";
+        }
+      }
+    } catch (err) {
+      if (statusEl) statusEl.textContent = String(err || "Retro ROM scan failed.");
+      btn.dataset.shrinkPhase = "idle";
+      if (labelSpan) labelSpan.textContent = "Scan Discs";
+      showToast(String(err), "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  el("settings-self-heal-disabled-list")?.addEventListener("click", async (e) => {
+    const resetBtn = e.target.closest("[data-reset-subsystem]");
+    if (!resetBtn) return;
+    const subName = resetBtn.dataset.resetSubsystem || "";
+    if (!subName) return;
+    try {
+      resetBtn.disabled = true;
+      await resetSelfHealSubsystem(subName);
+      await refreshV22SubsystemStatuses();
+      showToast(`Re-enabled subsystem "${subName}".`, "success", 2800);
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      resetBtn.disabled = false;
     }
   });
 
@@ -13854,6 +14408,195 @@ async function init() {
       }
     })
     .catch(() => {});
+
+  listenStartupSelfHealReport((report) => {
+    showSelfHealToastOnce(report);
+    refreshV22SubsystemStatuses().catch(() => {});
+  }).catch(() => {});
+
+  listenRomShrinkProgress((prog) => {
+    if (!prog) return;
+    const status = String(prog.status || "");
+    const detailStatus = el("detail-rom-shrink-status");
+    const settingsStatus = el("settings-retro-shrink-status");
+    if (status === "running") {
+      const msg = "Compressing retro disc image lossless (.chd / .rvz)...";
+      if (detailStatus && state.selectedDetailId && prog.gameId === state.selectedDetailId) {
+        detailStatus.classList.remove("hidden");
+        detailStatus.textContent = msg;
+      }
+      if (settingsStatus && !prog.gameId) settingsStatus.textContent = msg;
+    } else if (status === "completed") {
+      const saved = formatBytesJs(Number(prog.totalSavedBytes || 0));
+      const msg = `Completed ${Number(prog.convertedCount || 0)} disc image(s) · Saved ${saved}.`;
+      if (detailStatus && state.selectedDetailId && prog.gameId === state.selectedDetailId) {
+        detailStatus.classList.remove("hidden");
+        detailStatus.textContent = msg;
+      }
+      if (settingsStatus) settingsStatus.textContent = msg;
+    } else if (status === "error" && prog.error) {
+      if (detailStatus && state.selectedDetailId && prog.gameId === state.selectedDetailId) {
+        detailStatus.classList.remove("hidden");
+        detailStatus.textContent = String(prog.error);
+      }
+      if (settingsStatus) settingsStatus.textContent = String(prog.error);
+    }
+  }).catch(() => {});
+
+  getSelfHealDiagnostics()
+    .then((diag) => {
+      if (diag?.lastReport) {
+        showSelfHealToastOnce(diag.lastReport);
+      }
+      renderSelfHealDiagnosticsUi(diag);
+    })
+    .catch(() => {});
+
+  refreshV22SubsystemStatuses().catch(() => {});
+}
+
+function hasSelfHealRecoveryActivity(rep) {
+  if (!rep) return false;
+  return Boolean(
+    rep.uncleanPreviousExit ||
+      (Array.isArray(rep.restoredJsonFiles) && rep.restoredJsonFiles.length > 0) ||
+      Number(rep.recoveredDownloads || 0) > 0 ||
+      Number(rep.cleanedTmpFiles || 0) > 0 ||
+      (Array.isArray(rep.quarantinedFiles) && rep.quarantinedFiles.length > 0) ||
+      (Array.isArray(rep.disabledSubsystems) && rep.disabledSubsystems.length > 0) ||
+      rep.dklibRepaired ||
+      rep.settingsRepaired ||
+      rep.catalogRebuilt ||
+      Number(rep.casBlobsQuarantined || 0) > 0 ||
+      Number(rep.webviewLocksCleared || 0) > 0
+  );
+}
+
+function showSelfHealToastOnce(report) {
+  if (state.selfHealToastShown || !hasSelfHealRecoveryActivity(report)) return;
+  state.selfHealToastShown = true;
+  const msg = String(report.toastSummary || "").trim() ||
+    "Self-Heal v2 recovered previous session state and verified library integrity.";
+  showToast(msg, "info", 5200);
+}
+
+function renderSelfHealDiagnosticsUi(diag) {
+  if (!diag) return;
+  const pill = el("settings-self-heal-pill");
+  const detail = el("settings-self-heal-detail");
+  const listEl = el("settings-self-heal-disabled-list");
+  const disabled = Array.isArray(diag.disabledSubsystems) ? diag.disabledSubsystems : [];
+  const recovered = hasSelfHealRecoveryActivity(diag.lastReport);
+
+  if (pill) {
+    if (disabled.length > 0) {
+      pill.className = "pill rose mono-num";
+      pill.textContent = `Self-Heal: ${disabled.length} Guarded`;
+    } else if (recovered || Number(diag.crashStreak || 0) > 0) {
+      pill.className = "pill amber mono-num";
+      pill.textContent = "Self-Heal: Recovered";
+    } else {
+      pill.className = "pill emerald mono-num";
+      pill.textContent = "Self-Heal: Clean";
+    }
+  }
+
+  if (detail) {
+    const restoredCount = Array.isArray(diag.lastReport?.restoredJsonFiles)
+      ? diag.lastReport.restoredJsonFiles.length
+      : 0;
+    const locksCleared = Number(diag.lastReport?.webviewLocksCleared || 0);
+    detail.textContent =
+      `Catalog ${diag.catalogValid ? "valid" : "recovering"} · ` +
+      `Quarantined ${Number(diag.quarantineCount || 0)} · ` +
+      `Restored JSON ${restoredCount} · Stale locks freed ${locksCleared}`;
+  }
+
+  if (listEl) {
+    if (disabled.length > 0) {
+      listEl.innerHTML = disabled
+        .map(
+          (entry) => `
+          <span class="pill rose mono-num" title="${escapeHtml(entry.reason || "Guarded after repeated stalls")}">
+            ${escapeHtml(entry.name || "subsystem")} (${Number(entry.crashStreak || 0)}x)
+          </span>
+          <button type="button" class="btn btn-secondary btn-xs" data-reset-subsystem="${escapeHtml(entry.name || "")}">
+            Re-enable
+          </button>`
+        )
+        .join("");
+      listEl.classList.remove("hidden");
+    } else {
+      listEl.innerHTML = "";
+      listEl.classList.add("hidden");
+    }
+  }
+}
+
+async function refreshV22SubsystemStatuses() {
+  const [diagRes, discordRes, saveRes, chordRes, netRes] = await Promise.allSettled([
+    getSelfHealDiagnostics(),
+    getDiscordPresenceStatus(),
+    getSaveWatcherStatus(),
+    getDesktopChordStatus(),
+    getNetEngineStats()
+  ]);
+
+  if (diagRes.status === "fulfilled" && diagRes.value) {
+    renderSelfHealDiagnosticsUi(diagRes.value);
+  }
+
+  if (chordRes.status === "fulfilled" && chordRes.value) {
+    const chord = chordRes.value;
+    const enabled = Boolean(chord.enabled);
+    if (el("setting-desktop-chord")) el("setting-desktop-chord").checked = enabled;
+    const pill = el("setting-desktop-chord-pill");
+    if (pill) {
+      pill.className = `pill mono-num ${enabled ? "emerald" : ""}`;
+      pill.textContent = chord.chordActive
+        ? "Chord Active"
+        : enabled
+          ? `${Number(chord.actionsDispatched || 0)} Actions`
+          : "Disabled";
+    }
+  }
+
+  if (discordRes.status === "fulfilled" && discordRes.value) {
+    const d = discordRes.value;
+    if (el("setting-discord-rpc")) el("setting-discord-rpc").checked = Boolean(d.enabled);
+    const pill = el("setting-discord-rpc-pill");
+    if (pill) {
+      pill.className = `pill mono-num ${d.connected ? "emerald" : d.enabled ? "amber" : ""}`;
+      pill.textContent = d.connected
+        ? (d.activeGame ? `Live: ${d.activeGame}` : "Connected")
+        : d.enabled
+          ? "Waiting Discord"
+          : "Standby";
+    }
+  }
+
+  if (saveRes.status === "fulfilled" && saveRes.value) {
+    const sw = saveRes.value;
+    const pill = el("setting-save-watcher-pill");
+    if (pill) {
+      const watching = Boolean(sw.activeGameId && Array.isArray(sw.watchedDirs) && sw.watchedDirs.length > 0);
+      pill.className = `pill mono-num ${watching ? "emerald" : ""}`;
+      pill.textContent = watching
+        ? `Watching (${Number(sw.snapshotsTaken || 0)} snaps)`
+        : state.realtimeSaveWatcherEnabled
+          ? `Ready (${Number(sw.snapshotsTaken || 0)} snaps)`
+          : "Paused";
+    }
+  }
+
+  if (netRes.status === "fulfilled" && netRes.value && el("settings-self-heal-detail")) {
+    const n = netRes.value;
+    const prev = el("settings-self-heal-detail").textContent;
+    if (typeof n.totalRequests === "number" && !prev.includes("Net cache")) {
+      el("settings-self-heal-detail").textContent =
+        `${prev} · Net cache hits ${Number(n.cacheHits304 || 0)}/${Number(n.totalRequests || 0)}`;
+    }
+  }
 }
 
 init().catch((err) => {

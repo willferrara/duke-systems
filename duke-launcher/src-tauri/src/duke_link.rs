@@ -1452,17 +1452,20 @@ pub(crate) fn get_duke_link_status() -> DukeLinkStatusSnapshot {
 }
 
 #[tauri::command]
-pub(crate) fn start_coop_host(
+pub(crate) async fn start_coop_host(
     app: AppHandle,
     game_id: Option<String>,
     game_title: Option<String>,
     bind_port: Option<u16>,
 ) -> Result<DukeLinkStatusSnapshot, String> {
-    let title = game_title
-        .filter(|s| !s.trim().is_empty())
-        .or(game_id)
-        .unwrap_or_else(|| "Active Game Session".to_string());
-    start_host_internal(&app, title, None, bind_port.unwrap_or(DUKE_LINK_DEFAULT_PORT))
+    crate::run_blocking_timeout(20, "start_coop_host", move || {
+        let title = game_title
+            .filter(|s| !s.trim().is_empty())
+            .or(game_id)
+            .unwrap_or_else(|| "Active Game Session".to_string());
+        start_host_internal(&app, title, None, bind_port.unwrap_or(DUKE_LINK_DEFAULT_PORT))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1613,89 +1616,92 @@ fn parse_join_endpoint(raw: &str, code_opt: Option<String>) -> Result<(SocketAdd
 }
 
 #[tauri::command]
-pub(crate) fn join_coop_stream(
+pub(crate) async fn join_coop_stream(
     app: AppHandle,
     host_addr: String,
     room_code: Option<String>,
     game_title: Option<String>,
 ) -> Result<DukeLinkStatusSnapshot, String> {
-    let (peer_addr, parsed_code, parsed_title) = parse_join_endpoint(&host_addr, room_code)?;
-    stop_session_internal();
+    crate::run_blocking_timeout(30, "join_coop_stream", move || {
+        let (peer_addr, parsed_code, parsed_title) = parse_join_endpoint(&host_addr, room_code)?;
+        stop_session_internal();
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("Failed creating QUIC client runtime: {e}"))?;
-    let client_cfg = build_ephemeral_quic_client_config()?;
-    let endpoint = {
-        let _guard = runtime.enter();
-        let mut ep = quinn::Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))
-            .map_err(|e| format!("Failed binding Duke Link QUIC client endpoint: {e}"))?;
-        ep.set_default_client_config(client_cfg);
-        ep
-    };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("Failed creating QUIC client runtime: {e}"))?;
+        let client_cfg = build_ephemeral_quic_client_config()?;
+        let endpoint = {
+            let _guard = runtime.enter();
+            let mut ep = quinn::Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))
+                .map_err(|e| format!("Failed binding Duke Link QUIC client endpoint: {e}"))?;
+            ep.set_default_client_config(client_cfg);
+            ep
+        };
 
-    let local_port = endpoint.local_addr().map(|a| a.port()).unwrap_or(0);
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let rtt_us = Arc::new(AtomicU64::new(0));
-    let fps_x10 = Arc::new(AtomicU32::new(0));
-    let bitrate_kbps = Arc::new(AtomicU64::new(0));
-    let p2_packets = Arc::new(AtomicU64::new(0));
-    let frames_count = Arc::new(AtomicU64::new(0));
-    let stale_drops = Arc::new(AtomicU64::new(0));
-    let active_players = Arc::new(AtomicU8::new(2));
-    let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let local_port = endpoint.local_addr().map(|a| a.port()).unwrap_or(0);
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let rtt_us = Arc::new(AtomicU64::new(0));
+        let fps_x10 = Arc::new(AtomicU32::new(0));
+        let bitrate_kbps = Arc::new(AtomicU64::new(0));
+        let p2_packets = Arc::new(AtomicU64::new(0));
+        let frames_count = Arc::new(AtomicU64::new(0));
+        let stale_drops = Arc::new(AtomicU64::new(0));
+        let active_players = Arc::new(AtomicU8::new(2));
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
 
-    let resolved_title = game_title
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(parsed_title);
+        let resolved_title = game_title
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(parsed_title);
 
-    let snap = {
-        let mut rt = link_state()
-            .lock()
-            .map_err(|_| "Duke Link state lock poisoned".to_string())?;
-        rt.stop_flag = Arc::clone(&stop_flag);
-        rt.role = "guest".to_string();
-        rt.game_title = resolved_title;
-        rt.room_code = parsed_code.clone();
-        rt.bind_port = local_port;
-        rt.advertise_addr = peer_addr.to_string();
-        rt.peer_addr = Some(peer_addr.to_string());
-        rt.friend_name = None;
-        rt.codec = "QUIC Handshake...".to_string();
-        rt.transport_protocol = "QUIC/TLS1.3 (0-HoL Datagrams)".to_string();
-        rt.capture_pipeline = detect_capture_pipeline();
-        rt.input_bridge = detect_input_bridge();
-        rt.rtt_us = Arc::clone(&rtt_us);
-        rt.fps_x10 = Arc::clone(&fps_x10);
-        rt.bitrate_kbps = Arc::clone(&bitrate_kbps);
-        rt.p2_packets = Arc::clone(&p2_packets);
-        rt.frames_count = Arc::clone(&frames_count);
-        rt.stale_drops = Arc::clone(&stale_drops);
-        rt.active_players = Arc::clone(&active_players);
-        rt.guest_input_tx = Some(input_tx);
-        snapshot_from_runtime(&rt)
-    };
+        let snap = {
+            let mut rt = link_state()
+                .lock()
+                .map_err(|_| "Duke Link state lock poisoned".to_string())?;
+            rt.stop_flag = Arc::clone(&stop_flag);
+            rt.role = "guest".to_string();
+            rt.game_title = resolved_title;
+            rt.room_code = parsed_code.clone();
+            rt.bind_port = local_port;
+            rt.advertise_addr = peer_addr.to_string();
+            rt.peer_addr = Some(peer_addr.to_string());
+            rt.friend_name = None;
+            rt.codec = "QUIC Handshake...".to_string();
+            rt.transport_protocol = "QUIC/TLS1.3 (0-HoL Datagrams)".to_string();
+            rt.capture_pipeline = detect_capture_pipeline();
+            rt.input_bridge = detect_input_bridge();
+            rt.rtt_us = Arc::clone(&rtt_us);
+            rt.fps_x10 = Arc::clone(&fps_x10);
+            rt.bitrate_kbps = Arc::clone(&bitrate_kbps);
+            rt.p2_packets = Arc::clone(&p2_packets);
+            rt.frames_count = Arc::clone(&frames_count);
+            rt.stale_drops = Arc::clone(&stale_drops);
+            rt.active_players = Arc::clone(&active_players);
+            rt.guest_input_tx = Some(input_tx);
+            snapshot_from_runtime(&rt)
+        };
 
-    spawn_quic_guest_loop(
-        runtime,
-        QuicGuestLoopParams {
-            app: app.clone(),
-            endpoint,
-            peer_addr,
-            room_code: parsed_code,
-            stop_flag,
-            rtt_us,
-            fps_x10,
-            bitrate_kbps,
-            frames_count,
-            stale_drops,
-            input_rx,
-        },
-    );
-    let _ = app.emit("duke-link-state", &snap);
-    Ok(snap)
+        spawn_quic_guest_loop(
+            runtime,
+            QuicGuestLoopParams {
+                app: app.clone(),
+                endpoint,
+                peer_addr,
+                room_code: parsed_code,
+                stop_flag,
+                rtt_us,
+                fps_x10,
+                bitrate_kbps,
+                frames_count,
+                stale_drops,
+                input_rx,
+            },
+        );
+        let _ = app.emit("duke-link-state", &snap);
+        Ok(snap)
+    })
+    .await
 }
 
 #[tauri::command]

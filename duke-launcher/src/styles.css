@@ -5968,6 +5968,85 @@ body[data-gamepad-active="false"] .vkb-key-btn.gamepad-focus:not(:hover) {
   border: 1px solid var(--border-hairline);
 }
 
+/* ==========================================================================
+   V2.2.0 VIRTUAL VIEWPORT GRID RECYCLER & SUBSYSTEM CONTROLS
+   ========================================================================== */
+.library-grid.virtual-grid-host,
+.catalog-grid.virtual-grid-host,
+body.couch-mode .library-grid.virtual-grid-host,
+body.couch-mode .catalog-grid.virtual-grid-host {
+  display: block;
+  position: relative;
+  width: 100%;
+  min-height: 0;
+}
+
+.virtual-grid-window {
+  display: grid;
+  grid-template-columns: repeat(var(--vgrid-cols, 4), minmax(0, 1fr));
+  gap: var(--vgrid-gap, 12px);
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  will-change: transform;
+  align-items: stretch;
+}
+
+.virtual-grid-window .game-card,
+.virtual-grid-window .catalog-card {
+  content-visibility: visible;
+  contain: layout style;
+}
+
+.catalog-card.is-skeleton {
+  pointer-events: none;
+  opacity: 0.72;
+}
+
+.catalog-card.is-skeleton .catalog-card-media {
+  background: linear-gradient(155deg, var(--bg-surface), var(--bg-elevated));
+}
+
+.v22-subpanel {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-control);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-hairline);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.v22-status-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.redist-preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.redist-preview-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-hairline);
+  font-size: 12px;
+}
+
+
 
 
 

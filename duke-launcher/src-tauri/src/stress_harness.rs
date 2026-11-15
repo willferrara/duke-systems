@@ -438,6 +438,284 @@ fn case_controller_disconnect_and_mode_exit_state_hygiene() -> Result<String, St
     Ok("Controller disconnect zero-inputs, disconnected snapshot, and 25x Duke Deck transient state resets verified.".to_string())
 }
 
+fn make_chaos_game(id: &str, title: &str, dir: &Path, exe: &Path) -> crate::GameEntry {
+    crate::GameEntry {
+        id: id.to_string(),
+        title: title.to_string(),
+        exe_path: exe.to_string_lossy().to_string(),
+        install_dir: dir.to_string_lossy().to_string(),
+        source: "Portable".to_string(),
+        is_installed: true,
+        added_at: 1_700_000_000,
+        ..Default::default()
+    }
+}
+
+fn case_self_heal_v2_unclean_recovery(root: &Path) -> Result<String, String> {
+    let data_dir = root.join("self_heal_v2_data");
+    fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+
+    // 1. Seed valid .bak + corrupt protected JSON + orphan .tmp + stale session.lock
+    let settings_path = data_dir.join("settings.json");
+    let settings_bak = crate::self_heal::backup_path_for(&settings_path);
+    fs::write(&settings_bak, br#"{"autoCleanCompleted":true,"couchMode":false}"#)
+        .map_err(|e| e.to_string())?;
+    fs::write(&settings_path, b"{broken-json-truncated").map_err(|e| e.to_string())?;
+    fs::write(data_dir.join("partial_state.tmp"), b"stale").map_err(|e| e.to_string())?;
+    fs::write(
+        data_dir.join("session.lock"),
+        br#"{"pid":999999,"sessionId":42,"startedAt":1700000000,"crashStreak":0,"activeCommand":"stress_cmd"}"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let wv_lock_dir = data_dir.join("EBWebView");
+    fs::create_dir_all(&wv_lock_dir).map_err(|e| e.to_string())?;
+    fs::write(wv_lock_dir.join("SingletonLock"), b"stale").map_err(|e| e.to_string())?;
+
+    let report = crate::self_heal::run_startup_self_heal_in_dir(&data_dir);
+    crate::self_heal::clear_session_lock_in_dir(&data_dir);
+
+    if !report.unclean_previous_exit {
+        return Err("Self-Heal v2 did not flag unclean previous exit from stale session.lock.".to_string());
+    }
+    if report.cleaned_tmp_files == 0 {
+        return Err("Self-Heal v2 did not clean orphan .tmp file.".to_string());
+    }
+    if !report.restored_json_files.iter().any(|f| f == "settings.json") {
+        return Err(format!(
+            "Self-Heal v2 did not restore corrupt settings.json from .bak: {:?}",
+            report.restored_json_files
+        ));
+    }
+    if report.webview_locks_cleared == 0 {
+        return Err("Self-Heal v2 did not clear stale WebView2 lockfile.".to_string());
+    }
+
+    let repaired = fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
+    if !repaired.contains("autoCleanCompleted") {
+        return Err("Restored settings.json content missing expected field.".to_string());
+    }
+
+    Ok(format!(
+        "Unclean exit detected, {} .tmp cleaned, {} JSON restored, {} WebView lock(s) freed.",
+        report.cleaned_tmp_files,
+        report.restored_json_files.len(),
+        report.webview_locks_cleared
+    ))
+}
+
+fn case_archive_native_zip_slip_rejection(root: &Path) -> Result<String, String> {
+    if crate::archive_native::sanitize_archive_relative_path("../../evil_escape.txt").is_ok() {
+        return Err("sanitize_archive_relative_path accepted parent directory traversal.".to_string());
+    }
+
+    let work_dir = root.join("zip_slip_test");
+    let extract_dir = work_dir.join("out");
+    fs::create_dir_all(&work_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&extract_dir).map_err(|e| e.to_string())?;
+
+    let zip_path = work_dir.join("malicious.zip");
+    {
+        let f = fs::File::create(&zip_path).map_err(|e| e.to_string())?;
+        let mut zw = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zw.start_file("../../evil_escape.txt", opts)
+            .map_err(|e| e.to_string())?;
+        std::io::Write::write_all(&mut zw, b"pwned").map_err(|e| e.to_string())?;
+        zw.finish().map_err(|e| e.to_string())?;
+    }
+
+    if crate::archive_native::extract_archive_pure_rust(&zip_path, &extract_dir).is_ok() {
+        return Err("extract_archive_pure_rust unexpectedly allowed Zip-Slip traversal.".to_string());
+    }
+    if work_dir.join("evil_escape.txt").exists() || root.join("evil_escape.txt").exists() {
+        return Err("Zip-Slip payload escaped onto disk!".to_string());
+    }
+
+    Ok("Native ZIP extractor rejected `../../evil_escape.txt` with zero files written outside dest.".to_string())
+}
+
+fn case_lib_store_wal_recovery(root: &Path) -> Result<String, String> {
+    let data_dir = root.join("dklib_wal_test");
+    fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+    let g_dir = root.join("wal_dummy_game");
+    fs::create_dir_all(&g_dir).map_err(|e| e.to_string())?;
+    let exe = g_dir.join("game.exe");
+    fs::write(&exe, b"MZ\x90\x00").map_err(|e| e.to_string())?;
+
+    let g1 = make_chaos_game("wal_1", "WAL Alpha", &g_dir, &exe);
+    crate::lib_store::save_library_dklib_full(&data_dir, &[g1])?;
+
+    let g2 = make_chaos_game("wal_2", "WAL Beta", &g_dir, &exe);
+    crate::lib_store::append_upsert_wal(&data_dir, &g2)?;
+    crate::lib_store::append_playtime_wal(&data_dir, "wal_1", 1200, 1_700_000_500)?;
+    crate::lib_store::append_favorite_wal(&data_dir, "wal_2", true)?;
+    crate::lib_store::append_cover_wal(&data_dir, "wal_2", "custom_cover.png", None, None)?;
+
+    let loaded = crate::lib_store::load_library_dklib(&data_dir)?;
+    if loaded.len() != 2 {
+        return Err(format!("Expected 2 games after WAL replay, got {}", loaded.len()));
+    }
+    let l1 = loaded
+        .iter()
+        .find(|g| g.id == "wal_1")
+        .ok_or_else(|| "Missing wal_1 after WAL replay.".to_string())?;
+    let l2 = loaded
+        .iter()
+        .find(|g| g.id == "wal_2")
+        .ok_or_else(|| "Missing wal_2 after WAL replay.".to_string())?;
+    if l1.total_playtime_secs() < 1200 || !l2.is_favorite || l2.cover_url != "custom_cover.png" {
+        return Err("WAL delta mutations did not replay accurately.".to_string());
+    }
+
+    let _ = crate::lib_store::compact_dklib_if_needed(&data_dir, true)?;
+    let heal = crate::lib_store::verify_and_repair_dklib(&data_dir)?;
+    let post_compact = crate::lib_store::load_library_dklib(&data_dir)?;
+    if post_compact.len() != 2 || heal.recovered_from_backup_or_json {
+        return Err(format!("DKLIB compaction/verification failed integrity check: {}", heal.detail));
+    }
+
+    Ok("DKLIB binary + CRC WAL upsert/playtime/favorite/cover replay + compaction verified.".to_string())
+}
+
+fn case_rom_shrink_and_verify_roundtrip(root: &Path) -> Result<String, String> {
+    let rom_dir = root.join("rom_shrink_test");
+    fs::create_dir_all(&rom_dir).map_err(|e| e.to_string())?;
+    let bin_path = rom_dir.join("SynthDisc.bin");
+    let cue_path = rom_dir.join("SynthDisc.cue");
+
+    // 16 Mode1/2352 CD sectors (37,632 bytes) with compressible sector payload
+    let sectors = vec![0x5Au8; 16 * 2352];
+    fs::write(&bin_path, &sectors).map_err(|e| e.to_string())?;
+    fs::write(
+        &cue_path,
+        "FILE \"SynthDisc.bin\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n",
+    )
+    .map_err(|e| e.to_string())?;
+
+    let rep = crate::rom_shrink::compress_rom_path(&cue_path, false)?;
+    let chd_path = PathBuf::from(&rep.output_path);
+    if !chd_path.is_file() || rep.compressed_bytes == 0 || rep.compressed_bytes >= rep.original_bytes {
+        return Err(format!(
+            "Unexpected CHD shrink result: {} -> {} bytes",
+            rep.original_bytes, rep.compressed_bytes
+        ));
+    }
+
+    let (sha1_hex, crc32_hex, size_bytes) =
+        crate::rom_shrink::verify_chd_or_rvz_integrity(&chd_path)?;
+    if sha1_hex.len() != 40 || crc32_hex.is_empty() || size_bytes != sectors.len() as u64 {
+        return Err(format!(
+            "CHD integrity check mismatch: sha1={sha1_hex}, crc32={crc32_hex}, size={size_bytes}"
+        ));
+    }
+
+    Ok(format!(
+        "Compressed {} B -> {} B CHD v5 and verified (SHA-1 {sha1_hex}, CRC32 {crc32_hex}).",
+        rep.original_bytes, rep.compressed_bytes
+    ))
+}
+
+fn case_discord_ipc_desktop_chord_and_save_watcher(root: &Path) -> Result<String, String> {
+    // 1. Discord binary frame encode/decode roundtrip
+    let payload = crate::discord_ipc::build_set_activity_payload(
+        std::process::id(),
+        "Chaos Verification Quest",
+        "Steam",
+        Some("Hosting 2P"),
+        1_700_000_000,
+        "chaos-nonce",
+    );
+    let wire = crate::discord_ipc::encode_discord_ipc_frame(1, &payload)?;
+    let (op, decoded) = crate::discord_ipc::decode_discord_ipc_frame(&wire)?;
+    if op != 1 || decoded["nonce"] != "chaos-nonce" {
+        return Err("Discord IPC frame decode mismatch.".to_string());
+    }
+
+    // 2. Desktop chord layer Guide+axis mouse emission and deck exit release
+    let mut tracker = crate::desktop_chord::ChordTracker::default();
+    let pad = crate::couch_mode::UniversalPadState {
+        connected: true,
+        guide: true,
+        lx: 0.75,
+        ly: -0.25,
+        a: true,
+        ..Default::default()
+    };
+    let held_actions = crate::desktop_chord::compute_chord_actions(&mut tracker, &pad, true, 100);
+    if !tracker.chord_active || held_actions.is_empty() {
+        return Err("Desktop chord failed to emit actions with Guide held.".to_string());
+    }
+    let _released = crate::desktop_chord::compute_chord_actions(&mut tracker, &pad, false, 120);
+    if tracker.chord_active || tracker.left_down {
+        return Err("Desktop chord held input leaked after deck exit.".to_string());
+    }
+
+    // 3. Save watcher BLAKE3 snapshot + immediate dedup skip
+    let save_dir = root.join("save_watcher_saves");
+    let cas_dir = root.join("save_watcher_cas");
+    fs::create_dir_all(&save_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&cas_dir).map_err(|e| e.to_string())?;
+    fs::write(save_dir.join("slot1.sav"), b"duke-save-payload-v1").map_err(|e| e.to_string())?;
+
+    let first = crate::save_watcher::capture_dedup_save_snapshot(
+        "chaos_save_game",
+        std::slice::from_ref(&save_dir),
+        &cas_dir,
+        Some("auto-save-watcher"),
+    )?;
+    if first.is_none() {
+        return Err("Expected initial save watcher snapshot to capture cleanly.".to_string());
+    }
+    let second = crate::save_watcher::capture_dedup_save_snapshot(
+        "chaos_save_game",
+        std::slice::from_ref(&save_dir),
+        &cas_dir,
+        Some("auto-save-watcher"),
+    )?;
+    if second.is_some() {
+        return Err("Save watcher did not deduplicate identical unchanged save tree.".to_string());
+    }
+
+    Ok("Discord IPC frame roundtrip, desktop chord cursor/release, and BLAKE3 save-watcher dedup verified.".to_string())
+}
+
+fn case_redist_cleaner_cas_reclaim(root: &Path) -> Result<String, String> {
+    let game_dir = root.join("redist_game");
+    let redist_dir = game_dir.join("_CommonRedist").join("vcredist");
+    fs::create_dir_all(&redist_dir).map_err(|e| e.to_string())?;
+    let exe_path = game_dir.join("GameMain.exe");
+    fs::write(&exe_path, vec![0x4Du8; 1024]).map_err(|e| e.to_string())?;
+    fs::write(redist_dir.join("vc_redist.x64.exe"), vec![0x77u8; 4096])
+        .map_err(|e| e.to_string())?;
+    fs::write(game_dir.join("CrashDump.dmp"), vec![0xEEu8; 2048])
+        .map_err(|e| e.to_string())?;
+
+    let mut lib = vec![make_chaos_game("redist_1", "Bloat Game", &game_dir, &exe_path)];
+    let scan = crate::redist_cleaner::scan_redist_bloat_for_library(&lib, Some("redist_1"));
+    if scan.games_with_bloat != 1 || scan.total_reclaimable_bytes < 6144 {
+        return Err(format!(
+            "Redist scan missed expected bloat: games={}, bytes={}",
+            scan.games_with_bloat, scan.total_reclaimable_bytes
+        ));
+    }
+
+    let clean = crate::redist_cleaner::clean_redist_bloat_with_cas(&mut lib, Some("redist_1"))?;
+    if !clean.errors.is_empty() {
+        return Err(format!("Redist clean errors: {:?}", clean.errors));
+    }
+    if clean.bytes_reclaimed < 6144 || clean.snapshot_ids.is_empty() || !exe_path.is_file() || redist_dir.exists() {
+        return Err("Redist clean did not safely reclaim bloat while preserving executable + .duke-cas snapshot.".to_string());
+    }
+
+    Ok(format!(
+        "Scanned & safely reclaimed {} ({} snapshot(s)) while keeping executable intact.",
+        clean.bytes_reclaimed_formatted,
+        clean.snapshot_ids.len()
+    ))
+}
+
 pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
     let Some((launcher_dir, tauri_dir)) = resolve_workspace_launcher_dirs() else {
         return Ok("Source tree not adjacent to binary; skipped static UI parity scan.".to_string());
@@ -450,14 +728,16 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
         .map_err(|e| format!("Failed reading api.js: {e}"))?;
     let main_js = fs::read_to_string(launcher_dir.join("src").join("main.js"))
         .map_err(|e| format!("Failed reading main.js: {e}"))?;
+    let virtual_grid_js = fs::read_to_string(launcher_dir.join("src").join("virtual_grid.js"))
+        .map_err(|e| format!("Failed reading virtual_grid.js: {e}"))?;
     let main_rs = fs::read_to_string(tauri_dir.join("src").join("main.rs"))
         .map_err(|e| format!("Failed reading main.rs: {e}"))?;
     let tauri_conf = fs::read_to_string(tauri_dir.join("tauri.conf.json"))
         .map_err(|e| format!("Failed reading tauri.conf.json: {e}"))?;
 
     // 1. Version & Window Safety Checks
-    if !index_html.contains("2.1.1") || !tauri_conf.contains("\"2.1.1\"") {
-        return Err("Expected v2.1.1 marker missing in index.html or tauri.conf.json.".to_string());
+    if !index_html.contains("2.2.0") || !tauri_conf.contains("\"2.2.0\"") {
+        return Err("Expected v2.2.0 marker missing in index.html or tauri.conf.json.".to_string());
     }
 
     let default_sites = crate::sites::default_search_sites();
@@ -516,6 +796,12 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
             return Err(format!("Missing CSS theme definition [data-theme=\"{theme}\"]"));
         }
     }
+    if !virtual_grid_js.contains("class VirtualCardGrid")
+        || !main_js.contains("VirtualCardGrid")
+        || !styles_css.contains(".virtual-grid-window")
+    {
+        return Err("Missing v2.2.0 VirtualCardGrid or virtual-grid CSS wiring.".to_string());
+    }
 
     // 3. Inline SVG Sprite Integrity
     let mut symbol_ids = HashSet::new();
@@ -529,7 +815,7 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
             break;
         }
     }
-    for source in [&index_html, &main_js] {
+    for source in [&index_html, &main_js, &virtual_grid_js] {
         let mut cursor = source.as_str();
         while let Some(pos) = cursor.find("href=\"#icon-") {
             let after = &cursor[pos + 7..];
@@ -545,7 +831,7 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
         }
     }
 
-    // 4. DOM ID Parity (el("...") in main.js vs id="..." in index.html)
+    // 4. DOM ID Parity (el("...") in main.js + virtual_grid.js vs id="..." in index.html)
     let mut html_ids = HashSet::new();
     let mut id_cursor = index_html.as_str();
     while let Some(pos) = id_cursor.find("id=\"") {
@@ -557,9 +843,12 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
             break;
         }
     }
-    for js_id in extract_quoted_args(&main_js, "el(") {
+    for js_id in extract_quoted_args(&main_js, "el(")
+        .into_iter()
+        .chain(extract_quoted_args(&virtual_grid_js, "el("))
+    {
         if !html_ids.contains(&js_id) {
-            return Err(format!("main.js calls el(\"{js_id}\") but id=\"{js_id}\" is missing from index.html"));
+            return Err(format!("JS calls el(\"{js_id}\") but id=\"{js_id}\" is missing from index.html"));
         }
     }
 
@@ -596,7 +885,7 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
     }
 
     Ok(format!(
-        "Verified 6 views, 10 modals, 10 themes, {} SVG symbols, {} DOM IDs checked, {} IPC commands registered.",
+        "Verified v2.2.0: 6 views, 10 modals, 10 themes, VirtualCardGrid, {} SVG symbols, {} DOM IDs checked, {} IPC commands registered.",
         symbol_ids.len(),
         html_ids.len(),
         invoke_cmds.len()
@@ -656,6 +945,24 @@ pub fn run_chaos_stress_harness_sync(check_ui_contract: bool) -> StressHarnessRe
             "controller_disconnect_and_mode_exit_state_hygiene",
             case_controller_disconnect_and_mode_exit_state_hygiene,
         ),
+        run_case("self_heal_v2_unclean_recovery", || {
+            case_self_heal_v2_unclean_recovery(&temp_root)
+        }),
+        run_case("archive_native_zip_slip_rejection", || {
+            case_archive_native_zip_slip_rejection(&temp_root)
+        }),
+        run_case("lib_store_wal_recovery_and_compaction", || {
+            case_lib_store_wal_recovery(&temp_root)
+        }),
+        run_case("rom_shrink_chd_compress_and_verify", || {
+            case_rom_shrink_and_verify_roundtrip(&temp_root)
+        }),
+        run_case("discord_ipc_desktop_chord_and_save_watcher", || {
+            case_discord_ipc_desktop_chord_and_save_watcher(&temp_root)
+        }),
+        run_case("redist_cleaner_cas_reclaim", || {
+            case_redist_cleaner_cas_reclaim(&temp_root)
+        }),
     ];
 
     if check_ui_contract {
@@ -728,6 +1035,6 @@ mod tests {
             );
         }
         assert_eq!(report.failed_cases, 0);
-        assert_eq!(report.passed_cases, 10);
+        assert_eq!(report.passed_cases, 16);
     }
 }

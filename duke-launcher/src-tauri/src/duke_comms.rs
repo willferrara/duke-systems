@@ -452,33 +452,36 @@ pub fn get_duke_comms_state() -> CommsStatus {
 }
 
 #[tauri::command]
-pub fn toggle_duke_comms_listening(
+pub async fn toggle_duke_comms_listening(
     app: AppHandle,
     enabled: bool,
     target_language: Option<String>,
     voice_macros_enabled: Option<bool>,
     teammate_subtitles_enabled: Option<bool>,
-) -> CommsStatus {
-    let mut guard = runtime_lock().lock().unwrap_or_else(|e| e.into_inner());
-    guard.listening = enabled;
-    if let Some(lang) = target_language {
-        let clean = lang.trim().to_ascii_lowercase();
-        if !clean.is_empty() {
-            guard.target_language = clean;
+) -> Result<CommsStatus, String> {
+    crate::run_blocking_timeout(15, "toggle_duke_comms_listening", move || {
+        let mut guard = runtime_lock().lock().unwrap_or_else(|e| e.into_inner());
+        guard.listening = enabled;
+        if let Some(lang) = target_language {
+            let clean = lang.trim().to_ascii_lowercase();
+            if !clean.is_empty() {
+                guard.target_language = clean;
+            }
         }
-    }
-    if let Some(vm) = voice_macros_enabled {
-        guard.voice_macros_enabled = vm;
-    }
-    if let Some(sub) = teammate_subtitles_enabled {
-        guard.teammate_subtitles_enabled = sub;
-    }
-    if enabled {
-        spawn_comms_audio_tap_worker(app);
-    } else {
-        COMMS_ACTIVE.store(false, Ordering::Release);
-    }
-    build_comms_status_locked(&guard)
+        if let Some(vm) = voice_macros_enabled {
+            guard.voice_macros_enabled = vm;
+        }
+        if let Some(sub) = teammate_subtitles_enabled {
+            guard.teammate_subtitles_enabled = sub;
+        }
+        if enabled {
+            spawn_comms_audio_tap_worker(app);
+        } else {
+            COMMS_ACTIVE.store(false, Ordering::Release);
+        }
+        Ok(build_comms_status_locked(&guard))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -571,7 +574,7 @@ pub async fn process_voice_phrase_command(
 }
 
 #[tauri::command]
-pub fn upsert_voice_macro_rule(
+pub async fn upsert_voice_macro_rule(
     id: Option<String>,
     phrase: String,
     action_kind: String,
@@ -580,32 +583,35 @@ pub fn upsert_voice_macro_rule(
     description: Option<String>,
     enabled: Option<bool>,
 ) -> Result<Vec<VoiceMacroRule>, String> {
-    let clean_phrase = phrase.trim().to_string();
-    if clean_phrase.is_empty() {
-        return Err("Voice phrase cannot be empty.".to_string());
-    }
-    let clean_id = id
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| format!("vm_{}", now_ms()));
-    let mut guard = runtime_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let next = VoiceMacroRule {
-        id: clean_id.clone(),
-        phrase: clean_phrase,
-        action_kind,
-        keys,
-        hold_ms: hold_ms.unwrap_or(40).clamp(20, 500),
-        description: description.unwrap_or_else(|| "Custom voice macro".to_string()),
-        enabled: enabled.unwrap_or(true),
-    };
-    if let Some(existing) = guard.rules.iter_mut().find(|r| r.id == clean_id) {
-        *existing = next;
-    } else {
-        guard.rules.push(next);
-    }
-    let snapshot = guard.rules.clone();
-    drop(guard);
-    save_rules_to_disk(&snapshot)?;
-    Ok(snapshot)
+    crate::run_blocking_timeout(15, "upsert_voice_macro_rule", move || {
+        let clean_phrase = phrase.trim().to_string();
+        if clean_phrase.is_empty() {
+            return Err("Voice phrase cannot be empty.".to_string());
+        }
+        let clean_id = id
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| format!("vm_{}", now_ms()));
+        let mut guard = runtime_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let next = VoiceMacroRule {
+            id: clean_id.clone(),
+            phrase: clean_phrase,
+            action_kind,
+            keys,
+            hold_ms: hold_ms.unwrap_or(40).clamp(20, 500),
+            description: description.unwrap_or_else(|| "Custom voice macro".to_string()),
+            enabled: enabled.unwrap_or(true),
+        };
+        if let Some(existing) = guard.rules.iter_mut().find(|r| r.id == clean_id) {
+            *existing = next;
+        } else {
+            guard.rules.push(next);
+        }
+        let snapshot = guard.rules.clone();
+        drop(guard);
+        save_rules_to_disk(&snapshot)?;
+        Ok(snapshot)
+    })
+    .await
 }
 
 #[cfg(test)]

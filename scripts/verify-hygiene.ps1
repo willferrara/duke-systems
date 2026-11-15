@@ -41,7 +41,7 @@ try {
     if (-not $NodeCmd) {
         Add-CheckResult 'JS Syntax (node --check)' $false 'node executable not found on PATH'
     } else {
-        $JsTargets = @('duke-launcher/src/api.js', 'duke-launcher/src/main.js')
+        $JsTargets = @('duke-launcher/src/api.js', 'duke-launcher/src/virtual_grid.js', 'duke-launcher/src/main.js')
         $JsErrors = @()
         foreach ($Rel in $JsTargets) {
             $Abs = Join-Path $RepoRoot $Rel
@@ -54,13 +54,14 @@ try {
                 $JsErrors += "$Rel failed node --check: $($Out -join ' ')"
             }
         }
-        Add-CheckResult 'JS Syntax (node --check)' ($JsErrors.Count -eq 0) $(if ($JsErrors.Count -eq 0) { 'api.js & main.js valid ES modules' } else { $JsErrors -join '; ' })
+        Add-CheckResult 'JS Syntax (node --check)' ($JsErrors.Count -eq 0) $(if ($JsErrors.Count -eq 0) { 'api.js, virtual_grid.js & main.js valid ES modules' } else { $JsErrors -join '; ' })
     }
 
     # Load frontend and Rust entry files once into memory
     $HtmlPath = Join-Path $RepoRoot 'duke-launcher/src/index.html'
     $MainJsPath = Join-Path $RepoRoot 'duke-launcher/src/main.js'
     $ApiJsPath = Join-Path $RepoRoot 'duke-launcher/src/api.js'
+    $VirtualGridJsPath = Join-Path $RepoRoot 'duke-launcher/src/virtual_grid.js'
     $MainRsPath = Join-Path $RepoRoot 'duke-launcher/src-tauri/src/main.rs'
     $TauriConfPath = Join-Path $RepoRoot 'duke-launcher/src-tauri/tauri.conf.json'
     $CapPath = Join-Path $RepoRoot 'duke-launcher/src-tauri/capabilities/default.json'
@@ -69,8 +70,9 @@ try {
     $HtmlText = [System.IO.File]::ReadAllText($HtmlPath)
     $MainJsText = [System.IO.File]::ReadAllText($MainJsPath)
     $ApiJsText = [System.IO.File]::ReadAllText($ApiJsPath)
+    $VirtualGridJsText = if ([System.IO.File]::Exists($VirtualGridJsPath)) { [System.IO.File]::ReadAllText($VirtualGridJsPath) } else { '' }
     $MainRsText = [System.IO.File]::ReadAllText($MainRsPath)
-    $CombinedJsText = $MainJsText + "`n" + $ApiJsText
+    $CombinedJsText = $MainJsText + "`n" + $VirtualGridJsText + "`n" + $ApiJsText
 
     # ------------------------------------------------------------------
     # 2a. DOM ID Parity (index.html vs main.js/api.js el() / getElementById())

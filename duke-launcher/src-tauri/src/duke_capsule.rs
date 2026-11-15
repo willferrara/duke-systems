@@ -838,15 +838,18 @@ pub async fn export_game_capsule(
 }
 
 #[tauri::command]
-pub fn inspect_game_capsule(archive_path: String) -> Result<DkcapInspectReport, String> {
-    let path = PathBuf::from(archive_path.trim());
-    let (toc, total_len) = read_dkcap_toc(&path)?;
-    Ok(DkcapInspectReport {
-        archive_path: path.to_string_lossy().into_owned(),
-        archive_bytes: total_len,
-        entry_count: toc.entries.len(),
-        manifest: toc.manifest,
+pub async fn inspect_game_capsule(archive_path: String) -> Result<DkcapInspectReport, String> {
+    crate::run_blocking_timeout(30, "inspect_game_capsule", move || {
+        let path = PathBuf::from(archive_path.trim());
+        let (toc, total_len) = read_dkcap_toc(&path)?;
+        Ok(DkcapInspectReport {
+            archive_path: path.to_string_lossy().into_owned(),
+            archive_bytes: total_len,
+            entry_count: toc.entries.len(),
+            manifest: toc.manifest,
+        })
     })
+    .await
 }
 
 #[cfg(test)]

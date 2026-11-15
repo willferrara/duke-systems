@@ -504,40 +504,43 @@ pub async fn set_wasapi_session_volume(
 }
 
 #[tauri::command]
-pub fn save_game_eq_and_denoise(
+pub async fn save_game_eq_and_denoise(
     game_id: Option<String>,
     preset_name: String,
     bands_db: Option<[f32; 5]>,
     mic_denoise_enabled: bool,
     mic_denoise_strength: f32,
 ) -> Result<AcousticsProfile, String> {
-    let key = game_id
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "default".to_string());
-    let resolved_bands = match bands_db {
-        Some(custom) => clamp_eq_bands(custom),
-        None => eq_preset_bands(&preset_name),
-    };
-    // Verify 5-band biquad filter coefficients initialize cleanly with sample rate 48 kHz
-    let mut eq_test = FiveBandEqProcessor::new(48_000.0, resolved_bands);
-    let mut dummy = [0.0f32; 8];
-    eq_test.process_in_place(&mut dummy);
+    crate::run_blocking_timeout(15, "save_game_eq_and_denoise", move || {
+        let key = game_id
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "default".to_string());
+        let resolved_bands = match bands_db {
+            Some(custom) => clamp_eq_bands(custom),
+            None => eq_preset_bands(&preset_name),
+        };
+        // Verify 5-band biquad filter coefficients initialize cleanly with sample rate 48 kHz
+        let mut eq_test = FiveBandEqProcessor::new(48_000.0, resolved_bands);
+        let mut dummy = [0.0f32; 8];
+        eq_test.process_in_place(&mut dummy);
 
-    let profile = AcousticsProfile {
-        game_id: key.clone(),
-        preset_name,
-        bands_db: resolved_bands,
-        mic_denoise_enabled,
-        mic_denoise_strength: mic_denoise_strength.clamp(0.0, 1.0),
-    };
+        let profile = AcousticsProfile {
+            game_id: key.clone(),
+            preset_name,
+            bands_db: resolved_bands,
+            mic_denoise_enabled,
+            mic_denoise_strength: mic_denoise_strength.clamp(0.0, 1.0),
+        };
 
-    let snapshot = {
-        let mut guard = profiles_lock().lock().unwrap_or_else(|e| e.into_inner());
-        guard.insert(key, profile.clone());
-        guard.clone()
-    };
-    save_profiles_to_disk(&snapshot)?;
-    Ok(profile)
+        let snapshot = {
+            let mut guard = profiles_lock().lock().unwrap_or_else(|e| e.into_inner());
+            guard.insert(key, profile.clone());
+            guard.clone()
+        };
+        save_profiles_to_disk(&snapshot)?;
+        Ok(profile)
+    })
+    .await
 }
 
 #[tauri::command]

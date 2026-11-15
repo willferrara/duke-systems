@@ -126,7 +126,19 @@ export async function updateLauncherSettings(patch = {}) {
     shaderSwarmEnabled:
       typeof patch.shaderSwarmEnabled === "boolean" ? patch.shaderSwarmEnabled : null,
     framePacingEnabled:
-      typeof patch.framePacingEnabled === "boolean" ? patch.framePacingEnabled : null
+      typeof patch.framePacingEnabled === "boolean" ? patch.framePacingEnabled : null,
+    diskPressureThresholdGb:
+      typeof patch.diskPressureThresholdGb === "number" ? patch.diskPressureThresholdGb : null,
+    diskPressureDaysThreshold:
+      typeof patch.diskPressureDaysThreshold === "number" ? patch.diskPressureDaysThreshold : null,
+    discordRpcEnabled:
+      typeof patch.discordRpcEnabled === "boolean" ? patch.discordRpcEnabled : null,
+    realtimeSaveWatcherEnabled:
+      typeof patch.realtimeSaveWatcherEnabled === "boolean"
+        ? patch.realtimeSaveWatcherEnabled
+        : null,
+    desktopChordEnabled:
+      typeof patch.desktopChordEnabled === "boolean" ? patch.desktopChordEnabled : null
   });
 }
 
@@ -2130,6 +2142,88 @@ export async function removeWasmPlugin(pluginId) {
 export async function runChaosStressHarness() {
   return invokeCommand("run_chaos_stress_harness");
 }
+
+// =========================================================================
+// v2.2.0 Resilience, Native Archive, Discord IPC, Save Watcher & Shrink APIs
+// =========================================================================
+
+export async function getSelfHealDiagnostics() {
+  return invokeCommand("get_self_heal_diagnostics");
+}
+
+export async function resetSelfHealSubsystem(name) {
+  return invokeCommand("reset_self_heal_subsystem", { name: String(name || "") });
+}
+
+export function listenStartupSelfHealReport(callback) {
+  return listenEvent("startup-self-heal-report", callback);
+}
+
+export async function scanShrinkableRoms() {
+  return invokeCommand("scan_shrinkable_roms");
+}
+
+export async function compressRetroRom(gameId = null, deleteOriginals = false) {
+  return invokeCommand("compress_retro_rom", {
+    gameId: gameId ? String(gameId) : null,
+    deleteOriginals: Boolean(deleteOriginals)
+  });
+}
+
+export async function verifyRomArchive(path) {
+  return invokeCommand("verify_rom_archive", { path: String(path || "") });
+}
+
+export function listenRomShrinkProgress(callback) {
+  return listenEvent("rom-shrink-progress", callback);
+}
+
+export async function scanRedistBloat(gameId = null) {
+  return invokeCommand("scan_redist_bloat", {
+    gameId: gameId ? String(gameId) : null
+  });
+}
+
+export async function cleanRedistBloat(gameId = null) {
+  return invokeCommand("clean_redist_bloat", {
+    gameId: gameId ? String(gameId) : null
+  });
+}
+
+export async function getDiscordPresenceStatus() {
+  return invokeCommand("get_discord_presence_status");
+}
+
+export async function setDiscordPresenceEnabled(enabled) {
+  return invokeCommand("set_discord_presence_enabled", { enabled: Boolean(enabled) });
+}
+
+export async function getSaveWatcherStatus() {
+  return invokeCommand("get_save_watcher_status");
+}
+
+export async function startSaveWatcher(gameId) {
+  return invokeCommand("start_save_watcher", { gameId: String(gameId || "") });
+}
+
+export async function stopSaveWatcher(gameId = null) {
+  return invokeCommand("stop_save_watcher", {
+    gameId: gameId ? String(gameId) : null
+  });
+}
+
+export async function getDesktopChordStatus() {
+  return invokeCommand("get_desktop_chord_status");
+}
+
+export async function setDesktopChordEnabled(enabled) {
+  return invokeCommand("set_desktop_chord_enabled", { enabled: Boolean(enabled) });
+}
+
+export async function getNetEngineStats() {
+  return invokeCommand("get_net_engine_stats_cmd");
+}
+
 
 
 

@@ -1,6 +1,6 @@
 [package]
 name = "duke-launcher"
-version = "2.1.1"
+version = "2.2.0"
 description = "Duke Launcher - Turbo Download Manager, Malware Shield & Game Launcher"
 authors = ["Duke Launcher Contributors"]
 license = "MIT"
@@ -21,6 +21,9 @@ png = "0.18"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+postcard = { version = "1.1", features = ["use-std"] }
+crc32fast = "1.5"
+sha1 = "0.10"
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "fs", "io-util", "net", "process", "sync", "time"] }
 reqwest = { version = "0.12", features = ["json"] }
 walkdir = "2.5"
@@ -32,6 +35,8 @@ memmap2 = "0.9"
 fastcdc = "3.2"
 zstd = "0.13"
 flate2 = "1"
+zip = { version = "4.2", default-features = false, features = ["deflate-flate2", "zstd"] }
+sevenz-rust = { version = "0.6", default-features = false, features = ["zstd"] }
 open = "5"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }

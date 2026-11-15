@@ -1095,42 +1095,45 @@ pub async fn trigger_couch_radial_action(
 }
 
 #[tauri::command]
-pub fn calibrate_controller_axes(
+pub async fn calibrate_controller_axes(
     mode: String,
     deadzone: Option<f32>,
 ) -> Result<ControllerCalibrationStatus, String> {
-    let pad = poll_universal_controller_state();
-    let Ok(mut hub) = hid_hub().lock() else {
-        return Err("Controller calibrator busy".to_string());
-    };
-    if let Some(dz) = deadzone {
-        hub.calibrator.set_deadzone(dz);
-    }
-    match mode.trim().to_ascii_lowercase().as_str() {
-        "auto_center" | "center" | "calibrate" if pad.connected => {
-            hub.calibrator.capture_rest_pose(pad.raw_axes);
+    crate::run_blocking_timeout(15, "calibrate_controller_axes", move || {
+        let pad = poll_universal_controller_state();
+        let Ok(mut hub) = hid_hub().lock() else {
+            return Err("Controller calibrator busy".to_string());
+        };
+        if let Some(dz) = deadzone {
+            hub.calibrator.set_deadzone(dz);
         }
-        "reset" => {
-            hub.calibrator.reset();
+        match mode.trim().to_ascii_lowercase().as_str() {
+            "auto_center" | "center" | "calibrate" if pad.connected => {
+                hub.calibrator.capture_rest_pose(pad.raw_axes);
+            }
+            "reset" => {
+                hub.calibrator.reset();
+            }
+            _ => {}
         }
-        _ => {}
-    }
-    let (raw_axes, calibrated_axes, controller_kind, device_name) = if pad.connected {
-        let is_fpv = pad.controller_kind == "edgetx" || hub.last_kind == "edgetx";
-        let calibrated = hub.calibrator.normalize_axes(pad.raw_axes, is_fpv);
-        (pad.raw_axes, calibrated, pad.controller_kind, pad.device_name)
-    } else {
-        ([0.0; 4], [0.0; 4], "none".to_string(), "None".to_string())
-    };
-    Ok(ControllerCalibrationStatus {
-        deadzone: hub.calibrator.deadzone,
-        center_offsets: hub.calibrator.center_offsets,
-        axis_modes: hub.calibrator.axis_modes,
-        raw_axes,
-        calibrated_axes,
-        controller_kind,
-        device_name,
+        let (raw_axes, calibrated_axes, controller_kind, device_name) = if pad.connected {
+            let is_fpv = pad.controller_kind == "edgetx" || hub.last_kind == "edgetx";
+            let calibrated = hub.calibrator.normalize_axes(pad.raw_axes, is_fpv);
+            (pad.raw_axes, calibrated, pad.controller_kind, pad.device_name)
+        } else {
+            ([0.0; 4], [0.0; 4], "none".to_string(), "None".to_string())
+        };
+        Ok(ControllerCalibrationStatus {
+            deadzone: hub.calibrator.deadzone,
+            center_offsets: hub.calibrator.center_offsets,
+            axis_modes: hub.calibrator.axis_modes,
+            raw_axes,
+            calibrated_axes,
+            controller_kind,
+            device_name,
+        })
     })
+    .await
 }
 
 #[cfg(test)]

@@ -84,7 +84,7 @@
         </button>
         <img src="assets/dukeflaglogo.png" alt="Duke Launcher" class="titlebar-emblem" />
         <span class="titlebar-title">Duke Launcher</span>
-        <span class="titlebar-version mono-num" id="app-version-pill">v2.1.1</span>
+        <span class="titlebar-version mono-num" id="app-version-pill">v2.2.0</span>
       </div>
 
       <div class="titlebar-center">
@@ -684,6 +684,24 @@
                   <div class="detail-micro-caption">Creates a .duke-cas restore point and launches patched hacks as a separate 1-click profile while preserving your clean base ROM.</div>
                   <input type="text" id="input-rom-patch-hash" class="input-control mono-num" placeholder="Optional source CRC32 (8 hex) or SHA-1 verification..." />
                   <p class="panel-sub mono-num hidden" id="detail-rom-patch-status"></p>
+                </div>
+
+                <div class="detail-field-block hidden" id="detail-rom-shrink-block">
+                  <div class="detail-field-head">
+                    <span class="field-label">1-Click Retro Disc Compressor (.bin/.cue &rarr; .chd · GameCube/Wii &rarr; .rvz)</span>
+                    <div class="detail-save-actions">
+                      <button type="button" class="btn btn-primary btn-xs" id="btn-detail-compress-rom" title="Convert .bin/.cue/.iso disc images to lossless compressed .chd or .rvz">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-archive"/></svg>
+                        <span>Compress to .chd / .rvz</span>
+                      </button>
+                      <button type="button" class="btn btn-secondary btn-xs" id="btn-detail-verify-rom" title="Verify compressed .chd or .rvz hunk checksums">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-shield-check"/></svg>
+                        <span>Verify Archive</span>
+                      </button>
+                    </div>
+                  </div>
+                  <div class="detail-micro-caption">Pure-Rust streaming compression cuts disc image sizes up to 55% with bit-exact hunk verification and automatic library link update.</div>
+                  <p class="panel-sub mono-num hidden" id="detail-rom-shrink-status"></p>
                 </div>
 
                 <div class="detail-field-block">
@@ -2757,6 +2775,95 @@
                       </button>
                     </div>
                   </div>
+                </div>
+              </div>
+
+              <!-- v2.2.0 Resilience, Redist Reclaimer, Discord IPC, Save Watcher & Desktop Chords -->
+              <div class="panel-card" id="settings-v22-resilience-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>v2.2 Engine (Automation, Storage Reclaimer &amp; Self-Healing)</h3>
+                    <p class="panel-sub">Discord Rich Presence pipe, debounced real-time save guard, Guide/FPV desktop chords, .duke-cas redistributable cleaner, and startup recovery telemetry.</p>
+                  </div>
+                  <div class="settings-btn-group">
+                    <span class="pill emerald mono-num" id="settings-self-heal-pill">Self-Heal: Clean</span>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-v22-refresh-status">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                      <span>Refresh Status</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="setting-integration-group">
+                  <label class="setting-toggle-row" for="setting-desktop-chord">
+                    <div class="setting-toggle-copy">
+                      <div class="setting-toggle-title">Universal Controller Desktop Chord Layer</div>
+                      <div class="setting-toggle-desc">Hold <code>Guide</code> (or <code>LB+RB</code> on EdgeTX radios) in Deck Mode for analog desktop cursor, triggers click, right-stick scroll, <code>Alt+Tab</code>, and volume.</div>
+                    </div>
+                    <div class="setting-inline-controls">
+                      <span class="pill mono-num" id="setting-desktop-chord-pill">Enabled</span>
+                      <input type="checkbox" id="setting-desktop-chord" class="setting-checkbox" />
+                    </div>
+                  </label>
+
+                  <label class="setting-toggle-row" for="setting-discord-rpc">
+                    <div class="setting-toggle-copy">
+                      <div class="setting-toggle-title">Discord Rich Presence IPC</div>
+                      <div class="setting-toggle-desc">Publishes active PC/console game title and Co-op status over Discord's local named pipe with zero background web helpers.</div>
+                    </div>
+                    <div class="setting-inline-controls">
+                      <span class="pill mono-num" id="setting-discord-rpc-pill">Standby</span>
+                      <input type="checkbox" id="setting-discord-rpc" class="setting-checkbox" />
+                    </div>
+                  </label>
+
+                  <label class="setting-toggle-row" for="setting-realtime-save-watcher">
+                    <div class="setting-toggle-copy">
+                      <div class="setting-toggle-title">Real-Time Save Auto-Snapshot Watcher</div>
+                      <div class="setting-toggle-desc">Watches active game save folders and captures BLAKE3-deduplicated <code>.duke-cas</code> restore points automatically during gameplay.</div>
+                    </div>
+                    <div class="setting-inline-controls">
+                      <span class="pill mono-num" id="setting-save-watcher-pill">Standby</span>
+                      <input type="checkbox" id="setting-realtime-save-watcher" class="setting-checkbox" />
+                    </div>
+                  </label>
+                </div>
+
+                <div class="frontier-store-card" id="settings-redist-card">
+                  <div class="panel-head">
+                    <div>
+                      <h4>1-Click Redistributable &amp; Dead-Bloat Reclaimer</h4>
+                      <p class="panel-sub mono-num" id="settings-redist-status">Scan installed games for duplicate _CommonRedist, DirectX, vcredist, DotNet installers, and crash dumps (safely backed by .duke-cas).</p>
+                    </div>
+                    <div class="settings-btn-group">
+                      <button type="button" class="btn btn-secondary btn-sm" id="btn-redist-scan">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg>
+                        <span>Scan Bloat</span>
+                      </button>
+                      <button type="button" class="btn btn-primary btn-sm" id="btn-redist-clean" disabled>
+                        <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
+                        <span>Reclaim With .duke-cas</span>
+                      </button>
+                    </div>
+                  </div>
+                  <div id="settings-redist-list" class="redist-preview-list hidden"></div>
+                </div>
+
+                <div class="frontier-store-card" id="settings-retro-shrink-card">
+                  <div class="panel-head">
+                    <div>
+                      <h4>Retro ROM Compressor &amp; Boot Recovery</h4>
+                      <p class="panel-sub mono-num" id="settings-retro-shrink-status">Scan multi-track .bin/.cue and GameCube/Wii .iso discs ready for lossless .chd / .rvz compression.</p>
+                    </div>
+                    <div class="settings-btn-group">
+                      <button type="button" class="btn btn-secondary btn-sm" id="btn-settings-retro-shrink-scan">
+                        <svg class="icon" aria-hidden="true"><use href="#icon-archive"/></svg>
+                        <span>Scan Discs</span>
+                      </button>
+                    </div>
+                  </div>
+                  <p class="panel-sub mono-num" id="settings-self-heal-detail">Startup verification clean · 0 quarantined blobs.</p>
+                  <div id="settings-self-heal-disabled-list" class="v22-status-strip hidden"></div>
                 </div>
               </div>
 

@@ -464,46 +464,61 @@ pub fn reset_default_search_sites_at_path(path: &Path) -> Result<Vec<SearchSiteE
 }
 
 #[tauri::command]
-pub fn get_search_sites() -> Result<Vec<SearchSiteEntry>, String> {
-    let path = crate::get_app_data_file_standalone("search_sites.json")?;
-    load_search_sites_from_path(&path)
+pub async fn get_search_sites() -> Result<Vec<SearchSiteEntry>, String> {
+    crate::run_blocking_timeout(15, "get_search_sites", || {
+        let path = crate::get_app_data_file_standalone("search_sites.json")?;
+        load_search_sites_from_path(&path)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn add_search_site(
+pub async fn add_search_site(
     name: String,
     search_url: String,
     tag: Option<String>,
     note: Option<String>,
     home_url: Option<String>,
 ) -> Result<Vec<SearchSiteEntry>, String> {
-    let path = crate::get_app_data_file_standalone("search_sites.json")?;
-    add_search_site_to_path(
-        &path,
-        name,
-        search_url,
-        tag.unwrap_or_else(|| "Custom".to_string()),
-        note.unwrap_or_default(),
-        home_url,
-    )
+    crate::run_blocking_timeout(15, "add_search_site", move || {
+        let path = crate::get_app_data_file_standalone("search_sites.json")?;
+        add_search_site_to_path(
+            &path,
+            name,
+            search_url,
+            tag.unwrap_or_else(|| "Custom".to_string()),
+            note.unwrap_or_default(),
+            home_url,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn remove_search_site(site_id: String) -> Result<Vec<SearchSiteEntry>, String> {
-    let path = crate::get_app_data_file_standalone("search_sites.json")?;
-    remove_search_site_from_path(&path, &site_id)
+pub async fn remove_search_site(site_id: String) -> Result<Vec<SearchSiteEntry>, String> {
+    crate::run_blocking_timeout(15, "remove_search_site", move || {
+        let path = crate::get_app_data_file_standalone("search_sites.json")?;
+        remove_search_site_from_path(&path, &site_id)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn bulk_import_search_sites(raw_input: String) -> Result<BulkImportSitesResult, String> {
-    let path = crate::get_app_data_file_standalone("search_sites.json")?;
-    bulk_import_search_sites_to_path(&path, &raw_input)
+pub async fn bulk_import_search_sites(raw_input: String) -> Result<BulkImportSitesResult, String> {
+    crate::run_blocking_timeout(15, "bulk_import_search_sites", move || {
+        let path = crate::get_app_data_file_standalone("search_sites.json")?;
+        bulk_import_search_sites_to_path(&path, &raw_input)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn reset_default_search_sites() -> Result<Vec<SearchSiteEntry>, String> {
-    let path = crate::get_app_data_file_standalone("search_sites.json")?;
-    reset_default_search_sites_at_path(&path)
+pub async fn reset_default_search_sites() -> Result<Vec<SearchSiteEntry>, String> {
+    crate::run_blocking_timeout(15, "reset_default_search_sites", || {
+        let path = crate::get_app_data_file_standalone("search_sites.json")?;
+        reset_default_search_sites_at_path(&path)
+    })
+    .await
 }
 
 #[cfg(test)]
