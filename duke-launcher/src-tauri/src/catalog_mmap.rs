@@ -1626,6 +1626,18 @@ impl MappedCatalog {
         })
     }
 
+    /// Instant header + section bounds validation for startup (`0` payload pages faulted).
+    pub fn verify_header_fast(&self) -> bool {
+        let hdr_len = core::mem::size_of::<DkCatHeader>();
+        if self.mmap.len() < hdr_len {
+            return false;
+        }
+        self.header.magic == DKCAT_MAGIC
+            && self.header.version == DKCAT_VERSION
+            && self.trigram_table_offset <= self.postings_offset
+            && self.postings_offset <= self.mmap.len()
+    }
+
     /// On-demand full BLAKE3 payload integrity verification (not run on startup open to keep mmap `0 ms`).
     #[allow(dead_code)]
     pub fn verify_blake3(&self) -> bool {

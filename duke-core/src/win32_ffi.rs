@@ -1780,6 +1780,18 @@ mod ext_ffi {
         }
         scan.has_visible && scan.any_iconic && !scan.any_unminimized
     }
+
+    static HID_DLL_AVAIL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+    /// Safely checks whether Windows `hid.dll` (`HidD_GetHidGuid`) can be loaded at runtime.
+    pub fn hid_dll_available() -> bool {
+        *HID_DLL_AVAIL.get_or_init(|| unsafe {
+            let Ok(hmod) = LoadLibraryA(PCSTR::from_raw(c"hid.dll".as_ptr().cast())) else {
+                return false;
+            };
+            GetProcAddress(hmod, PCSTR::from_raw(c"HidD_GetHidGuid".as_ptr().cast())).is_some()
+        })
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1868,6 +1880,9 @@ mod ext_ffi {
     }
     pub fn find_pid_by_exe_name(_exe_name: &str) -> Option<u32> {
         None
+    }
+    pub fn hid_dll_available() -> bool {
+        false
     }
     pub fn create_hard_link(
         new_link: &std::path::Path,
@@ -1979,11 +1994,11 @@ pub fn is_hotkey_pressed(spec: &HotkeySpec) -> bool {
 }
 
 pub use ext_ffi::{
-    create_hard_link, create_process_tree_job, find_pid_by_exe_name, is_process_tree_minimized,
-    is_vk_down, nt_delay_execution_100ns, poll_xinput_state, reg_delete_value,
-    reg_enum_string_values, reg_enum_subkeys, reg_read_dword, reg_read_string, reg_write_dword,
-    reg_write_string, resume_external_pid, resume_process_tree, suspend_external_pid,
-    suspend_process_tree, ProcessTreeJob,
+    create_hard_link, create_process_tree_job, find_pid_by_exe_name, hid_dll_available,
+    is_process_tree_minimized, is_vk_down, nt_delay_execution_100ns, poll_xinput_state,
+    reg_delete_value, reg_enum_string_values, reg_enum_subkeys, reg_read_dword, reg_read_string,
+    reg_write_dword, reg_write_string, resume_external_pid, resume_process_tree,
+    suspend_external_pid, suspend_process_tree, ProcessTreeJob,
 };
 
 /// `0.5 ms` Windows kernel timer resolution target (`5000` × 100 ns units).

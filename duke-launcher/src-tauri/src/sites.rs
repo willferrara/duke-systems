@@ -63,15 +63,6 @@ struct RawBulkSiteInput {
 pub fn default_search_sites() -> Vec<SearchSiteEntry> {
     vec![
         SearchSiteEntry {
-            id: "default_vimm_lair".to_string(),
-            name: "Vimm's Lair".to_string(),
-            search_url: "https://vimm.net/vault/?p=list&q={query}".to_string(),
-            home_url: "https://vimm.net/vault".to_string(),
-            tag: "Preservation".to_string(),
-            note: "Classic console ROM preservation vault (NES through Wii)".to_string(),
-            is_default: true,
-        },
-        SearchSiteEntry {
             id: "default_gog".to_string(),
             name: "GOG.com".to_string(),
             search_url: "https://www.gog.com/en/games?query={query}".to_string(),
@@ -90,22 +81,31 @@ pub fn default_search_sites() -> Vec<SearchSiteEntry> {
             is_default: true,
         },
         SearchSiteEntry {
+            id: "default_epic_store".to_string(),
+            name: "Epic Games Store".to_string(),
+            search_url: "https://store.epicgames.com/en-US/browse?q={query}".to_string(),
+            home_url: "https://store.epicgames.com/".to_string(),
+            tag: "Storefront".to_string(),
+            note: "Official PC storefront & weekly free claims".to_string(),
+            is_default: true,
+        },
+        SearchSiteEntry {
+            id: "default_steam_store".to_string(),
+            name: "Steam Store".to_string(),
+            search_url: "https://store.steampowered.com/search/?term={query}".to_string(),
+            home_url: "https://store.steampowered.com/".to_string(),
+            tag: "Storefront".to_string(),
+            note: "Official Valve PC catalog, demos & community hubs".to_string(),
+            is_default: true,
+        },
+        SearchSiteEntry {
             id: "default_archive_org".to_string(),
-            name: "Internet Archive".to_string(),
+            name: "Internet Archive (MS-DOS / Freeware)".to_string(),
             search_url: "https://archive.org/details/softwarelibrary_msdos_games?query={query}"
                 .to_string(),
             home_url: "https://archive.org/details/softwarelibrary_msdos_games".to_string(),
             tag: "Preservation".to_string(),
-            note: "Preserved classic PC & console software archives".to_string(),
-            is_default: true,
-        },
-        SearchSiteEntry {
-            id: "default_myabandonware".to_string(),
-            name: "My Abandonware".to_string(),
-            search_url: "https://www.myabandonware.com/search/q/{query}".to_string(),
-            home_url: "https://www.myabandonware.com/".to_string(),
-            tag: "Preservation".to_string(),
-            note: "Retro & out-of-print PC game database".to_string(),
+            note: "Preserved classic MS-DOS & freeware software archives".to_string(),
             is_default: true,
         },
         SearchSiteEntry {
@@ -132,7 +132,7 @@ pub fn default_search_sites() -> Vec<SearchSiteEntry> {
             search_url: "https://db.libretro.com/?q={query}".to_string(),
             home_url: "https://db.libretro.com/".to_string(),
             tag: "Database".to_string(),
-            note: "Canonical No-Intro & Redump console game metadata index".to_string(),
+            note: "Metadata & checksum index only (No-Intro & Redump)".to_string(),
             is_default: true,
         },
     ]
@@ -243,8 +243,15 @@ fn read_sites_from_path(path: &Path) -> Result<Vec<SearchSiteEntry>, String> {
         return Ok(defaults);
     }
 
-    // Seamlessly merge any newly added default directories without duplicating user entries.
-    let mut changed = false;
+    // Remove retired non-compliant defaults and merge any newly added official directories.
+    let before_len = existing.len();
+    existing.retain(|item| {
+        !(item.is_default
+            && (item.id.eq_ignore_ascii_case("default_vimm_lair")
+                || item.id.eq_ignore_ascii_case("default_myabandonware")
+                || item.home_url.to_ascii_lowercase().contains("vimm.net")))
+    });
+    let mut changed = existing.len() != before_len;
     for def in default_search_sites() {
         let def_home = normalized_site_match_key(&def.home_url);
         let def_search = normalized_site_match_key(&def.search_url);
@@ -517,20 +524,22 @@ mod tests {
     fn default_sites_match_exact_eight_directories() {
         let defaults = default_search_sites();
         assert_eq!(defaults.len(), 8);
-        assert_eq!(defaults[0].name, "Vimm's Lair");
-        assert_eq!(defaults[0].home_url, "https://vimm.net/vault");
-        assert_eq!(defaults[1].name, "GOG.com");
-        assert_eq!(defaults[1].tag, "DRM-Free");
+        assert_eq!(defaults[0].name, "GOG.com");
+        assert_eq!(defaults[0].tag, "DRM-Free");
         assert_eq!(
-            defaults[1].search_url,
+            defaults[0].search_url,
             "https://www.gog.com/en/games?query={query}"
         );
-        assert_eq!(defaults[2].name, "Itch.io");
-        assert_eq!(defaults[3].name, "Internet Archive");
-        assert_eq!(defaults[4].name, "My Abandonware");
+        assert_eq!(defaults[1].name, "Itch.io");
+        assert_eq!(defaults[2].name, "Epic Games Store");
+        assert_eq!(defaults[3].name, "Steam Store");
+        assert_eq!(defaults[4].name, "Internet Archive (MS-DOS / Freeware)");
         assert_eq!(defaults[5].name, "PCGamingWiki");
         assert_eq!(defaults[6].name, "SteamDB");
         assert_eq!(defaults[7].name, "Libretro Database");
+        assert!(!defaults
+            .iter()
+            .any(|s| s.home_url.to_ascii_lowercase().contains("vimm")));
     }
 
     #[test]
@@ -602,7 +611,8 @@ invalid line without separator
         write_sites_to_path(&path, &subset).unwrap();
         let merged = load_search_sites_from_path(&path).unwrap();
         assert_eq!(merged.len(), 8);
-        assert!(merged.iter().any(|s| s.home_url == "https://vimm.net/vault"));
+        assert!(merged.iter().any(|s| s.home_url == "https://store.steampowered.com/"));
+        assert!(!merged.iter().any(|s| s.home_url.contains("vimm.net")));
 
         let _ = fs::remove_file(&path);
     }

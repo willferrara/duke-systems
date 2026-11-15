@@ -345,7 +345,15 @@ export async function importExistingLibraries() {
 }
 
 export async function searchSteamGridDbArtwork(queryOrAppId) {
-  return invokeCommand("search_steamgriddb_artwork", { queryOrAppId: String(queryOrAppId || "") });
+  return invokeCommand("search_steamgriddb_artwork", { queryOrAppid: String(queryOrAppId || "") });
+}
+
+export async function searchWebCoversForGame(query, platformHint = null, steamAppId = null) {
+  return invokeCommand("search_web_covers_for_game", {
+    query: String(query || ""),
+    platformHint: platformHint || null,
+    steamAppId: steamAppId ? Number(steamAppId) : null
+  });
 }
 
 export async function applyCustomArtwork({ gameId, coverUrl = null, heroUrl = null, iconUrl = null }) {
@@ -599,6 +607,19 @@ export async function pickExecutableOrShortcutFile() {
       filters: [
         { name: "Game Executable or Shortcut", extensions: ["exe", "lnk", "bat", "cmd"] }
       ]
+    });
+    return typeof selected === "string" ? selected : null;
+  }
+  return null;
+}
+
+export async function pickCustomCoverImage() {
+  if (window.__TAURI__?.dialog?.open) {
+    const selected = await window.__TAURI__.dialog.open({
+      multiple: false,
+      directory: false,
+      title: "Pick Custom Cover Artwork",
+      filters: [{ name: "Cover Image (PNG, JPG, WebP)", extensions: ["png", "jpg", "jpeg", "webp"] }]
     });
     return typeof selected === "string" ? selected : null;
   }
@@ -1657,9 +1678,21 @@ export async function setCouchModeState(enabled, controllerKind = null, radialOp
 }
 
 export async function triggerCouchRadialAction(slotId, action = null) {
+  const hasExplicitAction = typeof action === "string" && action.trim().length > 0;
+  const resolvedAction = hasExplicitAction
+    ? action.trim()
+    : (typeof slotId === "string" ? slotId.trim() : "");
+  const numericSlot = Number.isFinite(Number(slotId)) ? Number(slotId) : null;
   return invokeCommand("trigger_couch_radial_action", {
-    slotId: Number(slotId),
-    action: action ? String(action) : null
+    actionId: resolvedAction,
+    slot: numericSlot
+  });
+}
+
+export async function calibrateControllerAxes(mode = "auto_center", deadzone = null) {
+  return invokeCommand("calibrate_controller_axes", {
+    mode: String(mode || "auto_center"),
+    deadzone: typeof deadzone === "number" && Number.isFinite(deadzone) ? deadzone : null
   });
 }
 
@@ -1720,11 +1753,11 @@ export async function inspectGameCapsule(archivePath) {
 }
 
 export function listenCouchStateChanged(callback) {
-  return listenEvent("couch-state-changed", callback);
+  return listenEvent("couch-mode-toggled", callback);
 }
 
 export function listenCouchRadialToggled(callback) {
-  return listenEvent("couch-radial-toggled", callback);
+  return listenEvent("couch-radial-updated", callback);
 }
 
 export function listenCouchRadialAction(callback) {

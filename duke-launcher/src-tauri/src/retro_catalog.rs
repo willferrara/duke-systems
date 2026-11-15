@@ -1011,6 +1011,7 @@ pub async fn cache_retro_cover_and_icon(
     let req = crate::artwork::CoverResolveRequest {
         cache_id: game_id.to_string(),
         title: title.to_string(),
+        exe_path: None,
         platform_id: (platform_id > 0).then_some(platform_id),
         platform_hint: Some(spec.short_name.to_string()),
         steam_app_id: None,

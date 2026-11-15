@@ -32,6 +32,7 @@ mod mod_graph;
 mod ntfs_compress;
 mod pe_inspect;
 mod platforms;
+mod playtime_sync;
 mod projfs_stream;
 mod quick_resume;
 mod retro_achievements;
@@ -1632,6 +1633,7 @@ async fn install_detected_rom_to_library(
             &artwork::CoverResolveRequest {
                 cache_id: entry.id.clone(),
                 title: entry.title.clone(),
+                exe_path: (!entry.exe_path.trim().is_empty()).then(|| entry.exe_path.clone()),
                 platform_id: (entry.platform_id > 0).then_some(entry.platform_id),
                 platform_hint: plat_hint,
                 steam_app_id: None,
@@ -1761,7 +1763,7 @@ async fn auto_install_downloaded_file(
         return Ok(added);
     }
 
-    // Fallback for extracted console ROMs inside .zip / .7z / .tar.zst archives (e.g. Vimm's Lair)
+    // Fallback for extracted legal homebrew / preservation console files inside archives.
     let dir_scan = extract_dir.clone();
     let roms = tokio::task::spawn_blocking(move || rom_inspect::scan_folder_for_roms(&dir_scan, 4))
         .await
@@ -3018,7 +3020,8 @@ async fn smart_find_game_cover(
             .unwrap_or_default();
         let req = artwork::CoverResolveRequest {
             cache_id: cache_id.to_string(),
-            title: lookup_title,
+            title: artwork::clean_cover_query(&lookup_title),
+            exe_path: (!exe_path.trim().is_empty()).then(|| exe_path.to_string()),
             platform_id: inferred_pid,
             platform_hint: plat_hint,
             steam_app_id: detected_app_id.and_then(|v| u32::try_from(v).ok()),
@@ -6810,6 +6813,7 @@ async fn auto_fix_all_covers(app: AppHandle) -> Result<Vec<GameEntry>, String> {
             let req = artwork::CoverResolveRequest {
                 cache_id: entry_c.id.clone(),
                 title: entry_c.title.clone(),
+                exe_path: (!entry_c.exe_path.trim().is_empty()).then(|| entry_c.exe_path.clone()),
                 platform_id: eff_pid,
                 platform_hint: plat_hint,
                 steam_app_id: steam_aid,
@@ -6888,8 +6892,10 @@ async fn find_and_apply_cover(
 
         if !cover.is_empty() {
             entry.cover_url = cover;
-            entry.steam_app_id = app_id;
-            entry.app_id = app_id.and_then(|sid| u32::try_from(sid).ok());
+            if let Some(sid) = app_id {
+                entry.steam_app_id = Some(sid);
+                entry.app_id = u32::try_from(sid).ok();
+            }
             if let Some(official) = matched_name {
                 entry.title = official;
             }
@@ -9080,6 +9086,7 @@ async fn launch_game_internal(
         })
         .await;
 
+        playtime_sync::spawn_background_playtime_sync(app_after.clone());
         focus_main_window(&app_after);
         trim_process_working_set();
         let _ = app_after.emit(
@@ -9301,8 +9308,8 @@ async fn get_active_game_sessions() -> Vec<ActiveGameSession> {
 }
 
 #[tauri::command]
-fn poll_gamepad_state() -> duke_core::win32_ffi::XInputPadState {
-    duke_core::win32_ffi::poll_xinput_state()
+fn poll_gamepad_state() -> couch_mode::UniversalPadState {
+    couch_mode::poll_universal_controller_state()
 }
 
 pub(crate) async fn launch_game_detached_headless(
@@ -11201,47 +11208,62 @@ async fn fetch_catalog_games(
             games: Vec::new(),
             total_cached: total_indexed,
             fetched_at,
-            from_cache: cache_is_fresh,
+            from_cache: total_indexed > 0,
             stale_warning: None,
             live_search_matched: 0,
         });
     }
 
-    // Cache is within 24h TTL with an initial batch already mapped, only missing pages remain.
-    if cache_is_fresh && !force && !missing_pages.is_empty() {
-        if CATALOG_SYNC_ACTIVE
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
+    // Instant view-switch guarantee (<100 ms): when !force_refresh, ALWAYS return immediately
+    // (0 ms for mapped entries, or empty + live progress event on cold boot) and sync in background.
+    if !force {
+        if (total_indexed == 0 || !cache_is_fresh || !all_pages_present)
+            && CATALOG_SYNC_ACTIVE
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
         {
+            let bg_pages: Vec<u32> = if cache_is_fresh && total_indexed > 0 {
+                missing_pages
+            } else {
+                fetched_pages.clear();
+                (0..CATALOG_HARVEST_PAGES).collect()
+            };
+            let bg_fetched_at = if cache_is_fresh { fetched_at } else { now };
             let app_load = app.clone();
-            let existing = tokio::task::spawn_blocking(move || load_catalog_cache_from_disk(&app_load))
-                .await
-                .unwrap_or_default();
-            let mut entries_by_id = HashMap::with_capacity(existing.entries.len().max(CATALOG_TARGET_COUNT));
-            for mut item in existing.entries {
-                finalize_catalog_entry(&mut item, now);
-                if item.app_id > 0 && !item.name.is_empty() {
-                    entries_by_id.insert(item.app_id, item);
+            let app_emit = app.clone();
+            emit_catalog_sync_progress(&app, total_indexed, false);
+            tokio::spawn(async move {
+                let existing = tokio::task::spawn_blocking(move || load_catalog_cache_from_disk(&app_load))
+                    .await
+                    .unwrap_or_default();
+                let mut entries_by_id =
+                    HashMap::with_capacity(existing.entries.len().max(CATALOG_TARGET_COUNT));
+                for mut item in existing.entries {
+                    finalize_catalog_entry(&mut item, now);
+                    if item.app_id > 0 && !item.name.is_empty() {
+                        entries_by_id.insert(item.app_id, item);
+                    }
                 }
-            }
-            let semaphore = Arc::new(Semaphore::new(CATALOG_SEMAPHORE_CONCURRENCY));
-            emit_catalog_sync_progress(&app, entries_by_id.len(), false);
-            tokio::spawn(run_catalog_background_harvest(BackgroundHarvestJob {
-                app: app.clone(),
-                semaphore,
-                entries_by_id,
-                fetched_pages,
-                missing_pages,
-                include_genres: true,
-                fetched_at,
-                now,
-            }));
+                let semaphore = Arc::new(Semaphore::new(CATALOG_SEMAPHORE_CONCURRENCY));
+                emit_catalog_sync_progress(&app_emit, entries_by_id.len(), false);
+                run_catalog_background_harvest(BackgroundHarvestJob {
+                    app: app_emit,
+                    semaphore,
+                    entries_by_id,
+                    fetched_pages,
+                    missing_pages: bg_pages,
+                    include_genres: true,
+                    fetched_at: bg_fetched_at,
+                    now,
+                })
+                .await;
+            });
         }
         return Ok(CatalogResponse {
             games: Vec::new(),
             total_cached: total_indexed,
             fetched_at,
-            from_cache: true,
+            from_cache: total_indexed > 0,
             stale_warning: None,
             live_search_matched: 0,
         });
@@ -13932,7 +13954,7 @@ fn spawn_overlay_trigger_watcher(app: AppHandle) {
                     }
                 }
 
-                let pad = duke_core::win32_ffi::poll_xinput_state();
+                let pad = couch_mode::poll_universal_controller_state();
                 let vision_chord_down = pad.connected && pad.guide && pad.y;
                 let radial_chord_down = pad.connected && pad.guide && pad.lb;
                 if vision_chord_down && !vision_chord_was_down {
@@ -13960,9 +13982,10 @@ fn spawn_overlay_trigger_watcher(app: AppHandle) {
                         .await;
                     });
                 } else if should_toggle_radial {
-                    couch_mode::handle_controller_guide_event(&app, "toggle_radial", "xbox", None);
+                    couch_mode::handle_controller_guide_event(&app, "toggle_radial", &pad.controller_kind, None);
                 } else if should_toggle_guide {
                     let app_guide = app.clone();
+                    let guide_kind = pad.controller_kind.clone();
                     tauri::async_runtime::spawn(async move {
                         let main_visible = app_guide
                             .get_webview_window("main")
@@ -13971,8 +13994,8 @@ fn spawn_overlay_trigger_watcher(app: AppHandle) {
                         if main_visible {
                             couch_mode::handle_controller_guide_event(
                                 &app_guide,
-                                "toggle_couch",
-                                "xbox",
+                                "toggle_couch_mode",
+                                &guide_kind,
                                 None,
                             );
                         } else {
@@ -14499,6 +14522,9 @@ fn main() {
             // Non-blocking background sync of Nintendo & retro Libretro RDB catalog into `catalog.dkcat` if empty
             retro_catalog::spawn_background_retro_catalog_sync_if_needed(app.handle().clone());
 
+            // Non-blocking background multi-launcher playtime sync (Steam, Xbox, Epic, GOG, Ubisoft, EA, RetroArch)
+            playtime_sync::spawn_background_playtime_sync(app.handle().clone());
+
             // Initialize cache-line-aligned lock-free Win32 shared memory event bus (`Local\duke-suite-shm-v1`).
             let _ = DUKE_SHM_BUS.get_or_init(|| {
                 let bus = DukeShmBus::open_or_create().ok();
@@ -14508,8 +14534,11 @@ fn main() {
                 Mutex::new(bus)
             });
 
-            // Map `catalog.dkcat` via zero-copy mmap on startup (`0 ms` parse, `0 KB` heap).
-            let _ = catalog_mmap::ensure_catalog_mapped_standalone();
+            // Map `catalog.dkcat` via zero-copy mmap asynchronously so setup never blocks first paint.
+            tauri::async_runtime::spawn(async move {
+                let _ = tokio::task::spawn_blocking(catalog_mmap::ensure_catalog_mapped_standalone)
+                    .await;
+            });
 
             let mut initial_settings = load_settings_from_disk(app.handle());
             if couch_mode::is_cli_couch_booted() || fse_shell::is_cli_fse_booted() {
@@ -14729,6 +14758,7 @@ fn main() {
             importers::import_existing_libraries,
             artwork::search_steamgriddb_artwork,
             artwork::apply_custom_artwork,
+            artwork::search_web_covers_for_game,
             artwork::create_desktop_shortcut_with_icon,
             artwork::resolve_catalog_cover,
             suspend_or_resume_game,
@@ -14768,6 +14798,7 @@ fn main() {
             friends::get_unified_friends,
             friends::join_friend_session,
             importers::sync_storefront_playtime,
+            playtime_sync::sync_all_external_playtimes,
             achievements::get_game_achievements,
             achievements::set_game_achievements_path,
             ntfs_compress::get_game_storage_stats,
@@ -14888,6 +14919,7 @@ fn main() {
             couch_mode::get_couch_mode_status,
             couch_mode::set_couch_mode_state,
             couch_mode::trigger_couch_radial_action,
+            couch_mode::calibrate_controller_axes,
             dkpack::export_game_dkpack,
             dkpack::inspect_dkpack_file,
             dkpack::apply_dkpack_recipe,

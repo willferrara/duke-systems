@@ -89,35 +89,159 @@ impl Default for AxisRateConfig {
     }
 }
 
-pub fn classify_hid_device(vid: u16, pid: u16, up: u16, usage: u16, product: &str) -> DeviceKind {
+/// Normalized axis calibration mode for HID joysticks / FPV radios.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AxisCenterMode {
+    /// Center-sprung stick / gimbal (`0.0` at midpoint).
+    Centered,
+    /// Unsprung throttle axis where resting low reads near `-1.0` (`[0.0 .. 1.0]` UI lift).
+    ThrottleLow,
+}
+
+/// Runtime auto-calibrator tracking per-axis min/max bounds, rest centers, deadzones,
+/// and throttle-low vs. centered-gimbal classification for standard and EdgeTX radios.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerAutoCalibrator {
+    pub deadzone: f32,
+    pub center_offsets: [f32; 4],
+    pub axis_modes: [AxisCenterMode; 4],
+    observed_samples: u32,
+    min_seen: [f32; 4],
+    max_seen: [f32; 4],
+}
+
+impl Default for ControllerAutoCalibrator {
+    fn default() -> Self {
+        Self {
+            deadzone: 0.14,
+            center_offsets: [0.0; 4],
+            axis_modes: [AxisCenterMode::Centered; 4],
+            observed_samples: 0,
+            min_seen: [0.0; 4],
+            max_seen: [0.0; 4],
+        }
+    }
+}
+
+impl ControllerAutoCalibrator {
+    /// Resets learned center offsets and min/max envelopes back to defaults.
+    pub fn reset(&mut self) {
+        let dz = self.deadzone;
+        *self = Self::default();
+        self.deadzone = dz;
+    }
+
+    /// Sets the radial deadzone clamped to a safe ergonomic range (`0.02..=0.45`).
+    pub fn set_deadzone(&mut self, deadzone: f32) {
+        if deadzone.is_finite() {
+            self.deadzone = deadzone.clamp(0.02, 0.45);
+        }
+    }
+
+    /// Captures the current physical stick resting positions as calibration centers and
+    /// classifies axes sitting below `-0.68` (typical FPV Mode 2 left throttle) as `ThrottleLow`.
+    pub fn capture_rest_pose(&mut self, raw_axes: [f32; 4]) {
+        for (i, &val) in raw_axes.iter().enumerate() {
+            if !val.is_finite() {
+                continue;
+            }
+            if val <= -0.68 {
+                self.axis_modes[i] = AxisCenterMode::ThrottleLow;
+                self.center_offsets[i] = val.clamp(-1.0, -0.65);
+            } else {
+                self.axis_modes[i] = AxisCenterMode::Centered;
+                // Only trim resting offset when near physical center so held deflections don't lock in.
+                self.center_offsets[i] = if val.abs() <= 0.38 { val } else { 0.0 };
+            }
+        }
+        self.observed_samples = self.observed_samples.saturating_add(1);
+    }
+
+    /// Filters a raw normalized axis slice `[-1.0 .. 1.0]` using captured rest centers,
+    /// throttle-low auto-detection, and scaled deadzones.
+    pub fn normalize_axes(&mut self, raw_axes: [f32; 4], is_fpv_radio: bool) -> [f32; 4] {
+        // Auto-capture initial resting frame for radios/gamepads once valid values arrive.
+        if self.observed_samples == 0 && raw_axes.iter().any(|v| v.is_finite() && v.abs() > 0.001) {
+            self.capture_rest_pose(raw_axes);
+        }
+
+        let mut out = [0.0f32; 4];
+        let dz = self.deadzone.clamp(0.02, 0.45);
+        for i in 0..4 {
+            let v = if raw_axes[i].is_finite() {
+                raw_axes[i].clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
+            self.min_seen[i] = self.min_seen[i].min(v);
+            self.max_seen[i] = self.max_seen[i].max(v);
+
+            let mode = self.axis_modes[i];
+            if is_fpv_radio && mode == AxisCenterMode::ThrottleLow {
+                // On an unsprung throttle gimbal resting at bottom (`~ -1.0`), only emit
+                // vertical menu deflection once pushed clearly above mid-stick (`> 0.25`) or
+                // keep centered navigation on the right gimbal unless the user raises throttle.
+                let centered = (v - (-1.0)) * 0.5; // [0.0 .. 1.0]
+                if centered <= dz {
+                    out[i] = 0.0;
+                } else {
+                    // Map `(0.5 .. 1.0]` / `[0.0 .. 0.5)` relative to physical midpoint when moved off rest.
+                    let shifted = v - self.center_offsets[i];
+                    out[i] = if shifted.abs() < dz { 0.0 } else { v };
+                }
+            } else {
+                let shifted = (v - self.center_offsets[i]).clamp(-1.0, 1.0);
+                if shifted.abs() <= dz {
+                    out[i] = 0.0;
+                } else {
+                    let sign = shifted.signum();
+                    out[i] = (sign * ((shifted.abs() - dz) / (1.0 - dz))).clamp(-1.0, 1.0);
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Returns `true` when `vid`/`pid` matches RadioMaster Pocket or OpenTX/EdgeTX USB HID.
+#[inline]
+pub fn is_radiomaster_or_edgetx(vid: u16, pid: u16, product: &str) -> bool {
     let lower = product.to_ascii_lowercase();
+    (vid == 0x1209 && pid == 0x4F54)
+        || vid == 0x1209
+        || vid == 0x0483
+        || vid == 0x2DAE
+        || vid == 0x2757
+        || lower.contains("edgetx")
+        || lower.contains("opentx")
+        || lower.contains("radiomaster")
+        || lower.contains("expresslrs")
+        || lower.contains("betafpv")
+        || lower.contains("jumper")
+        || lower.contains("tbs")
+        || lower.contains("tx16")
+        || lower.contains("pocket")
+        || lower.contains("boxer")
+}
+
+pub fn classify_hid_device(vid: u16, pid: u16, up: u16, usage: u16, product: &str) -> DeviceKind {
     if vid == 0x045E && (up == 0x01 && (usage == 0x04 || usage == 0x05)) {
         return DeviceKind::Xbox;
     }
-    if vid == 0x054C && matches!(pid, 0x05C4 | 0x09CC | 0x0BA0 | 0x0CE6 | 0x0DF2) {
+    if vid == 0x054C && matches!(pid, 0x05C4 | 0x09CC | 0x0BA0 | 0x0CE6 | 0x0DF2 | 0x0E5F) {
         return DeviceKind::PlayStation;
     }
-    if vid == 0x057E && pid == 0x2009 {
+    if (vid == 0x057E && matches!(pid, 0x2006 | 0x2007 | 0x2009 | 0x200E))
+        || vid == 0x2DC8
+    {
         return DeviceKind::SwitchPro;
     }
     if vid == 0x046D {
         return DeviceKind::LogitechMouse;
     }
-    if (up == 0x01 && (usage == 0x04 || usage == 0x05))
-        && (vid == 0x1209
-            || vid == 0x0483
-            || vid == 0x2DAE
-            || vid == 0x2757
-            || lower.contains("edgetx")
-            || lower.contains("opentx")
-            || lower.contains("radiomaster")
-            || lower.contains("expresslrs")
-            || lower.contains("betafpv")
-            || lower.contains("jumper")
-            || lower.contains("tbs")
-            || lower.contains("tx16")
-            || lower.contains("pocket")
-            || lower.contains("boxer"))
+    if (up == 0x01 && (usage == 0x04 || usage == 0x05)) && is_radiomaster_or_edgetx(vid, pid, product)
     {
         return DeviceKind::FpvTransmitter;
     }

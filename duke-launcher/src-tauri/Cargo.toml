@@ -1,6 +1,6 @@
 [package]
 name = "duke-launcher"
-version = "2.0.0"
+version = "2.1.0"
 description = "Duke Launcher - Turbo Download Manager, Malware Shield & Game Launcher"
 authors = ["Duke Launcher Contributors"]
 license = "MIT"
@@ -12,7 +12,7 @@ rust-version = "1.92.0"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-duke-core = { version = "0.1.0", path = "../../duke-core", features = ["win32-trim", "eco-qos", "net-doh", "pipe-ipc", "tray-daemon", "shm-bus", "nvme-prefetch", "platform-backend"] }
+duke-core = { version = "0.1.0", path = "../../duke-core", features = ["win32-trim", "eco-qos", "net-doh", "pipe-ipc", "tray-daemon", "hid-raw", "shm-bus", "nvme-prefetch", "platform-backend"] }
 tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"

@@ -39,6 +39,15 @@ pub struct SteamGridDbSearchResult {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WebCoverCandidate {
+    pub url: String,
+    pub thumb: String,
+    pub source: String,
+    pub label: String,
+}
+
 async fn sgdb_get_json(url: &str, api_key: &str) -> Result<Value, String> {
     let client = duke_core::net_doh::build_doh_client_with_timeouts(
         url,
@@ -313,17 +322,53 @@ pub(crate) async fn apply_custom_artwork(
     let clean_hero = hero_url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let clean_icon = icon_url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
 
-    let mut downloaded_cover_uri: Option<String> = None;
+    let covers_dir = crate::get_covers_dir_standalone()?;
+    let sidebar_icons_dir = crate::sidebar_icons::get_sidebar_icons_dir_standalone()?;
+    let safe_id: String = crate::sidebar_icons::safe_sidebar_icon_stem(&game_id);
+    let safe_id = if safe_id.is_empty() {
+        "custom_game".to_string()
+    } else {
+        safe_id
+    };
+
+    let mut resolved_cover_path: Option<String> = None;
     if let Some(ref c_url) = clean_cover {
-        if c_url.starts_with("data:image/") {
-            downloaded_cover_uri = Some(c_url.clone());
-        } else {
-            let _ = crate::validate_external_http_url(c_url)?;
-            if let Some(data_uri) = crate::fetch_verified_image_data_uri(c_url).await {
-                downloaded_cover_uri = Some(data_uri);
-            } else {
-                downloaded_cover_uri = Some(c_url.clone());
+        let mut raw_cover_bytes: Option<(Vec<u8>, &'static str)> = None;
+        if let Some(b64_part) = c_url.strip_prefix("data:image/") {
+            if let Some((_, payload)) = b64_part.split_once(";base64,") {
+                use base64::Engine;
+                if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(payload.trim()) {
+                    if let Some((ext, _)) = verify_image_bytes(&decoded) {
+                        raw_cover_bytes = Some((decoded, ext));
+                    }
+                }
             }
+        } else if c_url.starts_with("https://") || c_url.starts_with("http://") {
+            let _ = crate::validate_external_http_url(c_url)?;
+            raw_cover_bytes = download_verified_image_doh(c_url, None, MIN_VALID_COVER_BYTES).await;
+        } else {
+            let local_path = Path::new(c_url);
+            if local_path.is_file() {
+                if let Ok(bytes) = std::fs::read(local_path) {
+                    if let Some((ext, _)) = verify_image_bytes(&bytes) {
+                        raw_cover_bytes = Some((bytes, ext));
+                    } else {
+                        return Err("Selected local cover file is not a valid PNG, JPEG, or WebP image.".to_string());
+                    }
+                }
+            }
+        }
+
+        if let Some((bytes, ext)) = raw_cover_bytes {
+            clear_cached_cover_for_id(&covers_dir, &safe_id);
+            let dest_path = covers_dir.join(format!("{}.{}", safe_id, ext));
+            crate::atomic_write_bytes(&dest_path, &bytes)?;
+            let _ = ensure_sidebar_icon_for_cover_bytes(&sidebar_icons_dir, &safe_id, &bytes, true);
+            resolved_cover_path = Some(dest_path.to_string_lossy().to_string());
+        } else if c_url.starts_with("https://") || c_url.starts_with("http://") {
+            resolved_cover_path = Some(c_url.clone());
+        } else {
+            return Err("Failed verifying selected cover image.".to_string());
         }
     }
 
@@ -342,13 +387,7 @@ pub(crate) async fn apply_custom_artwork(
             return Err("Selected icon asset must be a valid .ico or .png file.".to_string());
         };
 
-        let covers_dir = crate::get_covers_dir_standalone()?;
-        let safe_id: String = game_id
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '_')
-            .take(80)
-            .collect();
-        let ico_file = covers_dir.join(format!("{}.ico", if safe_id.is_empty() { "custom_game" } else { &safe_id }));
+        let ico_file = covers_dir.join(format!("{}.ico", safe_id));
         crate::atomic_write_bytes(&ico_file, &ico_bytes)?;
         saved_icon_path = Some(ico_file.to_string_lossy().to_string());
     }
@@ -362,7 +401,7 @@ pub(crate) async fn apply_custom_artwork(
             return Err(format!("Game '{}' not found in library.", game_id));
         };
 
-        if let Some(cov) = downloaded_cover_uri {
+        if let Some(cov) = resolved_cover_path {
             entry.cover_url = cov;
         }
         if let Some(hero) = clean_hero {
@@ -523,10 +562,11 @@ pub(crate) fn get_cover_http_semaphore() -> &'static std::sync::Arc<tokio::sync:
     COVER_HTTP_SEMAPHORE.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4)))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct CoverResolveRequest {
     pub cache_id: String,
     pub title: String,
+    pub exe_path: Option<String>,
     pub platform_id: Option<u16>,
     pub platform_hint: Option<String>,
     pub steam_app_id: Option<u32>,
@@ -556,6 +596,23 @@ pub(crate) fn verify_image_bytes(bytes: &[u8]) -> Option<(&'static str, image::I
         _ => return None,
     };
     Some((ext, fmt))
+}
+
+/// Validates web fallback cover art dimensions (`>= 200x200`) and box-art aspect ratio (`0.55..=1.15`).
+pub(crate) fn verify_web_cover_dimensions(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
+    let (ext, _) = verify_image_bytes(bytes)?;
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let (w, h) = reader.into_dimensions().ok()?;
+    if w < 200 || h < 200 {
+        return None;
+    }
+    let ratio = w as f32 / h as f32;
+    if !(0.55..=1.15).contains(&ratio) {
+        return None;
+    }
+    Some((ext, w, h))
 }
 
 /// Strips region/revision tags like `(USA)`, `(Europe)`, `(Japan)`, `(Rev 1)`, `[!]` from a title.
@@ -602,13 +659,220 @@ fn normalize_cover_title_tokens(raw: &str) -> String {
         .join(" ")
 }
 
+fn is_version_token(lower: &str) -> bool {
+    let trimmed = lower.trim_start_matches('v');
+    let has_digit = trimmed.chars().any(|c| c.is_ascii_digit());
+    let has_dot = trimmed.contains('.');
+    let valid_chars = trimmed
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '.' || c == '_');
+    (lower.starts_with('v') && has_digit && trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        || (has_digit && has_dot && valid_chars)
+}
+
+fn is_scene_or_release_tag(lower: &str) -> bool {
+    if matches!(
+        lower,
+        "steam"
+            | "steamrip"
+            | "steamunlocked"
+            | "fitgirl"
+            | "dodi"
+            | "elamigos"
+            | "codex"
+            | "rune"
+            | "tenoke"
+            | "skidrow"
+            | "plaza"
+            | "cpy"
+            | "empress"
+            | "goldberg"
+            | "gog"
+            | "repack"
+            | "portable"
+            | "p2p"
+            | "cracked"
+            | "preinstalled"
+            | "x64"
+            | "x86"
+            | "win64"
+            | "win32"
+            | "goty"
+            | "usa"
+            | "europe"
+            | "japan"
+            | "world"
+    ) {
+        return true;
+    }
+    if let Some(rest) = lower.strip_prefix("multi") {
+        if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Cleans game titles for cover queries: strips scene/release tags, version numbers (`v1.2.3`),
+/// `(USA)` / `(Europe)` / `(Disc 1)` / `[!]`, `GOTY Edition`, hyphens/underscores, and trailing ellipsis.
+pub(crate) fn clean_cover_query(raw: &str) -> String {
+    let stripped = strip_region_revision_tags(raw);
+    let mut normalized = stripped
+        .trim_end_matches("...")
+        .trim_end_matches('\u{2026}')
+        .replace(['_', '-'], " ");
+
+    // Replace separator dots in dotted filenames while keeping version strings intact until token filtering.
+    if !normalized.contains(' ') && normalized.matches('.').count() >= 2 {
+        normalized = normalized.replace('.', " ");
+    }
+
+    let raw_tokens: Vec<&str> = normalized.split_whitespace().collect();
+    let mut kept: Vec<String> = Vec::with_capacity(raw_tokens.len());
+    let mut i = 0usize;
+    while i < raw_tokens.len() {
+        let tok = raw_tokens[i].trim_matches(|c: char| matches!(c, ',' | ';' | '|'));
+        let lower = tok.to_ascii_lowercase();
+        let lower_alpha = lower.trim_end_matches("...");
+
+        // Multi-word edition suffixes ("Game of the Year Edition", "GOTY Edition", etc.)
+        if i + 4 < raw_tokens.len()
+            && lower == "game"
+            && raw_tokens[i + 1].eq_ignore_ascii_case("of")
+            && raw_tokens[i + 2].eq_ignore_ascii_case("the")
+            && raw_tokens[i + 3].eq_ignore_ascii_case("year")
+            && raw_tokens[i + 4].eq_ignore_ascii_case("edition")
+        {
+            i += 5;
+            continue;
+        }
+        if i + 3 < raw_tokens.len()
+            && lower == "game"
+            && raw_tokens[i + 1].eq_ignore_ascii_case("of")
+            && raw_tokens[i + 2].eq_ignore_ascii_case("the")
+            && raw_tokens[i + 3].eq_ignore_ascii_case("year")
+        {
+            i += 4;
+            continue;
+        }
+        if i + 1 < raw_tokens.len()
+            && raw_tokens[i + 1].eq_ignore_ascii_case("edition")
+            && matches!(
+                lower_alpha,
+                "goty" | "definitive" | "deluxe" | "complete" | "ultimate" | "enhanced" | "gold" | "special" | "collector's" | "collectors"
+            )
+        {
+            i += 2;
+            continue;
+        }
+        if matches!(lower.as_str(), "build" | "ver" | "rev" | "disc")
+            && raw_tokens.get(i + 1).is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()))
+        {
+            i += 2;
+            continue;
+        }
+
+        if tok.is_empty()
+            || is_version_token(lower_alpha)
+            || is_scene_or_release_tag(lower_alpha)
+            || (lower_alpha == "edition" && !kept.is_empty())
+        {
+            // Once trailing release tags begin (e.g. "-Steam..." or "v1.2.3 REPACK"), keep cleaning safely.
+            i += 1;
+            continue;
+        }
+
+        kept.push(tok.to_string());
+        i += 1;
+    }
+
+    let joined = kept.join(" ").trim().to_string();
+    if joined.is_empty() {
+        stripped
+    } else {
+        joined
+    }
+}
+
+/// Computes standard Jaro-Winkler similarity in `0.0..=1.0` after normalizing query tokens.
+pub(crate) fn jaro_winkler_similarity(a: &str, b: &str) -> f64 {
+    let s1_str = normalize_cover_title_tokens(a);
+    let s2_str = normalize_cover_title_tokens(b);
+    if s1_str.is_empty() || s2_str.is_empty() {
+        return 0.0;
+    }
+    if s1_str == s2_str {
+        return 1.0;
+    }
+    let s1: Vec<char> = s1_str.chars().collect();
+    let s2: Vec<char> = s2_str.chars().collect();
+    let len1 = s1.len();
+    let len2 = s2.len();
+    let match_distance = len1.max(len2) / 2;
+    let match_distance = match_distance.saturating_sub(1);
+
+    let mut s1_matches = vec![false; len1];
+    let mut s2_matches = vec![false; len2];
+    let mut matches = 0usize;
+
+    for i in 0..len1 {
+        let start = i.saturating_sub(match_distance);
+        let end = (i + match_distance + 1).min(len2);
+        for j in start..end {
+            if s2_matches[j] || s1[i] != s2[j] {
+                continue;
+            }
+            s1_matches[i] = true;
+            s2_matches[j] = true;
+            matches += 1;
+            break;
+        }
+    }
+    if matches == 0 {
+        return 0.0;
+    }
+
+    let mut transpositions = 0usize;
+    let mut k = 0usize;
+    for i in 0..len1 {
+        if !s1_matches[i] {
+            continue;
+        }
+        while k < len2 && !s2_matches[k] {
+            k += 1;
+        }
+        if k < len2 && s1[i] != s2[k] {
+            transpositions += 1;
+        }
+        k += 1;
+    }
+
+    let m = matches as f64;
+    let jaro = (m / len1 as f64 + m / len2 as f64 + (m - (transpositions as f64 / 2.0)) / m) / 3.0;
+    if jaro < 0.7 {
+        return jaro;
+    }
+    let prefix = s1
+        .iter()
+        .zip(s2.iter())
+        .take(4)
+        .take_while(|(c1, c2)| c1 == c2)
+        .count();
+    jaro + (prefix as f64 * 0.1 * (1.0 - jaro))
+}
+
 pub(crate) fn titles_match_for_cover(query_title: &str, candidate_title: &str) -> bool {
-    let q = normalize_cover_title_tokens(query_title);
-    let c = normalize_cover_title_tokens(candidate_title);
+    let q_clean = clean_cover_query(query_title);
+    let c_clean = clean_cover_query(candidate_title);
+    let q = normalize_cover_title_tokens(&q_clean);
+    let c = normalize_cover_title_tokens(&c_clean);
     if q.is_empty() || c.is_empty() {
         return false;
     }
     if q == c {
+        return true;
+    }
+    if jaro_winkler_similarity(&q, &c) >= 0.78 {
         return true;
     }
     let q_words: Vec<&str> = q.split_whitespace().collect();
@@ -782,15 +1046,20 @@ async fn search_steam_app_ids_doh(clean_title: &str) -> Vec<u32> {
     let Some(items) = json.get("items").and_then(|v| v.as_array()) else {
         return Vec::new();
     };
-    let mut ids = Vec::new();
-    for item in items.iter().take(6) {
+    let mut scored: Vec<(f64, u32)> = Vec::new();
+    let q_clean = clean_cover_query(clean_title);
+    for item in items.iter().take(10) {
         let id = item.get("id").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        if id > 0 && titles_match_for_cover(clean_title, name) {
-            ids.push(id);
+        if id > 0 {
+            let sim = jaro_winkler_similarity(&q_clean, name);
+            if sim >= 0.78 || titles_match_for_cover(&q_clean, name) {
+                scored.push((sim, id));
+            }
         }
     }
-    ids
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+    scored.into_iter().map(|(_, id)| id).collect()
 }
 
 fn resolve_target_platform_spec(
@@ -839,11 +1108,11 @@ pub(crate) fn build_libretro_fuzzy_candidate_urls(
         return Vec::new();
     }
 
-    let base_clean = strip_region_revision_tags(raw_title);
+    let base_clean = clean_cover_query(raw_title);
     let mut title_variants: Vec<String> = Vec::new();
-    let raw_trimmed = raw_title.trim();
+    let raw_trimmed = strip_region_revision_tags(raw_title);
     if !raw_trimmed.is_empty() && raw_trimmed != base_clean {
-        title_variants.push(crate::retro_catalog::sanitize_libretro_thumb_name(raw_trimmed));
+        title_variants.push(crate::retro_catalog::sanitize_libretro_thumb_name(&raw_trimmed));
     }
     if !base_clean.is_empty() {
         for suffix in [" (USA)", " (World)", " (Europe)", " (Japan)", ""] {
@@ -886,14 +1155,16 @@ pub(crate) fn build_libretro_fuzzy_candidate_urls(
     urls
 }
 
-/// Extracts candidate HTTPS `.jpg`/`.jpeg`/`.png`/`.webp` URLs from DuckDuckGo HTML search output.
+/// Extracts candidate HTTPS `.jpg`/`.jpeg`/`.png`/`.webp` URLs from DuckDuckGo HTML/i.js JSON and Bing image HTML.
 pub(crate) fn extract_ddg_image_urls_from_html(html: &str) -> Vec<String> {
     let mut results = Vec::new();
     let mut push_if_valid = |candidate_raw: &str| {
         let mut clean = candidate_raw
             .trim()
-            .trim_matches(|c| matches!(c, '"' | '\'' | '<' | '>' | ',' | ')'))
-            .replace("&amp;", "&");
+            .trim_matches(|c| matches!(c, '"' | '\'' | '<' | '>' | ',' | ')' | ']'))
+            .replace("&amp;", "&")
+            .replace("&quot;", "")
+            .replace("\\/", "/");
         if clean.starts_with("//") {
             clean = format!("https:{}", clean);
         }
@@ -912,7 +1183,20 @@ pub(crate) fn extract_ddg_image_urls_from_html(html: &str) -> Vec<String> {
         if is_ddg_host && !lower.contains("iu/?u=https") {
             return;
         }
-        if lower.contains("favicon") || lower.contains(".ico") || lower.contains(".svg") {
+        if (host.ends_with("bing.net") || host.ends_with("bing.com") || host.ends_with("gstatic.com"))
+            && !lower.contains("murl")
+            && !lower.contains(".jpg")
+            && !lower.contains(".png")
+            && !lower.contains(".webp")
+        {
+            return;
+        }
+        if lower.contains("favicon")
+            || lower.contains(".ico")
+            || lower.contains(".svg")
+            || lower.contains("doubleclick")
+            || lower.contains("bing.com/th?")
+        {
             return;
         }
         let path_part = lower.split('?').next().unwrap_or(&lower);
@@ -926,77 +1210,227 @@ pub(crate) fn extract_ddg_image_urls_from_html(html: &str) -> Vec<String> {
         }
     };
 
+    // 1. DuckDuckGo `uddg=` redirect params
     let mut pos = 0usize;
-    while let Some(rel) = html[pos..].find("uddg=") {
+    while let Some(rel) = html.get(pos..).and_then(|s| s.find("uddg=")) {
         let start = pos + rel + 5;
-        let end = html[start..]
+        let Some(rest) = html.get(start..) else { break; };
+        let end = rest
             .find(['&', '"', '\'', '<', '>', ' '])
             .map(|i| start + i)
             .unwrap_or(html.len());
-        if let Ok(decoded) = urlencoding::decode(&html[start..end]) {
-            push_if_valid(&decoded);
+        if let Some(slice) = html.get(start..end) {
+            if let Ok(decoded) = urlencoding::decode(slice) {
+                push_if_valid(&decoded);
+            }
         }
-        pos = end.saturating_add(1);
+        pos = end.saturating_add(1).max(start + 1).min(html.len());
     }
 
+    // 2. Bing `"murl":"https://..."` / `&quot;murl&quot;:&quot;https://...&quot;` attributes
+    for marker in ["\"murl\":\"", "&quot;murl&quot;:&quot;"] {
+        let mut mpos = 0usize;
+        while let Some(rel) = html.get(mpos..).and_then(|s| s.find(marker)) {
+            let start = mpos + rel + marker.len();
+            let Some(rest) = html.get(start..) else { break; };
+            let end = rest
+                .find('"')
+                .or_else(|| rest.find("&quot;"))
+                .map(|i| start + i)
+                .unwrap_or(html.len());
+            if let Some(slice) = html.get(start..end) {
+                push_if_valid(slice);
+            }
+            mpos = end.saturating_add(1).max(start + 1).min(html.len());
+        }
+    }
+
+    // 3. Direct image URLs inside HTML or DuckDuckGo `i.js` JSON (`"image":"https:\/\/..."`)
+    let unescaped = html.replace("\\/", "/");
     let mut spos = 0usize;
-    while let Some(rel) = html[spos..].find("https://") {
+    while let Some(rel) = unescaped.get(spos..).and_then(|s| s.find("https://")) {
         let start = spos + rel;
-        let end = html[start..]
-            .find(['"', '\'', '<', '>', ' ', '\n', '\r'])
+        let Some(rest) = unescaped.get(start..) else { break; };
+        let end = rest
+            .find(['"', '\'', '<', '>', ' ', '\n', '\r', '\\'])
             .map(|i| start + i)
-            .unwrap_or(html.len());
-        push_if_valid(&html[start..end]);
-        spos = end.saturating_add(1);
+            .unwrap_or(unescaped.len());
+        if let Some(slice) = unescaped.get(start..end) {
+            push_if_valid(slice);
+        }
+        spos = end.saturating_add(1).max(start + 1).min(unescaped.len());
     }
     results
+}
+
+fn extract_ddg_vqd_token(html: &str) -> Option<String> {
+    for pat in ["vqd=\"", "vqd='", "vqd="] {
+        if let Some(idx) = html.find(pat) {
+            let rest = &html[idx + pat.len()..];
+            let tok: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            if tok.len() >= 6 {
+                return Some(tok);
+            }
+        }
+    }
+    None
+}
+
+async fn doh_fetch_text_body(url: &str, referer: Option<&str>) -> Option<String> {
+    let _permit = get_cover_http_semaphore().clone().acquire_owned().await.ok()?;
+    let client = duke_core::net_doh::build_doh_client_with_timeouts(
+        url,
+        COVER_CONNECT_TIMEOUT,
+        COVER_READ_TIMEOUT,
+        true,
+    )
+    .await;
+    let mut req = client.get(url);
+    if let Some(rf) = referer {
+        req = req.header(reqwest::header::REFERER, rf);
+    }
+    let resp = req.send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.text().await.ok()
+}
+
+fn push_unique_url(out: &mut Vec<String>, u: String) {
+    if !out.contains(&u) {
+        out.push(u);
+    }
+}
+
+async fn collect_doh_web_image_urls(clean_title: &str, platform_hint: Option<&str>) -> Vec<String> {
+    let clean = clean_cover_query(clean_title);
+    if clean.trim().chars().count() < 2 {
+        return Vec::new();
+    }
+    let platform_kw = platform_hint
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("pc"))
+        .unwrap_or("");
+    let query = if platform_kw.is_empty() {
+        format!("\"{}\" game cover box art", clean.trim())
+    } else {
+        format!("\"{}\" {} game cover box art", clean.trim(), platform_kw)
+    };
+    let encoded_q = urlencoding::encode(&query);
+
+    let mut candidate_urls: Vec<String> = Vec::new();
+
+    // Endpoint A: DuckDuckGo Images `i.js` JSON via DoH
+    let ddg_boot_url = format!(
+        "https://duckduckgo.com/?q={}&iax=images&ia=images",
+        encoded_q
+    );
+    if let Some(boot_html) = doh_fetch_text_body(&ddg_boot_url, Some("https://duckduckgo.com/")).await {
+        if let Some(vqd) = extract_ddg_vqd_token(&boot_html) {
+            let ddg_json_url = format!(
+                "https://duckduckgo.com/i.js?l=us-en&o=json&q={}&vqd={}&f=,,,&p=1",
+                encoded_q,
+                urlencoding::encode(&vqd)
+            );
+            if let Some(json_text) = doh_fetch_text_body(&ddg_json_url, Some("https://duckduckgo.com/")).await {
+                if let Ok(val) = serde_json::from_str::<Value>(&json_text) {
+                    if let Some(arr) = val.get("results").and_then(|v| v.as_array()) {
+                        for item in arr.iter().take(10) {
+                            let w = item.get("width").and_then(|v| v.as_u64()).unwrap_or(300) as u32;
+                            let h = item.get("height").and_then(|v| v.as_u64()).unwrap_or(420) as u32;
+                            let aspect = w as f32 / h.max(1) as f32;
+                            if w >= 200 && h >= 200 && (0.55..=1.15).contains(&aspect) {
+                                if let Some(u) = item.get("image").and_then(|v| v.as_str()) {
+                                    if u.starts_with("https://") {
+                                        push_unique_url(&mut candidate_urls, u.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Endpoint B: Bing Images async HTML via DoH
+    let bing_url = format!(
+        "https://www.bing.com/images/async?q={}&first=0&count=12&adlt=moderate",
+        encoded_q
+    );
+    if let Some(bing_html) = doh_fetch_text_body(&bing_url, Some("https://www.bing.com/")).await {
+        for u in extract_ddg_image_urls_from_html(&bing_html).into_iter().take(10) {
+            push_unique_url(&mut candidate_urls, u);
+        }
+    }
+
+    // Endpoint C: DuckDuckGo HTML fallback
+    if candidate_urls.len() < 4 {
+        let ddg_html_url = format!("https://html.duckduckgo.com/html/?q={}", encoded_q);
+        if let Some(html) = doh_fetch_text_body(&ddg_html_url, Some("https://duckduckgo.com/")).await {
+            for u in extract_ddg_image_urls_from_html(&html).into_iter().take(6) {
+                push_unique_url(&mut candidate_urls, u);
+            }
+        }
+    }
+
+    candidate_urls
 }
 
 async fn search_web_cover_fallback_doh(
     clean_title: &str,
     platform_hint: Option<&str>,
 ) -> Option<(Vec<u8>, &'static str)> {
-    let platform_kw = platform_hint
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("PC");
-    let query = format!(
-        "{} {} box art cover",
-        clean_title.trim(),
-        platform_kw
-    );
-    let url = format!(
-        "https://html.duckduckgo.com/html/?q={}",
-        urlencoding::encode(&query)
-    );
-    let html_opt = {
-        let _permit = get_cover_http_semaphore().clone().acquire_owned().await.ok()?;
-        let client = duke_core::net_doh::build_doh_client_with_timeouts(
-            &url,
-            COVER_CONNECT_TIMEOUT,
-            COVER_READ_TIMEOUT,
-            true,
-        )
-        .await;
-        match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => resp.text().await.ok(),
-            _ => None,
-        }
-    };
-    let html = html_opt?;
-    let candidates = extract_ddg_image_urls_from_html(&html);
-    for img_url in candidates.into_iter().take(5) {
-        if let Some(hit) = download_verified_image_doh(
+    let candidates = collect_doh_web_image_urls(clean_title, platform_hint).await;
+    for img_url in candidates.into_iter().take(10) {
+        if let Some((bytes, _)) = download_verified_image_doh(
             &img_url,
             Some("https://duckduckgo.com/"),
             MIN_WEB_FALLBACK_IMAGE_BYTES,
         )
         .await
         {
-            return Some(hit);
+            if let Some((ext, _, _)) = verify_web_cover_dimensions(&bytes) {
+                return Some((bytes, ext));
+            }
         }
     }
     None
+}
+
+async fn extract_exe_highres_png_bytes(exe_path: &str) -> Option<Vec<u8>> {
+    let trimmed = exe_path.trim().to_string();
+    if trimmed.is_empty() || !trimmed.to_ascii_lowercase().ends_with(".exe") {
+        return None;
+    }
+    if !Path::new(&trimmed).is_file() {
+        return None;
+    }
+    tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+        let escaped = trimmed.replace('\'', "''");
+        let ps_script = format!(
+            "Add-Type -AssemblyName System.Drawing; $ico = [System.Drawing.Icon]::ExtractAssociatedIcon('{}'); if ($ico) {{ $bmp = $ico.ToBitmap(); $ms = New-Object System.IO.MemoryStream; $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); [Convert]::ToBase64String($ms.ToArray()) }}",
+            escaped
+        );
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+            .creation_flags(crate::CREATE_NO_WINDOW)
+            .output()
+            .ok()?;
+        let b64 = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if b64.len() < 100 || b64.len() > 1024 * 1024 {
+            return None;
+        }
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+        verify_image_bytes(&bytes)?;
+        Some(bytes)
+    })
+    .await
+    .ok()?
 }
 
 async fn search_steamgriddb_grid_doh(api_key: &str, clean_title: &str) -> Option<(Vec<u8>, &'static str)> {
@@ -1057,10 +1491,10 @@ pub(crate) async fn resolve_and_cache_cover_in_dirs(
         });
     }
 
-    let clean_title = strip_region_revision_tags(&req.title);
+    let clean_title = clean_cover_query(&req.title);
     let mut resolved: Option<(Vec<u8>, &'static str, &'static str)> = None;
 
-    // 2. Steam Store Search & Multi-CDN (PC + multi-platform console titles + Valve tools like SteamVR)
+    // 2. Steam Store Search & Multi-CDN (Jaro-Winkler >= 0.78 -> library_600x900_2x / library_600x900 / header)
     let mut steam_ids = Vec::new();
     if let Some(aid) = req.steam_app_id {
         if aid > 0 {
@@ -1081,11 +1515,11 @@ pub(crate) async fn resolve_and_cache_cover_in_dirs(
         }
     }
 
-    // 3. Libretro Thumbnails Fuzzy Matcher
+    // 3. Libretro Boxarts CDN (Named_Boxarts across (USA)/(World)/(Europe)/(Japan) for all 24 consoles)
     if resolved.is_none() {
         if let Some(spec) = resolve_target_platform_spec(req.platform_id, req.platform_hint.as_deref()) {
             let candidates = build_libretro_fuzzy_candidate_urls(spec, &req.title);
-            for url in candidates.into_iter().take(12) {
+            for url in candidates.into_iter().take(16) {
                 if let Some((bytes, ext)) =
                     download_verified_image_doh(&url, None, MIN_VALID_COVER_BYTES).await
                 {
@@ -1096,7 +1530,7 @@ pub(crate) async fn resolve_and_cache_cover_in_dirs(
         }
     }
 
-    // 4. SteamGridDB (if API key configured) & DuckDuckGo Web Cover Fallback
+    // 4. SteamGridDB 600x900 Vertical Grids (when API key configured)
     if resolved.is_none() && !req.steamgriddb_api_key.trim().is_empty() {
         if let Some((bytes, ext)) =
             search_steamgriddb_grid_doh(&req.steamgriddb_api_key, &clean_title).await
@@ -1104,6 +1538,8 @@ pub(crate) async fn resolve_and_cache_cover_in_dirs(
             resolved = Some((bytes, ext, "steamgriddb"));
         }
     }
+
+    // 5. Privacy-Routed DoH Web Image Search Fallback (>= 200x200 px, 0.55..=1.15 aspect ratio)
     if resolved.is_none() {
         if let Some((bytes, ext)) =
             search_web_cover_fallback_doh(&clean_title, req.platform_hint.as_deref()).await
@@ -1120,6 +1556,15 @@ pub(crate) async fn resolve_and_cache_cover_in_dirs(
                 {
                     resolved = Some((bytes, ext, "existing_url"));
                 }
+            }
+        }
+    }
+
+    // Stage 1b/6 Local Embedded .EXE Resource Art Fallback (if Stages 2-5 missed)
+    if resolved.is_none() {
+        if let Some(ref exe) = req.exe_path {
+            if let Some(png_bytes) = extract_exe_highres_png_bytes(exe).await {
+                resolved = Some((png_bytes, "png", "exe_icon"));
             }
         }
     }
@@ -1207,6 +1652,7 @@ pub(crate) async fn resolve_catalog_cover(
     let req = CoverResolveRequest {
         cache_id: cache_id.clone(),
         title,
+        exe_path: None,
         platform_id,
         platform_hint: platform_name,
         steam_app_id: if !is_retro && app_id > 0 && app_id < 0x8000_0000 {
@@ -1224,6 +1670,61 @@ pub(crate) async fn resolve_catalog_cover(
         return Ok(Some(outcome.cover_path.to_string_lossy().to_string()));
     }
     Ok(None)
+}
+
+#[tauri::command]
+pub(crate) async fn search_web_covers_for_game(
+    query: String,
+    platform_hint: Option<String>,
+    steam_app_id: Option<u32>,
+) -> Result<Vec<WebCoverCandidate>, String> {
+    let clean = clean_cover_query(&query);
+    if clean.trim().is_empty() && steam_app_id.unwrap_or(0) == 0 {
+        return Ok(Vec::new());
+    }
+    let mut out: Vec<WebCoverCandidate> = Vec::new();
+    let mut push_candidate = |url: String, source: &str, label: &str| {
+        if !url.starts_with("https://") && !url.starts_with("http://") {
+            return;
+        }
+        if out.iter().any(|c| c.url == url) {
+            return;
+        }
+        out.push(WebCoverCandidate {
+            thumb: url.clone(),
+            url,
+            source: source.to_string(),
+            label: label.to_string(),
+        });
+    };
+
+    if let Some(aid) = steam_app_id.filter(|&v| v > 0) {
+        let urls = build_steam_cdn_urls(aid);
+        push_candidate(urls[0].clone(), "Steam", &format!("{clean} (600x900)"));
+        push_candidate(urls[2].clone(), "Steam", &format!("{clean} (Header)"));
+    }
+
+    for aid in search_steam_app_ids_doh(&clean).await.into_iter().take(4) {
+        let urls = build_steam_cdn_urls(aid);
+        push_candidate(urls[0].clone(), "Steam", &format!("Steam #{aid} (600x900)"));
+        push_candidate(urls[2].clone(), "Steam", &format!("Steam #{aid} (Header)"));
+    }
+
+    if let Some(spec) = resolve_target_platform_spec(None, platform_hint.as_deref()) {
+        for url in build_libretro_fuzzy_candidate_urls(spec, &query).into_iter().take(4) {
+            push_candidate(url, "Libretro", spec.short_name);
+        }
+    }
+
+    for url in collect_doh_web_image_urls(&clean, platform_hint.as_deref())
+        .await
+        .into_iter()
+        .take(12)
+    {
+        push_candidate(url, "Web Image", &clean);
+    }
+
+    Ok(out.into_iter().take(18).collect())
 }
 
 #[cfg(test)]
@@ -1303,6 +1804,7 @@ mod tests {
             &CoverResolveRequest {
                 cache_id: "steam_250820".to_string(),
                 title: "SteamVR".to_string(),
+                exe_path: None,
                 platform_id: None,
                 platform_hint: Some("PC".to_string()),
                 steam_app_id: Some(250820),
@@ -1318,5 +1820,38 @@ mod tests {
         assert!(out.cover_path.exists());
         assert!(icons_dir.join("steam_250820.png").exists());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn clean_cover_query_jaro_winkler_and_aspect_ratio_checks() {
+        assert_eq!(clean_cover_query("Feed-and-Grow-Fish-Steam..."), "Feed and Grow Fish");
+        assert_eq!(
+            clean_cover_query("Hollow_Knight_v1.5.78_(USA)_[!]_GOTY_Edition"),
+            "Hollow Knight"
+        );
+        assert_eq!(
+            clean_cover_query("Elden Ring (Europe) (Disc 1) v1.12.2 [FitGirl Repack]"),
+            "Elden Ring"
+        );
+
+        assert!(jaro_winkler_similarity("Feed and Grow Fish", "Feed & Grow: Fish") >= 0.78);
+        assert!(jaro_winkler_similarity("Super Mario 64", "Hollow Knight") < 0.78);
+
+        // Reject too small (< 200x200)
+        let small_png = crate::sidebar_icons::encode_rgba_png(&vec![0x80; 100 * 150 * 4], 100, 150).unwrap();
+        assert!(verify_web_cover_dimensions(&small_png).is_none());
+
+        // Reject widescreen banner (600x200 -> ratio 3.0 outside 0.55..=1.15)
+        let banner_png = crate::sidebar_icons::encode_rgba_png(&vec![0x80; 600 * 200 * 4], 600, 200).unwrap();
+        assert!(verify_web_cover_dimensions(&banner_png).is_none());
+
+        // Accept valid box-art dimensions (300x450 -> ratio 0.667 inside 0.55..=1.15)
+        let box_png = crate::sidebar_icons::encode_rgba_png(&vec![0x80; 300 * 450 * 4], 300, 450).unwrap();
+        assert_eq!(verify_web_cover_dimensions(&box_png), Some(("png", 300, 450)));
+
+        let bing_html = r#"<a m="{"murl":"https://img.example.org/boxart/metroid_prime.jpg"}"></a>"#;
+        let bing_html_esc = r#"&quot;murl&quot;:&quot;https://img.example.org/boxart/metroid_prime.jpg&quot;"#;
+        let found = extract_ddg_image_urls_from_html(&format!("{bing_html} {bing_html_esc}"));
+        assert!(found.iter().any(|u| u.ends_with("metroid_prime.jpg")));
     }
 }

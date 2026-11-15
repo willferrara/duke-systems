@@ -8,9 +8,7 @@ use std::time::{Duration, Instant};
 use windows::core::{PCSTR, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryA};
-use windows::Win32::UI::Input::XboxController::{
-    XInputGetState, XInputSetState, XINPUT_STATE, XINPUT_VIBRATION,
-};
+use windows::Win32::UI::Input::XboxController::{XINPUT_STATE, XINPUT_VIBRATION};
 use windows::Win32::UI::Input::{
     GetRawInputData, GetRawInputDeviceInfoW, GetRawInputDeviceList, RegisterRawInputDevices,
     HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTDEVICELIST, RAWINPUTHEADER, RIDEV_INPUTSINK,
@@ -343,31 +341,57 @@ pub struct XInputRawState {
 }
 
 type XInputGetStateExFn = unsafe extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
-static XINPUT_GET_STATE_EX_FN: std::sync::OnceLock<Option<XInputGetStateExFn>> =
-    std::sync::OnceLock::new();
+type XInputSetStateFn = unsafe extern "system" fn(u32, *const XINPUT_VIBRATION) -> u32;
 
-fn resolve_xinput_get_state_ex() -> Option<XInputGetStateExFn> {
-    *XINPUT_GET_STATE_EX_FN.get_or_init(|| unsafe {
-        let hmod = LoadLibraryA(PCSTR::from_raw(c"xinput1_4.dll".as_ptr().cast())).ok()?;
-        let proc = GetProcAddress(hmod, PCSTR::from_raw(100usize as *const u8))?;
-        Some(std::mem::transmute::<
-            unsafe extern "system" fn() -> isize,
-            XInputGetStateExFn,
-        >(proc))
-    })
+struct XInputProcs {
+    get_state_ex: Option<XInputGetStateExFn>,
+    get_state: Option<XInputGetStateExFn>,
+    set_state: Option<XInputSetStateFn>,
+}
+
+static XINPUT_PROCS: std::sync::OnceLock<Option<XInputProcs>> = std::sync::OnceLock::new();
+
+fn resolve_xinput_procs() -> Option<&'static XInputProcs> {
+    XINPUT_PROCS
+        .get_or_init(|| unsafe {
+            let hmod = LoadLibraryA(PCSTR::from_raw(c"xinput1_4.dll".as_ptr().cast()))
+                .or_else(|_| LoadLibraryA(PCSTR::from_raw(c"xinput1_3.dll".as_ptr().cast())))
+                .or_else(|_| LoadLibraryA(PCSTR::from_raw(c"xinput9_1_0.dll".as_ptr().cast())))
+                .ok()?;
+            let get_state_ex = GetProcAddress(hmod, PCSTR::from_raw(100usize as *const u8))
+                .map(|p| std::mem::transmute::<unsafe extern "system" fn() -> isize, XInputGetStateExFn>(p));
+            let get_state = GetProcAddress(hmod, PCSTR::from_raw(c"XInputGetState".as_ptr().cast()))
+                .map(|p| std::mem::transmute::<unsafe extern "system" fn() -> isize, XInputGetStateExFn>(p));
+            let set_state = GetProcAddress(hmod, PCSTR::from_raw(c"XInputSetState".as_ptr().cast()))
+                .map(|p| std::mem::transmute::<unsafe extern "system" fn() -> isize, XInputSetStateFn>(p));
+            if get_state_ex.is_none() && get_state.is_none() {
+                return None;
+            }
+            Some(XInputProcs {
+                get_state_ex,
+                get_state,
+                set_state,
+            })
+        })
+        .as_ref()
 }
 
 /// Polls XInput slots `0..4`. Disconnected slots are probed periodically to eliminate XInput overhead.
 pub fn poll_xinput(probe_disconnected: bool, active_mask: &mut [bool; 4]) -> XInputRawState {
+    let Some(procs) = resolve_xinput_procs() else {
+        return XInputRawState::default();
+    };
     let mut state = XINPUT_STATE::default();
-    let get_ex = resolve_xinput_get_state_ex();
     for (slot, active) in active_mask.iter_mut().enumerate() {
         if !*active && !probe_disconnected {
             continue;
         }
-        let res = match get_ex {
-            Some(f) => unsafe { f(slot as u32, &mut state) },
-            None => unsafe { XInputGetState(slot as u32, &mut state) },
+        let res = if let Some(f) = procs.get_state_ex {
+            unsafe { f(slot as u32, &mut state) }
+        } else if let Some(f) = procs.get_state {
+            unsafe { f(slot as u32, &mut state) }
+        } else {
+            return XInputRawState::default();
         };
         if res == 0 {
             *active = true;
@@ -393,13 +417,18 @@ pub fn poll_xinput(probe_disconnected: bool, active_mask: &mut [bool; 4]) -> XIn
 }
 
 pub fn set_xinput_rumble(slot: u8, left_pct: f32, right_pct: f32) -> Result<(), String> {
+    let procs = resolve_xinput_procs()
+        .ok_or_else(|| "No XInput runtime DLL available on this system".to_string())?;
+    let set_fn = procs
+        .set_state
+        .ok_or_else(|| "XInputSetState unavailable in loaded XInput DLL".to_string())?;
     let left_speed = (left_pct.clamp(0.0, 1.0) * 65535.0).round() as u16;
     let right_speed = (right_pct.clamp(0.0, 1.0) * 65535.0).round() as u16;
     let vib = XINPUT_VIBRATION {
         wLeftMotorSpeed: left_speed,
         wRightMotorSpeed: right_speed,
     };
-    let rc = unsafe { XInputSetState(slot as u32, &vib) };
+    let rc = unsafe { set_fn(slot as u32, &vib) };
     if rc == 0 {
         Ok(())
     } else {

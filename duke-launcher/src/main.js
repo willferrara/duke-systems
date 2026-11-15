@@ -8,6 +8,7 @@ import {
   beamGameFromPeer,
   buildDirectorySearchUrl,
   bulkImportSearchSites,
+  calibrateControllerAxes,
   checkGameUpdates,
   clearCompletedDownloads,
   compressGameFolder,
@@ -62,6 +63,7 @@ import {
   openExternalUrl,
   parseSteamBbcodeToSafeHtml,
   pickAnyFileForScan,
+  pickCustomCoverImage,
   pickDownloadFolder,
   pickExecutableFile,
   pickExecutableOrShortcutFile,
@@ -97,6 +99,7 @@ import {
   scanRomFolder,
   searchImportedSources,
   searchSteamGridDbArtwork,
+  searchWebCoversForGame,
   setCustomEmulatorPath,
   setGameAchievementsPath,
   setGameLaunchArgs,
@@ -933,7 +936,7 @@ function getFilteredSortedGames() {
       case "size":
         return Number(b.sizeBytes || 0) - Number(a.sizeBytes || 0);
       case "playtime":
-        return Number(b.playtimeSeconds || 0) - Number(a.playtimeSeconds || 0);
+        return getTotalPlaytimeSecs(b) - getTotalPlaytimeSecs(a);
       case "price":
         return Number(b.steamPriceCents || 0) - Number(a.steamPriceCents || 0);
       default:
@@ -1054,7 +1057,7 @@ function renderSidebarGameList() {
   const container = el("sidebar-game-list");
   if (!container) return;
   const sorted = [...state.library].sort((a, b) => String(a.title).localeCompare(String(b.title)));
-  container.innerHTML = sorted
+  const html = sorted
     .map((g) => {
       const iconUrl = state.sidebarIcons[g.id];
       const iconHtml = iconUrl
@@ -1070,13 +1073,16 @@ function renderSidebarGameList() {
     `;
     })
     .join("");
-
-  container.querySelectorAll("img.sidebar-game-icon").forEach((img) => {
+  const tpl = document.createElement("template");
+  tpl.innerHTML = html;
+  const frag = tpl.content;
+  frag.querySelectorAll("img.sidebar-game-icon").forEach((img) => {
     const row = img.closest(".sidebar-game-item");
     const gid = row?.dataset.gameId || "";
     const game = state.library.find((g) => g.id === gid);
     bindSidebarIconErrorHandler(img, gid, game?.title || "");
   });
+  container.replaceChildren(frag);
 
   scheduleSidebarIconsSync(sorted.map((g) => g.id));
 }
@@ -1094,7 +1100,7 @@ function renderLibraryGrid() {
     return;
   }
 
-  grid.innerHTML = games
+  const html = games
     .map((game) => {
       const cover =
         resolveMediaUrl(game.coverUrl) ||
@@ -1103,25 +1109,24 @@ function renderLibraryGrid() {
       const lastStr = formatLastPlayed(game.lastPlayedTs || game.lastPlayed);
       const favClass = game.isFavorite ? "is-fav" : "";
       const sourceLabel = resolveGameSourceLabel(game);
+      const sizeStr = game.sizeFormatted || formatBytesJs(game.sizeBytes);
       const updateBadge = game.updateAvailable
-        ? `<span class="card-badge card-badge-update" title="Newer version detected on update feed">Update Available</span>`
+        ? `<span class="card-footer-chip card-footer-chip-update" title="Newer version detected on update feed">Update</span>`
         : "";
       const tonightRec = state.filter === "play_tonight" ? state.playTonightMap.get(game.id) : null;
       const tonightReasonHtml = tonightRec
         ? `<div class="play-tonight-fit-pill" title="${escapeHtml((tonightRec.reasons || []).join(" · "))}">${escapeHtml(tonightRec.fitLabel || tonightRec.estimatedSessionFit || "Play Tonight Pick")}</div>`
         : "";
       const mediaContentHtml = cover
-        ? `<img src="${escapeHtml(cover)}" alt="${escapeHtml(game.title)}" class="game-card-img" loading="lazy" />`
+        ? `<img src="${escapeHtml(cover)}" alt="${escapeHtml(game.title)}" class="game-card-img" loading="lazy" decoding="async" />`
         : buildProceduralCoverCardHtml(game.title, sourceLabel, game.source || "");
 
       return `
         <article class="game-card" data-game-id="${escapeHtml(game.id)}">
           <div class="game-card-media">
             ${mediaContentHtml}
-            <span class="game-source-badge">${escapeHtml(sourceLabel)}</span>
             <div class="game-card-badges">
-              ${updateBadge}
-              <span class="card-badge mono-num">${escapeHtml(game.sizeFormatted || formatBytesJs(game.sizeBytes))}</span>
+              <span></span>
               <button type="button" class="card-fav-btn ${favClass}" data-action="fav" data-game-id="${escapeHtml(game.id)}" title="Toggle Favorite">
                 ${svgIcon("icon-pin")}
               </button>
@@ -1153,6 +1158,11 @@ function renderLibraryGrid() {
               <span class="mono-num">${escapeHtml(playtimeStr)}</span>
               <span>${escapeHtml(lastStr)}</span>
             </div>
+            <div class="game-card-footer-tags">
+              <span class="card-footer-chip">${escapeHtml(sourceLabel)}</span>
+              ${updateBadge}
+              <span class="card-footer-chip mono-num">${escapeHtml(sizeStr)}</span>
+            </div>
             ${tonightReasonHtml}
           </div>
         </article>
@@ -1160,7 +1170,10 @@ function renderLibraryGrid() {
     })
     .join("");
 
-  grid.querySelectorAll("img.game-card-img").forEach((imgEl) => {
+  const tpl = document.createElement("template");
+  tpl.innerHTML = html;
+  const frag = tpl.content;
+  frag.querySelectorAll("img.game-card-img").forEach((imgEl) => {
     imgEl.addEventListener(
       "error",
       () => {
@@ -1174,6 +1187,7 @@ function renderLibraryGrid() {
       { once: true }
     );
   });
+  grid.replaceChildren(frag);
 }
 
 function buildHeroCandidateList(appId, fallbackUrl) {
@@ -4741,10 +4755,20 @@ function renderDirectoryGrid() {
 
   grid.innerHTML = filtered
     .map((site) => {
-      const ctaText = activeQuery ? `Search on ${site.name}` : `Browse ${site.name}`;
+      const ariaText = activeQuery ? `Search ${site.name} for ${activeQuery}` : `Open ${site.name}`;
       const highlightedClass = activeQuery ? "is-highlighted" : "";
+      let domainLabel = "";
+      try {
+        domainLabel = new URL(site.homeUrl || site.searchUrl || "").hostname.replace(/^www\./, "");
+      } catch {
+        domainLabel = String(site.homeUrl || site.searchUrl || "official").slice(0, 32);
+      }
+      const queryClip = activeQuery.length > 20 ? `${activeQuery.slice(0, 18)}..` : activeQuery;
+      const rightFooter = activeQuery
+        ? `<span class="directory-search-chip">Query: ${escapeHtml(queryClip)}</span>`
+        : `<span class="directory-tag">${escapeHtml(site.tag || "Official")}</span>`;
       return `
-        <article class="directory-card ${highlightedClass}" data-site-id="${escapeHtml(site.id)}" tabindex="0" role="button" aria-label="${escapeHtml(ctaText)}">
+        <article class="directory-card ${highlightedClass}" data-site-id="${escapeHtml(site.id)}" tabindex="0" role="button" aria-label="${escapeHtml(ariaText)}">
           <div class="directory-card-head">
             <div class="directory-card-title-wrap">
               <div class="directory-card-title">${escapeHtml(site.name)}</div>
@@ -4756,9 +4780,9 @@ function renderDirectoryGrid() {
           </div>
           <div class="directory-card-note">${escapeHtml(site.note || "Game directory & archive search")}</div>
           <div class="directory-card-foot">
-            <span class="directory-card-cta">${svgIcon("icon-search")}<span>${escapeHtml(ctaText)}</span></span>
+            <span class="directory-domain-tag mono-num">${svgIcon("icon-globe")}<span>${escapeHtml(domainLabel)}</span></span>
             <span class="directory-card-tools">
-              <span class="pill">Safe Browser</span>
+              ${rightFooter}
             </span>
           </div>
         </article>
@@ -5112,27 +5136,6 @@ function buildCatalogCardElement(entry, installedSet) {
     scheduleCatalogCoverResolve(entry, img, media);
   }
 
-  const topBadges = document.createElement("div");
-  topBadges.className = "catalog-card-badges-top";
-  topBadges.innerHTML = `
-    <span class="catalog-badge ${isRetro ? "catalog-badge-platform" : "catalog-badge-ccu"} mono-num">${escapeHtml(ccuText)}</span>
-    ${isInstalled ? '<span class="catalog-badge">Installed</span>' : ""}
-  `;
-  media.appendChild(topBadges);
-
-  const bottomBadges = document.createElement("div");
-  bottomBadges.className = "catalog-card-badges-bottom";
-  bottomBadges.innerHTML = isRetro
-    ? `
-      <span class="catalog-badge catalog-badge-price mono-num">${escapeHtml(priceText)}</span>
-      <span class="catalog-badge catalog-badge-mode">${escapeHtml((entry.genres || [])[0] || "Console")}</span>
-    `
-    : `
-      <span class="catalog-badge catalog-badge-price ${entry.priceCents === 0 ? "is-free" : ""} mono-num">${escapeHtml(priceText)}</span>
-      <span class="catalog-badge catalog-badge-mode">${escapeHtml(modeTags.length > 0 ? modeTags.join(" / ") : "Steam")}</span>
-    `;
-  media.appendChild(bottomBadges);
-
   const overlay = document.createElement("div");
   overlay.className = "catalog-card-overlay";
   overlay.innerHTML = `
@@ -5148,13 +5151,22 @@ function buildCatalogCardElement(entry, installedSet) {
   media.appendChild(overlay);
   card.appendChild(media);
 
+  const installedBadge = isInstalled ? '<span class="card-footer-chip">Installed</span>' : "";
+  const footerModeTag = isRetro
+    ? (entry.platformName || "Console")
+    : (modeTags.length > 0 ? modeTags.join(" / ") : (entry.genres?.[0] || "Steam"));
   const body = document.createElement("div");
   body.className = "catalog-card-body";
   body.innerHTML = `
     <div class="catalog-card-title" title="${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</div>
     <div class="catalog-card-sub">
-      <span>${escapeHtml((entry.genres || [])[0] || modePill)}</span>
-      <span class="mono-num">${escapeHtml(ratingText)}</span>
+      <span>${escapeHtml(footerModeTag)}</span>
+      <span class="mono-num">${escapeHtml(ccuText)}${ratingText ? ` · ${escapeHtml(ratingText)}` : ""}</span>
+    </div>
+    <div class="catalog-card-footer-tags">
+      <span class="catalog-footer-price ${!isRetro && entry.priceCents === 0 ? "is-free" : ""} mono-num">${escapeHtml(priceText)}</span>
+      <span class="card-footer-chip">${escapeHtml(isRetro ? (entry.genres?.[0] || "Console") : "PC")}</span>
+      ${installedBadge}
     </div>
   `;
   card.appendChild(body);
@@ -5465,14 +5477,17 @@ async function loadCatalogData({ query = state.catalog.searchQuery, forceRefresh
   }
 
   // If .dkcat is already mapped locally and not forcing a full refresh, render page 0 immediately.
+  let alreadyRenderedCached = false;
   if (!forceRefresh && c.totalCached > 0 && c.renderedCount === 0) {
-    runCatalogQuery(true);
+    alreadyRenderedCached = true;
+    await runCatalogQuery(true);
   }
 
   try {
     const resp = await fetchCatalogGames(0, query, forceRefresh);
     if (reqId !== c.requestId) return;
 
+    const prevCached = c.totalCached;
     c.totalCached = Number(resp?.totalCached || c.totalCached || 0);
     c.fetchedAt = Number(resp?.fetchedAt || c.fetchedAt || 0);
     c.fromCache = Boolean(resp?.fromCache);
@@ -5482,7 +5497,11 @@ async function loadCatalogData({ query = state.catalog.searchQuery, forceRefresh
     c.error = null;
 
     updateNavCatalogBadge();
-    await runCatalogQuery(true);
+    if (!alreadyRenderedCached || c.totalCached !== prevCached || c.renderedCount === 0) {
+      await runCatalogQuery(true);
+    } else {
+      updateCatalogResultsSummary();
+    }
 
     const trimmed = String(query || "").trim();
     if (trimmed.length >= 2 && c.totalMatches < 12) {
@@ -5681,6 +5700,52 @@ function renderSgdbResults() {
     : `<div class="panel-sub">${escapeHtml(res.message || "No SteamGridDB artwork found for that query.")}</div>`;
 }
 
+function renderWebCoverResults(candidates = state.webCoverResults) {
+  const container = el("web-cover-results-container");
+  if (!container) return;
+  if (!Array.isArray(candidates)) {
+    container.innerHTML = `<div class="panel-sub">Click Search Web Covers to browse candidate cover art via Steam, Libretro &amp; DoH Web Image Search, or pick a local image.</div>`;
+    return;
+  }
+  if (candidates.length === 0) {
+    container.innerHTML = `<div class="panel-sub">No matching covers found. Try simplifying the search query above or choose Local Image...</div>`;
+    return;
+  }
+  container.innerHTML = `
+    <div class="sgdb-grid-gallery">
+      ${candidates
+        .map(
+          (item) => `
+          <button type="button" class="sgdb-thumb-card" data-web-cover-url="${escapeHtml(item.url)}">
+            <img src="${escapeHtml(item.thumb || item.url)}" alt="${escapeHtml(item.label || "Cover candidate")}" loading="lazy" decoding="async" />
+            <span class="sgdb-thumb-label">${escapeHtml(item.source || "Cover")} &middot; ${escapeHtml(item.label || "")}</span>
+          </button>
+        `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+async function runWebCoverSearch() {
+  const game = state.library.find((g) => g.id === state.modalGameId);
+  const query = (el("input-cover-query")?.value || game?.title || "").trim();
+  if (!query) return;
+  const container = el("web-cover-results-container");
+  if (container) container.innerHTML = `<div class="panel-sub">Searching Steam, Libretro &amp; DoH Web Images for "${escapeHtml(query)}"...</div>`;
+  try {
+    const candidates = await searchWebCoversForGame(
+      query,
+      game ? resolveGameSourceLabel(game) : null,
+      game?.steamAppId || game?.appId || null
+    );
+    state.webCoverResults = Array.isArray(candidates) ? candidates : [];
+    renderWebCoverResults(state.webCoverResults);
+  } catch (err) {
+    if (container) container.innerHTML = `<div class="panel-sub">${escapeHtml(String(err))}</div>`;
+  }
+}
+
 async function runSgdbSearch() {
   const query = (el("input-sgdb-query")?.value || "").trim();
   const game = state.library.find((g) => g.id === state.modalGameId);
@@ -5708,6 +5773,7 @@ function openDetailsModal(gameId) {
   const game = state.library.find((g) => g.id === gameId);
   if (!game) return;
   state.modalGameId = game.id;
+  state.webCoverResults = null;
   state.sgdbResults = null;
   state.sgdbSelection = { coverUrl: null, heroUrl: null, iconUrl: null };
   switchCoverModalTab("steam");
@@ -5717,6 +5783,7 @@ function openDetailsModal(gameId) {
   if (el("details-genre-badge")) el("details-genre-badge").textContent = resolveGameSourceLabel(game);
   if (el("input-cover-query")) el("input-cover-query").value = game.title || "";
   if (el("input-sgdb-query")) el("input-sgdb-query").value = game.title || "";
+  renderWebCoverResults(null);
   renderSgdbResults();
 
   if (el("details-meta-list")) {
@@ -5724,7 +5791,11 @@ function openDetailsModal(gameId) {
       <div class="kv-row"><span class="kv-k">Executable</span><span class="kv-v mono-num">${escapeHtml(game.exePath)}</span></div>
       <div class="kv-row"><span class="kv-k">Install Folder</span><span class="kv-v mono-num">${escapeHtml(game.installDir)}</span></div>
       <div class="kv-row"><span class="kv-k">Source</span><span class="kv-v mono-num">${escapeHtml(resolveGameSourceLabel(game))}</span></div>
-      <div class="kv-row"><span class="kv-k">Playtime</span><span class="kv-v mono-num">${escapeHtml(formatPlaytime(game.playtimeSeconds))}</span></div>
+      <div class="kv-row"><span class="kv-k">Playtime</span><span class="kv-v mono-num">${escapeHtml(
+        Number(game.importedPlaytimeSecs || 0) > 0
+          ? `${formatPlaytime(getTotalPlaytimeSecs(game))} (${formatPlaytime(Number(game.importedPlaytimeSecs || 0))} synced + ${formatPlaytime(Number(game.dukePlaytimeSecs || 0))} Duke)`
+          : formatPlaytime(getTotalPlaytimeSecs(game))
+      )}</span></div>
       <div class="kv-row"><span class="kv-k">Steam Value</span><span class="kv-v mono-num">${escapeHtml(game.steamPriceFormatted || "Unknown")}</span></div>
     `;
   }
@@ -6338,16 +6409,33 @@ async function addLocalGameFlow() {
 
 async function refreshAllData() {
   try {
-    state.library = await invokeCommand("get_local_library");
-    state.downloadJobs = await invokeCommand("get_download_jobs", { backupJobs: null });
-    const [telemetry, sessions] = await Promise.all([
-      invokeCommand("get_system_telemetry").catch(() => null),
-      getActiveGameSessions().catch(() => [])
+    const libPromise = invokeCommand("get_local_library").then((lib) => {
+      if (Array.isArray(lib)) {
+        state.library = lib;
+        renderSidebarGameList();
+        renderLibraryGrid();
+      }
+      return lib;
+    });
+    const jobsPromise = invokeCommand("get_download_jobs", { backupJobs: null })
+      .then((jobs) => {
+        if (Array.isArray(jobs)) {
+          state.downloadJobs = jobs;
+          renderDownloadJobs();
+        }
+        return jobs;
+      })
+      .catch(() => null);
+    const telemetryPromise = invokeCommand("get_system_telemetry").catch(() => null);
+    const sessionsPromise = getActiveGameSessions().catch(() => []);
+
+    await libPromise;
+    const [, telemetry, sessions] = await Promise.all([
+      jobsPromise,
+      telemetryPromise,
+      sessionsPromise
     ]);
     state.activeSessions = Array.isArray(sessions) ? sessions : [];
-    renderSidebarGameList();
-    renderLibraryGrid();
-    renderDownloadJobs();
     syncActiveSessionsUi();
     updateSidebarTelemetry(telemetry);
     checkDiskPressureAutopilotBanner(false).catch(() => {});
@@ -6361,32 +6449,42 @@ async function refreshAllData() {
         }
       })
       .catch(() => {});
-    if (state.library.some((g) => !g.steamPriceFormatted)) {
-      invokeCommand("sync_library_steam_prices")
-        .then((lib) => {
-          state.library = lib;
-          updateSidebarTelemetry();
-        })
-        .catch(() => {});
-    }
   } catch (err) {
     showToast(String(err), "error");
   }
 }
 
 function updateControllerGlyphLegend(controllerKind = state.controllerKind) {
-  const kind = String(controllerKind || "xbox").toLowerCase();
+  const kind = String(controllerKind || "none").toLowerCase();
   state.controllerKind = kind;
   const badge = el("couch-controller-glyph-badge");
   const radialPill = el("radial-controller-pill");
-  const isPs = kind.includes("dualsense") || kind.includes("dualshock") || kind.includes("ps") || kind.includes("sony");
-  const isSwitch = kind.includes("switch") || kind.includes("nintendo");
+  const isPs =
+    kind.includes("dualsense") ||
+    kind.includes("dualshock") ||
+    kind.includes("ps") ||
+    kind.includes("sony");
+  const isSwitch =
+    kind.includes("switch") || kind.includes("nintendo") || kind.includes("8bitdo");
+  const isFpv =
+    kind.includes("edgetx") ||
+    kind.includes("opentx") ||
+    kind.includes("radiomaster") ||
+    kind.includes("pocket") ||
+    kind.includes("fpv");
+  const isNone = kind === "none";
 
-  const glyphs = isPs
-    ? { label: "DualSense Glyphs", a: "Cross", b: "Circle", x: "Square", lb: "L1", rb: "R1" }
-    : isSwitch
-      ? { label: "Switch Pro Glyphs", a: "B", b: "A", x: "Y", lb: "L", rb: "R" }
-      : { label: "Xbox Glyphs", a: "A", b: "B", x: "X", lb: "LB", rb: "RB" };
+  const glyphs = isFpv
+    ? { label: "EdgeTX FPV", a: "SA", b: "SB", x: "SC", lb: "L-", rb: "R+" }
+    : isPs
+      ? { label: "DualSense", a: "Cross", b: "Circle", x: "Square", lb: "L1", rb: "R1" }
+      : isSwitch
+        ? { label: "Switch / 8BitDo", a: "B", b: "A", x: "Y", lb: "L", rb: "R" }
+        : isNone
+          ? { label: "No Controller", a: "A", b: "B", x: "X", lb: "LB", rb: "RB" }
+          : kind === "hid"
+            ? { label: "USB HID Pad", a: "Btn 1", b: "Btn 2", x: "Btn 3", lb: "L1", rb: "R1" }
+            : { label: "Xbox XInput", a: "A", b: "B", x: "X", lb: "LB", rb: "RB" };
 
   if (badge) badge.textContent = glyphs.label;
   if (radialPill) radialPill.textContent = `${glyphs.label.toUpperCase()} · RADIAL`;
@@ -6402,24 +6500,30 @@ function applyCouchMode(enabled, persist = false, controllerKind = null) {
   if (controllerKind) {
     state.controllerKind = String(controllerKind);
   }
-  document.body.classList.toggle("couch-mode", state.couchMode);
-  if (el("setting-couch-mode")) {
-    el("setting-couch-mode").checked = state.couchMode;
+  document.body?.classList?.toggle("couch-mode", state.couchMode);
+  const settingChk = el("setting-couch-mode");
+  if (settingChk) {
+    settingChk.checked = state.couchMode;
   }
-  if (el("duke-deck-hint-bar")) {
-    el("duke-deck-hint-bar").classList.toggle("hidden", !state.couchMode);
+  const hintBar = el("duke-deck-hint-bar");
+  if (hintBar) {
+    hintBar.classList.toggle("hidden", !state.couchMode);
   }
-  if (el("btn-titlebar-couch")) {
-    el("btn-titlebar-couch").classList.toggle("active", state.couchMode);
+  if (!state.couchMode) {
+    el("couch-calibrator-popover")?.classList.add("hidden");
+  }
+  const titleBtn = el("btn-titlebar-couch");
+  if (titleBtn) {
+    titleBtn.classList.toggle("active", state.couchMode);
   }
   updateControllerGlyphLegend(state.controllerKind);
   state.gamepadPollingRateFn?.(state.couchMode || state.radialOpen);
 
   try {
-    if (state.couchMode && !document.fullscreenElement) {
-      document.documentElement.requestFullscreen?.().catch(() => {});
-    } else if (!state.couchMode && document.fullscreenElement) {
-      document.exitFullscreen?.().catch(() => {});
+    if (state.couchMode && !document.fullscreenElement && document.documentElement?.requestFullscreen) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else if (!state.couchMode && document.fullscreenElement && document.exitFullscreen) {
+      document.exitFullscreen().catch(() => {});
     }
   } catch {
     // Fullscreen optional depending on WebView2 state
@@ -6582,7 +6686,7 @@ async function hydrateEverythingSaveCache() {
     }
     state.library
       .filter((g) => g.isInstalled !== false && !targets.some((t) => t.id === g.id))
-      .sort((a, b) => (b.lastPlayedTs || b.playtimeSeconds || 0) - (a.lastPlayedTs || a.playtimeSeconds || 0))
+      .sort((a, b) => (b.lastPlayedTs || getTotalPlaytimeSecs(b)) - (a.lastPlayedTs || getTotalPlaytimeSecs(a)))
       .slice(0, 3)
       .forEach((g) => targets.push(g));
 
@@ -7268,17 +7372,19 @@ function renderRadialHotbar(slots = null, selectedSlot = state.radialSelectedSlo
     state.radialSlots = slots;
   }
   const activeSlots = getActiveRadialSlots();
-  state.radialSelectedSlot = Number(selectedSlot || 0) % activeSlots.length;
+  state.radialSelectedSlot = Number(selectedSlot || 0) % Math.max(1, activeSlots.length);
   const ring = el("radial-slots-ring");
   if (!ring) return;
   ring.innerHTML = activeSlots
-    .map(
-      (s, idx) => `
-    <button type="button" class="radial-slot-btn ${idx === state.radialSelectedSlot ? "active" : ""}" data-radial-slot="${s.slotId}" data-radial-action="${escapeHtml(s.action)}" style="--slot-idx:${idx}">
+    .map((s, idx) => {
+      const slotNum = s.slot ?? s.slotId ?? idx;
+      const actionKey = s.actionId ?? s.action ?? "";
+      return `
+    <button type="button" class="radial-slot-btn ${idx === state.radialSelectedSlot ? "active" : ""}" data-radial-slot="${slotNum}" data-radial-action="${escapeHtml(actionKey)}" style="--slot-idx:${idx}">
       <span class="radial-slot-title">${escapeHtml(s.label)}</span>
-      <span class="radial-slot-key mono-num">Slot ${s.slotId + 1}</span>
-    </button>`
-    )
+      <span class="radial-slot-key mono-num">Slot ${Number(slotNum) + 1}</span>
+    </button>`;
+    })
     .join("");
   const active = activeSlots[state.radialSelectedSlot];
   if (el("radial-center-title") && active) {
@@ -7313,6 +7419,7 @@ async function handleRadialActionDispatch(action, slotId = null) {
       await activatePlayTonightFilter();
       break;
     case "toggle_suspend":
+    case "suspend_resume_game":
       if (activeGame) {
         await suspendOrResumeGame(activeGame.id, "toggle").catch((e) => showToast(String(e), "error"));
       }
@@ -7332,7 +7439,11 @@ async function handleRadialActionDispatch(action, slotId = null) {
       }
       break;
     case "open_vkb":
+    case "toggle_virtual_keyboard":
       openVirtualKeyboard(el("search-input"));
+      break;
+    case "open_duke_pilot":
+      openEverythingCommandPalette();
       break;
     case "compress_selected":
       if (activeGame) {
@@ -7350,11 +7461,12 @@ async function handleRadialActionDispatch(action, slotId = null) {
       }
       break;
     case "toggle_couch":
+    case "toggle_couch_mode":
       applyCouchMode(!state.couchMode, true);
       break;
     default:
-      if (slotId != null) {
-        await triggerCouchRadialAction(slotId, action).catch(() => {});
+      if (slotId != null || action) {
+        await triggerCouchRadialAction(slotId ?? action, action).catch(() => {});
       }
       break;
   }
@@ -7729,6 +7841,42 @@ function wireEvents() {
     showToast(state.couchMode ? "Duke Deck 10-Foot Mode activated." : "Returned to Desktop Mode.", "info", 2200);
   });
 
+  el("btn-couch-calibrate")?.addEventListener("click", () => {
+    const pop = el("couch-calibrator-popover");
+    if (!pop) return;
+    const willOpen = pop.classList.contains("hidden");
+    pop.classList.toggle("hidden", !willOpen);
+    if (willOpen) {
+      calibrateControllerAxes("status").catch(() => {});
+    }
+  });
+  el("btn-cal-close")?.addEventListener("click", () => {
+    el("couch-calibrator-popover")?.classList.add("hidden");
+  });
+  el("cal-deadzone-slider")?.addEventListener("input", (e) => {
+    const pct = Number(e.target?.value || 14);
+    if (el("cal-deadzone-val")) el("cal-deadzone-val").textContent = `${pct}%`;
+    calibrateControllerAxes("set_deadzone", pct / 100).catch(() => {});
+  });
+  el("btn-cal-auto-center")?.addEventListener("click", async () => {
+    try {
+      const dz = Number(el("cal-deadzone-slider")?.value || 14) / 100;
+      const rep = await calibrateControllerAxes("auto_center", dz);
+      showToast(`Captured rest centers for ${rep?.deviceName || "controller"}.`, "success", 2200);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+  el("btn-cal-reset")?.addEventListener("click", async () => {
+    try {
+      await calibrateControllerAxes("reset", 0.14);
+      if (el("cal-deadzone-slider")) el("cal-deadzone-slider").value = "14";
+      if (el("cal-deadzone-val")) el("cal-deadzone-val").textContent = "14%";
+      showToast("Reset controller axis calibration to defaults.", "info", 2000);
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
   el("btn-couch-radial")?.addEventListener("click", () => openRadialHotbar());
   el("btn-couch-vkb")?.addEventListener("click", () => openVirtualKeyboard(el("search-input")));
   el("btn-couch-exit")?.addEventListener("click", () => applyCouchMode(false, true));
@@ -9160,7 +9308,7 @@ async function openCleanUninstallModalForGame(game) {
   el("btn-run-chaos-harness")?.addEventListener("click", async () => {
     const btn = el("btn-run-chaos-harness");
     if (btn) btn.disabled = true;
-    showToast("Running v2.0.0 chaos & UI/IPC verification harness...", "info", 2800);
+    showToast("Running v2.1.0 chaos & UI/IPC verification harness...", "info", 2800);
     try {
       const rep = await runChaosStressHarness();
       const ok = Number(rep?.failedCases || 0) === 0;
@@ -10481,7 +10629,7 @@ async function openCleanUninstallModalForGame(game) {
       state.searchSites = await resetDefaultSearchSites();
       state.directoryCategory = "all";
       renderDirectoryGrid();
-      showToast("Restored all 6 default game directories.", "info");
+      showToast("Restored all 8 default game directories.", "info");
     } catch (err) {
       showToast(String(err), "error");
     }
@@ -10615,6 +10763,58 @@ async function openCleanUninstallModalForGame(game) {
         openGameDetailView(state.modalGameId);
       }
       showToast("Updated cover artwork from Steam CDN.", "success");
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-search-web-covers")?.addEventListener("click", runWebCoverSearch);
+  el("input-cover-query")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") runWebCoverSearch();
+  });
+
+  el("btn-pick-local-cover")?.addEventListener("click", async () => {
+    if (!state.modalGameId) return;
+    try {
+      const imgPath = await pickCustomCoverImage();
+      if (!imgPath) return;
+      showToast("Applying custom local cover...", "info", 1800);
+      const updated = await applyCustomArtwork({ gameId: state.modalGameId, coverUrl: imgPath });
+      if (updated && updated.id) {
+        const idx = state.library.findIndex((g) => g.id === updated.id);
+        if (idx >= 0) state.library[idx] = updated;
+      }
+      invalidateSidebarIcons([state.modalGameId]);
+      renderSidebarGameList();
+      renderLibraryGrid();
+      if (state.selectedDetailId === state.modalGameId) {
+        openGameDetailView(state.modalGameId);
+      }
+      showToast("Applied custom local cover image.", "success");
+    } catch (err) {
+      showToast(String(err), "error");
+    }
+  });
+
+  el("web-cover-results-container")?.addEventListener("click", async (e) => {
+    const card = e.target.closest(".sgdb-thumb-card[data-web-cover-url]");
+    if (!card || !state.modalGameId) return;
+    const coverUrl = card.dataset.webCoverUrl;
+    if (!coverUrl) return;
+    showToast("Downloading and caching selected web cover...", "info", 2000);
+    try {
+      const updated = await applyCustomArtwork({ gameId: state.modalGameId, coverUrl });
+      if (updated && updated.id) {
+        const idx = state.library.findIndex((g) => g.id === updated.id);
+        if (idx >= 0) state.library[idx] = updated;
+      }
+      invalidateSidebarIcons([state.modalGameId]);
+      renderSidebarGameList();
+      renderLibraryGrid();
+      if (state.selectedDetailId === state.modalGameId) {
+        openGameDetailView(state.modalGameId);
+      }
+      showToast("Applied selected web cover artwork.", "success");
     } catch (err) {
       showToast(String(err), "error");
     }
@@ -12322,6 +12522,119 @@ function startGamepadControllerLoop() {
     }, 50);
   };
 
+  const pollBrowserGamepad = () => {
+    try {
+      const pads = navigator.getGamepads?.() || [];
+      for (const gp of pads) {
+        if (!gp || !gp.connected) continue;
+        const idLow = String(gp.id || "").toLowerCase();
+        const isFpv =
+          idLow.includes("edgetx") ||
+          idLow.includes("opentx") ||
+          idLow.includes("radiomaster") ||
+          idLow.includes("1209") ||
+          idLow.includes("4f54");
+        const isPs =
+          idLow.includes("dualsense") ||
+          idLow.includes("dualshock") ||
+          idLow.includes("054c") ||
+          idLow.includes("sony");
+        const isSwitch =
+          idLow.includes("switch") || idLow.includes("057e") || idLow.includes("2dc8") || idLow.includes("8bitdo");
+        const rawAxes = [
+          Number(gp.axes?.[0] || 0),
+          Number(gp.axes?.[1] || 0),
+          Number(gp.axes?.[2] || 0),
+          Number(gp.axes?.[3] || 0)
+        ];
+        const dz = Number(el("cal-deadzone-slider")?.value || 14) / 100;
+        const axisModes = rawAxes.map((v, i) =>
+          isFpv && (i === 1 || i === 2) && v < -0.68 ? "throttle_low" : "centered"
+        );
+        const norm = (v, mode) => {
+          if (mode === "throttle_low") return Math.abs(v) < 0.72 ? v : 0;
+          if (Math.abs(v) <= dz) return 0;
+          return ((Math.abs(v) - dz) / (1 - dz)) * Math.sign(v);
+        };
+        const cal = rawAxes.map((v, i) => norm(v, axisModes[i]));
+        const btn = (idx) => Boolean(gp.buttons?.[idx]?.pressed);
+        return {
+          connected: true,
+          controllerKind: isFpv ? "edgetx" : isPs ? "dualsense" : isSwitch ? "switch" : "hid",
+          deviceName: gp.id || "W3C Gamepad",
+          lx: cal[0],
+          ly: -cal[1],
+          rx: cal[2],
+          ry: -cal[3],
+          a: btn(0),
+          b: btn(1),
+          x: btn(2),
+          y: btn(3),
+          lb: btn(4),
+          rb: btn(5),
+          up: btn(12),
+          down: btn(13),
+          left: btn(14),
+          right: btn(15),
+          rawAxes,
+          calibratedAxes: cal,
+          axisModes,
+          deadzone: dz
+        };
+      }
+    } catch {
+      // Browser Gamepad API unavailable
+    }
+    return null;
+  };
+
+  const updateControllerIndicatorUi = (pad) => {
+    const ind = el("couch-input-indicator");
+    const connected = Boolean(pad?.connected);
+    if (ind) {
+      ind.classList.toggle("connected", connected);
+      ind.title = connected
+        ? `${pad.deviceName || pad.controllerKind || "Controller"} connected`
+        : "No controller detected";
+    }
+    if (!state.couchMode) return;
+
+    const cal = Array.isArray(pad?.calibratedAxes)
+      ? pad.calibratedAxes
+      : [Number(pad?.lx || 0), Number(pad?.ly || 0), Number(pad?.rx || 0), Number(pad?.ry || 0)];
+    const raw = Array.isArray(pad?.rawAxes) ? pad.rawAxes : cal;
+    const modes = Array.isArray(pad?.axisModes) ? pad.axisModes : [];
+
+    const dotL = el("couch-stick-dot-l");
+    const dotR = el("couch-stick-dot-r");
+    if (dotL) {
+      dotL.style.transform = `translate(calc(-50% + ${(cal[0] * 5).toFixed(1)}px), calc(-50% - ${(cal[1] * 5).toFixed(1)}px))`;
+    }
+    if (dotR) {
+      dotR.style.transform = `translate(calc(-50% + ${(cal[2] * 5).toFixed(1)}px), calc(-50% - ${(cal[3] * 5).toFixed(1)}px))`;
+    }
+
+    const pop = el("couch-calibrator-popover");
+    if (pop && !pop.classList.contains("hidden")) {
+      const devLbl = el("cal-device-label");
+      if (devLbl) {
+        devLbl.textContent = connected
+          ? `${pad.deviceName || "Controller"}${pad.vidPid ? ` (${pad.vidPid})` : ""}`
+          : "No active controller";
+      }
+      for (let i = 0; i < 4; i++) {
+        const val = Number(cal[i] ?? raw[i] ?? 0);
+        const pct = Math.max(0, Math.min(100, ((val + 1) * 0.5) * 100));
+        const barEl = el(`cal-axis-bar-${i}`);
+        const modeEl = el(`cal-axis-mode-${i}`);
+        const valEl = el(`cal-axis-val-${i}`);
+        if (barEl) barEl.style.width = `${pct.toFixed(1)}%`;
+        if (modeEl) modeEl.textContent = modes[i] === "throttle_low" ? "Thr Low" : "Centered";
+        if (valEl) valEl.textContent = val.toFixed(2);
+      }
+    }
+  };
+
   const tick = async () => {
     if (document.visibilityState !== "visible") {
       stopPolling();
@@ -12330,25 +12643,41 @@ function startGamepadControllerLoop() {
     if (inFlight) return;
     inFlight = true;
     try {
-      const pad = await pollGamepadState();
+      const nativePad = await pollGamepadState().catch(() => null);
+      const pad = nativePad?.connected ? nativePad : pollBrowserGamepad() || nativePad;
       const connected = Boolean(pad?.connected);
       if (connected !== lastConnected) {
         lastConnected = connected;
         const badge = el("titlebar-controller-badge");
         if (badge) badge.classList.toggle("hidden", !connected);
+        updateControllerGlyphLegend(connected ? pad?.controllerKind || "xbox" : "none");
         stopPolling();
         startPolling();
+      } else if (connected && pad?.controllerKind && pad.controllerKind !== state.controllerKind) {
+        updateControllerGlyphLegend(pad.controllerKind);
       }
+      updateControllerIndicatorUi(pad);
       if (!connected) return;
 
-      const lx = Number(pad.thumbLx ?? pad.leftStickX ?? 0);
-      const ly = Number(pad.thumbLy ?? pad.leftStickY ?? 0);
-      const buttons = Number(pad.buttons ?? 0);
+      const lxRaw = Number(pad.lx ?? pad.thumbLx ?? pad.leftStickX ?? 0);
+      const lyRaw = Number(pad.ly ?? pad.thumbLy ?? pad.leftStickY ?? 0);
+      const rxRaw = Number(pad.rx ?? 0);
+      const ryRaw = Number(pad.ry ?? 0);
+      const isNormalizedFloat =
+        Math.abs(lxRaw) <= 1.05 && Math.abs(lyRaw) <= 1.05 && Math.abs(rxRaw) <= 1.05 && Math.abs(ryRaw) <= 1.05;
+      const lx = isNormalizedFloat ? lxRaw : lxRaw / 32768;
+      const ly = isNormalizedFloat ? lyRaw : lyRaw / 32768;
+      const rx = isNormalizedFloat ? rxRaw : rxRaw / 32768;
+      const ry = isNormalizedFloat ? ryRaw : ryRaw / 32768;
+      // On EdgeTX Mode-2 FPV transmitters, right stick (Roll/Pitch -> rx/ry) is always self-centering.
+      const navX = Math.abs(lx) > 0.42 ? lx : pad.controllerKind === "edgetx" ? rx : 0;
+      const navY = Math.abs(ly) > 0.42 ? ly : pad.controllerKind === "edgetx" ? ry : 0;
+      const buttons = Number(pad.buttonsMask ?? pad.buttons ?? 0);
 
-      const up = Boolean(pad.dpadUp || pad.up || ly > 16000 || (buttons & 0x0001));
-      const down = Boolean(pad.dpadDown || pad.down || ly < -16000 || (buttons & 0x0002));
-      const left = Boolean(pad.dpadLeft || pad.left || lx < -16000 || (buttons & 0x0004));
-      const right = Boolean(pad.dpadRight || pad.right || lx > 16000 || (buttons & 0x0008));
+      const up = Boolean(pad.dpadUp || pad.up || navY > 0.45 || (buttons & 0x0001));
+      const down = Boolean(pad.dpadDown || pad.down || navY < -0.45 || (buttons & 0x0002));
+      const left = Boolean(pad.dpadLeft || pad.left || navX < -0.45 || (buttons & 0x0004));
+      const right = Boolean(pad.dpadRight || pad.right || navX > 0.45 || (buttons & 0x0008));
 
       const a = Boolean(pad.a || (buttons & 0x1000));
       const b = Boolean(pad.b || (buttons & 0x2000));
@@ -12358,8 +12687,10 @@ function startGamepadControllerLoop() {
 
       const now = performance.now();
       if (state.radialOpen) {
-        if (Math.abs(lx) > 12000 || Math.abs(ly) > 12000) {
-          const deg = ((Math.atan2(lx, ly) * 180) / Math.PI + 360) % 360;
+        const radX = Math.abs(lx) > 0.35 ? lx : rx;
+        const radY = Math.abs(ly) > 0.35 ? ly : ry;
+        if (Math.abs(radX) > 0.35 || Math.abs(radY) > 0.35) {
+          const deg = ((Math.atan2(radX, radY) * 180) / Math.PI + 360) % 360;
           const slotIdx = Math.round(deg / 45) % 8;
           if (slotIdx !== state.radialSelectedSlot) {
             renderRadialHotbar(null, slotIdx);
@@ -12368,7 +12699,7 @@ function startGamepadControllerLoop() {
         if (a && !prev.a) {
           const activeSlots = getActiveRadialSlots();
           const chosen = activeSlots[state.radialSelectedSlot];
-          if (chosen) handleRadialActionDispatch(chosen.action, chosen.slotId);
+          if (chosen) handleRadialActionDispatch(chosen.actionId ?? chosen.action, chosen.slot ?? chosen.slotId);
         }
         if (b && !prev.b) {
           closeRadialHotbar();
@@ -12411,8 +12742,8 @@ function startGamepadControllerLoop() {
   };
 
   function getPollIntervalMs() {
-    if (state.couchMode || state.radialOpen) return 8;
-    return lastConnected === false ? 250 : 16;
+    if (state.couchMode || state.radialOpen) return 33;
+    return lastConnected ? 33 : 250;
   }
 
   function startPolling() {
@@ -12494,136 +12825,6 @@ async function init() {
     })
     .catch(() => {});
 
-  await listenDownloadProgress((job) => {
-    if (!job) return;
-    const idx = state.downloadJobs.findIndex((j) => j.downloadId === job.downloadId);
-    if (idx >= 0) {
-      state.downloadJobs[idx] = job;
-      updateDownloadJobCardInPlace(job);
-    } else {
-      state.downloadJobs.unshift(job);
-      renderDownloadJobs();
-    }
-
-    if (
-      job.status === "COMPLETED" &&
-      job.registeredInLibrary &&
-      !state.notifiedCompletedIds.has(job.downloadId)
-    ) {
-      state.notifiedCompletedIds.add(job.downloadId);
-      showToast(
-        `Completed & installed "${job.fileName || "game"}" to My Games.`,
-        "success",
-        2500
-      );
-      invokeCommand("get_local_library")
-        .then((lib) => {
-          if (Array.isArray(lib)) {
-            state.library = lib;
-            renderSidebarGameList();
-            renderLibraryGrid();
-            updateSidebarTelemetry();
-          }
-        })
-        .catch(() => {});
-    }
-
-    updateSidebarTelemetry();
-  });
-
-  await listenEvent("download-queue-updated", (jobs) => {
-    if (Array.isArray(jobs)) {
-      state.downloadJobs = jobs;
-      renderDownloadJobs();
-      updateSidebarTelemetry();
-    }
-  });
-
-  await listenEvent("download-auto-cleaned", (payload) => {
-    if (payload?.downloadId) {
-      state.downloadJobs = state.downloadJobs.filter((j) => j.downloadId !== payload.downloadId);
-      renderDownloadJobs();
-      updateSidebarTelemetry();
-    }
-  });
-
-  await listenEvent("library-updated", (lib) => {
-    if (Array.isArray(lib)) {
-      const activeIds = new Set(lib.map((g) => g.id));
-      for (const cachedId of Object.keys(state.sidebarIcons)) {
-        if (!activeIds.has(cachedId)) {
-          delete state.sidebarIcons[cachedId];
-        }
-      }
-      for (const attemptedId of Array.from(state.sidebarIconsAttempted)) {
-        if (!activeIds.has(attemptedId)) {
-          state.sidebarIconsAttempted.delete(attemptedId);
-        }
-      }
-      state.library = lib;
-      renderSidebarGameList();
-      renderLibraryGrid();
-      if (state.catalog.loaded && state.activeTab === "catalog") {
-        renderCatalogView(true);
-      }
-      updateSidebarTelemetry();
-    }
-  });
-
-  await listenEvent("catalog-sync-progress", (payload) => {
-    const indexed = Number(payload?.indexed_count ?? payload?.indexedCount ?? 0);
-    const target = Number(payload?.target_count ?? payload?.targetCount ?? 30000);
-    const done = Boolean(payload?.done);
-    const c = state.catalog;
-    if (indexed > 0) {
-      c.totalCached = indexed;
-    }
-    c.syncTarget = target;
-    c.syncing = !done;
-    if (done) {
-      c.fromCache = false;
-      if (!c.fetchedAt) c.fetchedAt = Math.floor(Date.now() / 1000);
-    }
-    updateNavCatalogBadge();
-    updateCatalogResultsSummary();
-    if (
-      state.activeTab === "catalog" &&
-      c.loaded &&
-      !c.loading &&
-      (c.renderedCount < c.batchSize || (done && c.renderedCount <= c.batchSize))
-    ) {
-      runCatalogQuery(true);
-    }
-  });
-
-  await listenEvent("memory-telemetry", (tele) => {
-    if (!document.hidden) updateSidebarTelemetry(tele);
-  });
-
-  await listenEvent("game-running-state", (payload) => {
-    document.body.classList.toggle("game-running-idle", Boolean(payload?.running));
-    refreshActiveSessions();
-  });
-
-  await listenEvent("game-suspend-state", (payload) => {
-    refreshActiveSessions();
-    if (payload?.message) {
-      showToast(payload.message, "info", 2400);
-    }
-  });
-
-  await listenEvent("nvme-prefetch-report", (payload) => {
-    if (!payload || Number(payload.warmedMb || 0) <= 0) return;
-    const files = Number(payload.filesWarmed || 0);
-    const warmedMb = Number(payload.warmedMb || 0);
-    const ms = Number(payload.elapsedMs || 0);
-    showToast(
-      `Fast Startup pre-loaded ${warmedMb.toFixed(1)} MB (${files} archive${files === 1 ? "" : "s"}) in ${ms} ms.`,
-      "success",
-      3200
-    );
-  });
-
   const refreshDownloadJobs = async () => {
     try {
       const jobs = await invokeCommand("get_download_jobs", { backupJobs: null });
@@ -12637,291 +12838,415 @@ async function init() {
     }
   };
 
-  await listenEvent("directory-download-intercepted", (payload) => {
-    const fileLabel = payload?.fileName || "file";
-    const siteLabel = payload?.siteTitle || "Safe Browser";
-    showToast(`Auto-grabbed "${fileLabel}" from ${siteLabel} -> Downloads queue.`, "success", 3400);
-    switchTab("downloader");
-    refreshDownloadJobs();
+  // Start cached library + controller loop immediately (<100 ms first paint); register all listeners in parallel.
+  const initialLibraryPromise = refreshAllData().catch((err) => {
+    console.error("Initial refreshAllData failed:", err);
   });
-
-  await listenEvent("grabber-download-redirect", (payload) => {
-    const fileLabel = payload?.fileName || "file";
-    showToast(`Captured "${fileLabel}" in Duke Stream Grabber -> Downloads queue.`, "success", 3400);
-    switchTab("downloader");
-    refreshDownloadJobs();
-  });
-
-  await listenEvent("sidebar-icons-updated", () => {
-    invalidateSidebarIcons();
-    renderSidebarGameList();
-  });
-
-  await listenEvent("game-crash-detected", (payload) => {
-    if (!payload) return;
-    state.lastCrashDetected = payload;
-    if (
-      state.activeTab === "detail" &&
-      state.selectedDetailId &&
-      payload.gameId === state.selectedDetailId
-    ) {
-      renderCrashDiagnosisBox(payload);
-    }
-    showToast(
-      `${payload.title || "Game"} exited early (${payload.exitCodeHex || "crash"}): ${payload.faultName || "Open Fix Game for 1-click repair"}`,
-      "error",
-      5500
-    );
-  });
-
-  await listenEvent("game-crash-healed", (payload) => {
-    if (!payload) return;
-    state.lastCrashHealed = payload;
-    const banner = el("crash-heal-banner");
-    const titleEl = el("crash-heal-title");
-    const summaryEl = el("crash-heal-summary");
-    if (titleEl) {
-      const exitHex = payload.exitCodeHex ? ` (${payload.exitCodeHex})` : "";
-      titleEl.textContent = `Repaired ${payload.title || "Game"}${exitHex}:`;
-    }
-    if (summaryEl) {
-      summaryEl.textContent =
-        payload.summary || payload.diagnosis || "Unblocked files & repaired missing runtime dependencies.";
-    }
-    if (banner) {
-      banner.classList.remove("hidden");
-    }
-    showToast(
-      `Self-Healed "${payload.title || "game"}" after crash. Click "Repaired — Relaunch Game" to retry.`,
-      "success",
-      5000
-    );
-  });
-
-  await listenEvent("duke-uri-download", (payload) => {
-    const uriUrl = String(payload?.url || "").trim();
-    if (uriUrl) {
-      markClipboardUrlHandled(uriUrl);
-      showToast(`Queued download from duke:// link: ${truncateClipboardUrl(uriUrl, 54)}`, "success", 3400);
-    }
-    switchTab("downloader");
-    refreshDownloadJobs();
-  });
-
-  await listenEvent("achievement-unlocked", (payload) => {
-    showAchievementToast(payload);
-    if (
-      state.activeTab === "detail" &&
-      state.selectedDetailId &&
-      payload?.gameId === state.selectedDetailId
-    ) {
-      const currentGame = state.library.find((g) => g.id === state.selectedDetailId);
-      if (currentGame) {
-        loadDetailAchievements(currentGame, state.activeDetailRequestId);
-      }
-    }
-  });
-
-  await listenEvent("wof-compress-progress", (payload) => {
-    if (
-      state.activeTab !== "detail" ||
-      !state.selectedDetailId ||
-      payload?.gameId !== state.selectedDetailId
-    ) {
-      return;
-    }
-    const prog = el("detail-wof-progress");
-    if (!prog) return;
-    if (payload.done) {
-      prog.classList.add("hidden");
-      const currentGame = state.library.find((g) => g.id === state.selectedDetailId);
-      if (currentGame) {
-        loadDetailWofStorage(currentGame, state.activeDetailRequestId);
-      }
-    } else {
-      const done = Number(payload.filesProcessed || 0);
-      const total = Number(payload.filesTotal || 0);
-      prog.textContent = `${payload.algorithm || "WOF"}: ${done.toLocaleString()} / ${total.toLocaleString()} files processed`;
-      prog.classList.remove("hidden");
-    }
-  });
-
-  await listenEmulatorInstallProgress((payload) => {
-    if (!payload) return;
-    const wrap = el("emu-install-progress-wrap");
-    const label = el("emu-install-progress-label");
-    const pctEl = el("emu-install-progress-pct");
-    const fill = el("emu-install-progress-fill");
-    const pct = Math.max(0, Math.min(100, Math.round(Number(payload.progressPct || 0))));
-    if (wrap && !el("emu-install-prompt-modal")?.classList.contains("hidden")) {
-      wrap.classList.remove("hidden");
-    }
-    if (label) label.textContent = payload.message || `${payload.consoleName || "Emulator"}: ${payload.stage || "installing"}`;
-    if (pctEl) pctEl.textContent = `${pct}%`;
-    if (fill) fill.style.width = `${pct}%`;
-    const statusLine = el("settings-retro-sync-status");
-    if (statusLine && payload.stage !== "ready") {
-      statusLine.dataset.syncBusy = "1";
-      statusLine.textContent = `${payload.consoleName || "Emulator"} setup (${pct}%): ${payload.message || payload.stage}`;
-    } else if (payload.stage === "ready") {
-      if (statusLine) delete statusLine.dataset.syncBusy;
-      loadEmulatorSettingsSection();
-    }
-  });
-
-  await listenRetroCatalogSyncProgress((payload) => {
-    if (!payload) return;
-    const total = Number(payload.totalCatalogEntries || 0);
-    if (total > 0) {
-      state.catalog.totalCached = total;
-      updateNavCatalogBadge();
-    }
-    const statusLine = el("settings-retro-sync-status");
-    const synced = Number(payload.syncedPlatforms || 0);
-    const totalPlatforms = Number(payload.totalPlatforms || 0);
-    if (statusLine) {
-      if (totalPlatforms > 0 && synced < totalPlatforms) {
-        statusLine.dataset.syncBusy = "1";
-        statusLine.textContent = payload.message || `Syncing ${payload.currentPlatform || "consoles"} (${synced}/${totalPlatforms})...`;
-      } else {
-        delete statusLine.dataset.syncBusy;
-        if (payload.message) statusLine.textContent = payload.message;
-      }
-    }
-    if (state.activeTab === "catalog" && state.catalog.loaded && !state.catalog.loading && total > 0 && synced >= totalPlatforms) {
-      runCatalogQuery(true);
-    }
-  });
-
-  await listenEvent("quick-resume-updated", (summary) => {
-    if (summary) renderSidebarQuickResume(summary);
-  });
-
-  await listenEvent("projfs-stream-ready", (payload) => {
-    if (payload?.message) showToast(payload.message, "success", 3600);
-    refreshFrontierDiagnostics().catch(() => {});
-  });
-
-  await listenEvent("projfs-mount-changed", () => {
-    refreshFrontierDiagnostics().catch(() => {});
-  });
-
-  await listenEvent("projfs-mount-unmounted", () => {
-    refreshFrontierDiagnostics().catch(() => {});
-  });
-
-  await listenEvent("shader-swarm-report", (rep) => {
-    if (rep?.summary) showToast(rep.summary, "info", 2800);
-    refreshFrontierDiagnostics().catch(() => {});
-  });
-
-  await listenEvent("frame-pacing-state", () => {
-    refreshFrontierDiagnostics().catch(() => {});
-  });
-
-  await listenEvent("steam-cm-state", (cm) => {
-    if (cm) {
-      state.steamCmStatus = cm;
-      renderSteamCmFriendsState();
-    }
-  });
-
-  await listenEvent("steam-chat-message", (msg) => {
-    if (msg) {
-      state.steamChatMessages = [...(state.steamChatMessages || []), msg].slice(-80);
-      renderSteamCmFriendsState();
-      if (!msg.senderIsSelf) {
-        showToast(`Steam Chat (${msg.peerName || msg.peerSteamId}): ${String(msg.message || "").slice(0, 60)}`, "info", 3200);
-      }
-    }
-  });
-
-  await listenEvent("steam-game-invite", (inv) => {
-    if (inv) {
-      state.steamPendingInvites = [
-        inv,
-        ...(state.steamPendingInvites || []).filter((x) => x.inviteId !== inv.inviteId)
-      ];
-      renderSteamCmFriendsState();
-      showToast(`Game Invite from ${inv.senderName || inv.senderSteamId}: ${inv.gameName || inv.appId}`, "info", 4200);
-    }
-  });
-
-  await listenEvent("steam-invites-updated", (list) => {
-    if (Array.isArray(list)) {
-      state.steamPendingInvites = list;
-      renderSteamCmFriendsState();
-    }
-  });
-
-  await listenEvent("time-machine-updated", (gid) => {
-    const activeGame = state.library.find((g) => g.id === state.selectedDetailId);
-    if (activeGame && activeGame.id === gid) {
-      loadDetailTimeMachine(activeGame, state.activeDetailRequestId);
-    }
-  });
-
-  await listenEvent("duke-link-state", (snap) => {
-    if (snap) renderDukeLinkUi(snap);
-  });
-
-  await listenEvent("duke-link-frame", (frameEv) => {
-    if (state.coopModalOpen) renderCoopFrameOnCanvas(frameEv);
-  });
-
-  await listenEvent("etw-xray-tick", (tick) => {
-    if (!tick) return;
-    state.detailXrayLiveTick = tick;
-    if (tick.gameId && tick.gameId === state.selectedDetailId) {
-      applyWave2XrayMetrics(tick, true, null);
-    }
-  });
-
-  await listenEvent("etw-xray-scorecard", (card) => {
-    if (!card) return;
-    if (state.detailXrayLiveTick?.gameId === card.gameId) {
-      state.detailXrayLiveTick = null;
-    }
-    if (card.gameId && card.gameId === state.selectedDetailId) {
-      const g = state.library.find((x) => x.id === card.gameId);
-      if (g) loadDetailXrayScorecards(g, state.activeDetailRequestId);
-    }
-    showToast(
-      `X-Ray Scorecard (${card.gameTitle || "Session"}): ${Number(card.avgFps || 0).toFixed(
-        1
-      )} FPS avg · 1% Low ${Number(card.low1pctFps || 0).toFixed(1)} FPS`,
-      "info",
-      4200
-    );
-  });
-
-  await listenEvent("ghost-session-status", (gs) => {
-    if (!gs) return;
-    if (gs.gameId && gs.gameId === state.selectedDetailId) {
-      renderDetailGhosts(null, gs);
-    }
-  });
-
-  await listenEvent("latency-driver-guard", (rep) => {
-    refreshWave2Diagnostics().catch(() => {});
-    if (rep?.driverChanged) {
-      showToast(
-        `GPU driver changed (${rep.previousDriver || "old"} -> ${
-          rep.currentDriver || "new"
-        }): re-applied ${Number(rep.reappliedCount || 0)} Auto-SR/latency profile(s).`,
-        "info",
-        4800
-      );
-    }
-  });
-
-  getDukeLinkStatus().then(renderDukeLinkUi).catch(() => {});
 
   try {
-    await refreshAllData();
+    startGamepadControllerLoop();
   } catch (err) {
-    console.error("Initial refreshAllData failed:", err);
+    console.error("Gamepad loop init warning:", err);
   }
+
+  void Promise.allSettled([
+    listenDownloadProgress((job) => {
+      if (!job) return;
+      const idx = state.downloadJobs.findIndex((j) => j.downloadId === job.downloadId);
+      if (idx >= 0) {
+        state.downloadJobs[idx] = job;
+        updateDownloadJobCardInPlace(job);
+      } else {
+        state.downloadJobs.unshift(job);
+        renderDownloadJobs();
+      }
+
+      if (
+        job.status === "COMPLETED" &&
+        job.registeredInLibrary &&
+        !state.notifiedCompletedIds.has(job.downloadId)
+      ) {
+        state.notifiedCompletedIds.add(job.downloadId);
+        showToast(
+          `Completed & installed "${job.fileName || "game"}" to My Games.`,
+          "success",
+          2500
+        );
+        invokeCommand("get_local_library")
+          .then((lib) => {
+            if (Array.isArray(lib)) {
+              state.library = lib;
+              renderSidebarGameList();
+              renderLibraryGrid();
+              updateSidebarTelemetry();
+            }
+          })
+          .catch(() => {});
+      }
+
+      updateSidebarTelemetry();
+    }),
+    listenEvent("download-queue-updated", (jobs) => {
+      if (Array.isArray(jobs)) {
+        state.downloadJobs = jobs;
+        renderDownloadJobs();
+        updateSidebarTelemetry();
+      }
+    }),
+    listenEvent("download-auto-cleaned", (payload) => {
+      if (payload?.downloadId) {
+        state.downloadJobs = state.downloadJobs.filter((j) => j.downloadId !== payload.downloadId);
+        renderDownloadJobs();
+        updateSidebarTelemetry();
+      }
+    }),
+    listenEvent("library-updated", (lib) => {
+      if (Array.isArray(lib)) {
+        const activeIds = new Set(lib.map((g) => g.id));
+        for (const cachedId of Object.keys(state.sidebarIcons)) {
+          if (!activeIds.has(cachedId)) {
+            delete state.sidebarIcons[cachedId];
+          }
+        }
+        for (const attemptedId of Array.from(state.sidebarIconsAttempted)) {
+          if (!activeIds.has(attemptedId)) {
+            state.sidebarIconsAttempted.delete(attemptedId);
+          }
+        }
+        state.library = lib;
+        renderSidebarGameList();
+        renderLibraryGrid();
+        if (state.catalog.loaded && state.activeTab === "catalog") {
+          renderCatalogView(true);
+        }
+        updateSidebarTelemetry();
+      }
+    }),
+    listenEvent("catalog-sync-progress", (payload) => {
+      const indexed = Number(payload?.indexed_count ?? payload?.indexedCount ?? 0);
+      const target = Number(payload?.target_count ?? payload?.targetCount ?? 30000);
+      const done = Boolean(payload?.done);
+      const c = state.catalog;
+      if (indexed > 0) {
+        c.totalCached = indexed;
+      }
+      c.syncTarget = target;
+      c.syncing = !done;
+      if (done) {
+        c.fromCache = false;
+        if (!c.fetchedAt) c.fetchedAt = Math.floor(Date.now() / 1000);
+      }
+      updateNavCatalogBadge();
+      updateCatalogResultsSummary();
+      if (
+        state.activeTab === "catalog" &&
+        c.loaded &&
+        !c.loading &&
+        (c.renderedCount < c.batchSize || (done && c.renderedCount <= c.batchSize))
+      ) {
+        runCatalogQuery(true);
+      }
+    }),
+    listenEvent("memory-telemetry", (tele) => {
+      if (!document.hidden) updateSidebarTelemetry(tele);
+    }),
+    listenEvent("game-running-state", (payload) => {
+      document.body.classList.toggle("game-running-idle", Boolean(payload?.running));
+      refreshActiveSessions();
+    }),
+    listenEvent("game-suspend-state", (payload) => {
+      refreshActiveSessions();
+      if (payload?.message) {
+        showToast(payload.message, "info", 2400);
+      }
+    }),
+    listenEvent("nvme-prefetch-report", (payload) => {
+      if (!payload || Number(payload.warmedMb || 0) <= 0) return;
+      const files = Number(payload.filesWarmed || 0);
+      const warmedMb = Number(payload.warmedMb || 0);
+      const ms = Number(payload.elapsedMs || 0);
+      showToast(
+        `Fast Startup pre-loaded ${warmedMb.toFixed(1)} MB (${files} archive${files === 1 ? "" : "s"}) in ${ms} ms.`,
+        "success",
+        3200
+      );
+    }),
+    listenEvent("directory-download-intercepted", (payload) => {
+      const fileLabel = payload?.fileName || "file";
+      const siteLabel = payload?.siteTitle || "Safe Browser";
+      showToast(`Auto-grabbed "${fileLabel}" from ${siteLabel} -> Downloads queue.`, "success", 3400);
+      switchTab("downloader");
+      refreshDownloadJobs();
+    }),
+    listenEvent("grabber-download-redirect", (payload) => {
+      const fileLabel = payload?.fileName || "file";
+      showToast(`Captured "${fileLabel}" in Duke Stream Grabber -> Downloads queue.`, "success", 3400);
+      switchTab("downloader");
+      refreshDownloadJobs();
+    }),
+    listenEvent("sidebar-icons-updated", () => {
+      invalidateSidebarIcons();
+      renderSidebarGameList();
+    }),
+    listenEvent("game-crash-detected", (payload) => {
+      if (!payload) return;
+      state.lastCrashDetected = payload;
+      if (
+        state.activeTab === "detail" &&
+        state.selectedDetailId &&
+        payload.gameId === state.selectedDetailId
+      ) {
+        renderCrashDiagnosisBox(payload);
+      }
+      showToast(
+        `${payload.title || "Game"} exited early (${payload.exitCodeHex || "crash"}): ${payload.faultName || "Open Fix Game for 1-click repair"}`,
+        "error",
+        5500
+      );
+    }),
+    listenEvent("game-crash-healed", (payload) => {
+      if (!payload) return;
+      state.lastCrashHealed = payload;
+      const banner = el("crash-heal-banner");
+      const titleEl = el("crash-heal-title");
+      const summaryEl = el("crash-heal-summary");
+      if (titleEl) {
+        const exitHex = payload.exitCodeHex ? ` (${payload.exitCodeHex})` : "";
+        titleEl.textContent = `Repaired ${payload.title || "Game"}${exitHex}:`;
+      }
+      if (summaryEl) {
+        summaryEl.textContent =
+          payload.summary || payload.diagnosis || "Unblocked files & repaired missing runtime dependencies.";
+      }
+      if (banner) {
+        banner.classList.remove("hidden");
+      }
+      showToast(
+        `Self-Healed "${payload.title || "game"}" after crash. Click "Repaired — Relaunch Game" to retry.`,
+        "success",
+        5000
+      );
+    }),
+    listenEvent("duke-uri-download", (payload) => {
+      const uriUrl = String(payload?.url || "").trim();
+      if (uriUrl) {
+        markClipboardUrlHandled(uriUrl);
+        showToast(`Queued download from duke:// link: ${truncateClipboardUrl(uriUrl, 54)}`, "success", 3400);
+      }
+      switchTab("downloader");
+      refreshDownloadJobs();
+    }),
+    listenEvent("achievement-unlocked", (payload) => {
+      showAchievementToast(payload);
+      if (
+        state.activeTab === "detail" &&
+        state.selectedDetailId &&
+        payload?.gameId === state.selectedDetailId
+      ) {
+        const currentGame = state.library.find((g) => g.id === state.selectedDetailId);
+        if (currentGame) {
+          loadDetailAchievements(currentGame, state.activeDetailRequestId);
+        }
+      }
+    }),
+    listenEvent("wof-compress-progress", (payload) => {
+      if (
+        state.activeTab !== "detail" ||
+        !state.selectedDetailId ||
+        payload?.gameId !== state.selectedDetailId
+      ) {
+        return;
+      }
+      const prog = el("detail-wof-progress");
+      if (!prog) return;
+      if (payload.done) {
+        prog.classList.add("hidden");
+        const currentGame = state.library.find((g) => g.id === state.selectedDetailId);
+        if (currentGame) {
+          loadDetailWofStorage(currentGame, state.activeDetailRequestId);
+        }
+      } else {
+        const done = Number(payload.filesProcessed || 0);
+        const total = Number(payload.filesTotal || 0);
+        prog.textContent = `${payload.algorithm || "WOF"}: ${done.toLocaleString()} / ${total.toLocaleString()} files processed`;
+        prog.classList.remove("hidden");
+      }
+    }),
+    listenEmulatorInstallProgress((payload) => {
+      if (!payload) return;
+      const wrap = el("emu-install-progress-wrap");
+      const label = el("emu-install-progress-label");
+      const pctEl = el("emu-install-progress-pct");
+      const fill = el("emu-install-progress-fill");
+      const pct = Math.max(0, Math.min(100, Math.round(Number(payload.progressPct || 0))));
+      if (wrap && !el("emu-install-prompt-modal")?.classList.contains("hidden")) {
+        wrap.classList.remove("hidden");
+      }
+      if (label) label.textContent = payload.message || `${payload.consoleName || "Emulator"}: ${payload.stage || "installing"}`;
+      if (pctEl) pctEl.textContent = `${pct}%`;
+      if (fill) fill.style.width = `${pct}%`;
+      const statusLine = el("settings-retro-sync-status");
+      if (statusLine && payload.stage !== "ready") {
+        statusLine.dataset.syncBusy = "1";
+        statusLine.textContent = `${payload.consoleName || "Emulator"} setup (${pct}%): ${payload.message || payload.stage}`;
+      } else if (payload.stage === "ready") {
+        if (statusLine) delete statusLine.dataset.syncBusy;
+        loadEmulatorSettingsSection();
+      }
+    }),
+    listenRetroCatalogSyncProgress((payload) => {
+      if (!payload) return;
+      const total = Number(payload.totalCatalogEntries || 0);
+      if (total > 0) {
+        state.catalog.totalCached = total;
+        updateNavCatalogBadge();
+      }
+      const statusLine = el("settings-retro-sync-status");
+      const synced = Number(payload.syncedPlatforms || 0);
+      const totalPlatforms = Number(payload.totalPlatforms || 0);
+      if (statusLine) {
+        if (totalPlatforms > 0 && synced < totalPlatforms) {
+          statusLine.dataset.syncBusy = "1";
+          statusLine.textContent = payload.message || `Syncing ${payload.currentPlatform || "consoles"} (${synced}/${totalPlatforms})...`;
+        } else {
+          delete statusLine.dataset.syncBusy;
+          if (payload.message) statusLine.textContent = payload.message;
+        }
+      }
+      if (state.activeTab === "catalog" && state.catalog.loaded && !state.catalog.loading && total > 0 && synced >= totalPlatforms) {
+        runCatalogQuery(true);
+      }
+    }),
+    listenEvent("quick-resume-updated", (summary) => {
+      if (summary) renderSidebarQuickResume(summary);
+    }),
+    listenEvent("projfs-stream-ready", (payload) => {
+      if (payload?.message) showToast(payload.message, "success", 3600);
+      refreshFrontierDiagnostics().catch(() => {});
+    }),
+    listenEvent("projfs-mount-changed", () => {
+      refreshFrontierDiagnostics().catch(() => {});
+    }),
+    listenEvent("projfs-mount-unmounted", () => {
+      refreshFrontierDiagnostics().catch(() => {});
+    }),
+    listenEvent("shader-swarm-report", (rep) => {
+      if (rep?.summary) showToast(rep.summary, "info", 2800);
+      refreshFrontierDiagnostics().catch(() => {});
+    }),
+    listenEvent("frame-pacing-state", () => {
+      refreshFrontierDiagnostics().catch(() => {});
+    }),
+    listenEvent("steam-cm-state", (cm) => {
+      if (cm) {
+        state.steamCmStatus = cm;
+        renderSteamCmFriendsState();
+      }
+    }),
+    listenEvent("steam-chat-message", (msg) => {
+      if (msg) {
+        state.steamChatMessages = [...(state.steamChatMessages || []), msg].slice(-80);
+        renderSteamCmFriendsState();
+        if (!msg.senderIsSelf) {
+          showToast(`Steam Chat (${msg.peerName || msg.peerSteamId}): ${String(msg.message || "").slice(0, 60)}`, "info", 3200);
+        }
+      }
+    }),
+    listenEvent("steam-game-invite", (inv) => {
+      if (inv) {
+        state.steamPendingInvites = [
+          inv,
+          ...(state.steamPendingInvites || []).filter((x) => x.inviteId !== inv.inviteId)
+        ];
+        renderSteamCmFriendsState();
+        showToast(`Game Invite from ${inv.senderName || inv.senderSteamId}: ${inv.gameName || inv.appId}`, "info", 4200);
+      }
+    }),
+    listenEvent("steam-invites-updated", (list) => {
+      if (Array.isArray(list)) {
+        state.steamPendingInvites = list;
+        renderSteamCmFriendsState();
+      }
+    }),
+    listenEvent("time-machine-updated", (gid) => {
+      const activeGame = state.library.find((g) => g.id === state.selectedDetailId);
+      if (activeGame && activeGame.id === gid) {
+        loadDetailTimeMachine(activeGame, state.activeDetailRequestId);
+      }
+    }),
+    listenEvent("duke-link-state", (snap) => {
+      if (snap) renderDukeLinkUi(snap);
+    }),
+    listenEvent("duke-link-frame", (frameEv) => {
+      if (state.coopModalOpen) renderCoopFrameOnCanvas(frameEv);
+    }),
+    listenEvent("etw-xray-tick", (tick) => {
+      if (!tick) return;
+      state.detailXrayLiveTick = tick;
+      if (tick.gameId && tick.gameId === state.selectedDetailId) {
+        applyWave2XrayMetrics(tick, true, null);
+      }
+    }),
+    listenEvent("etw-xray-scorecard", (card) => {
+      if (!card) return;
+      if (state.detailXrayLiveTick?.gameId === card.gameId) {
+        state.detailXrayLiveTick = null;
+      }
+      if (card.gameId && card.gameId === state.selectedDetailId) {
+        const g = state.library.find((x) => x.id === card.gameId);
+        if (g) loadDetailXrayScorecards(g, state.activeDetailRequestId);
+      }
+      showToast(
+        `X-Ray Scorecard (${card.gameTitle || "Session"}): ${Number(card.avgFps || 0).toFixed(
+          1
+        )} FPS avg · 1% Low ${Number(card.low1pctFps || 0).toFixed(1)} FPS`,
+        "info",
+        4200
+      );
+    }),
+    listenEvent("ghost-session-status", (gs) => {
+      if (!gs) return;
+      if (gs.gameId && gs.gameId === state.selectedDetailId) {
+        renderDetailGhosts(null, gs);
+      }
+    }),
+    listenEvent("latency-driver-guard", (rep) => {
+      refreshWave2Diagnostics().catch(() => {});
+      if (rep?.driverChanged) {
+        showToast(
+          `GPU driver changed (${rep.previousDriver || "old"} -> ${
+            rep.currentDriver || "new"
+          }): re-applied ${Number(rep.reappliedCount || 0)} Auto-SR/latency profile(s).`,
+          "info",
+          4800
+        );
+      }
+    }),
+    listenCouchStateChanged((cs) => {
+      if (!cs) return;
+      if (Array.isArray(cs.radialSlots)) state.radialSlots = cs.radialSlots;
+      applyCouchMode(Boolean(cs.active ?? cs.enabled), false, cs.controllerKind);
+      if (cs.radialVisible ?? cs.radialOpen) openRadialHotbar(cs.radialSlots);
+      else closeRadialHotbar();
+    }),
+    listenCouchRadialToggled((cs) => {
+      if (!cs) return;
+      if (Array.isArray(cs.radialSlots)) state.radialSlots = cs.radialSlots;
+      if (cs.controllerKind) updateControllerGlyphLegend(cs.controllerKind);
+      if (cs.radialVisible ?? cs.radialOpen) openRadialHotbar(cs.radialSlots);
+      else closeRadialHotbar();
+    }),
+    listenCouchRadialAction((evt) => {
+      const act = evt?.action ?? evt?.slot?.actionId ?? evt?.slot?.action;
+      const slot = evt?.slot?.slot ?? evt?.slot?.slotId ?? (typeof evt?.slot === "number" ? evt.slot : null);
+      if (act) {
+        handleRadialActionDispatch(act, slot);
+      }
+    })
+  ]);
+
+  getDukeLinkStatus().then(renderDukeLinkUi).catch(() => {});
+  await initialLibraryPromise;
   refreshQuickResumeSlots().catch(() => {});
   refreshSteamCmAndInvites().catch(() => {});
   refreshFrontierDiagnostics().catch(() => {});
@@ -12944,7 +13269,7 @@ async function init() {
     .then((cs) => {
       if (cs?.radialSlots) state.radialSlots = cs.radialSlots;
       if (cs?.controllerKind) state.controllerKind = cs.controllerKind;
-      if (cs?.cliBooted || cs?.enabled) {
+      if (cs?.cliBooted || cs?.active || cs?.enabled) {
         applyCouchMode(true, false, cs.controllerKind);
       } else {
         updateControllerGlyphLegend(state.controllerKind);
@@ -12955,25 +13280,6 @@ async function init() {
     .then((fse) => syncFseShellUi(fse))
     .catch(() => {});
   refreshWasmPluginsUi().catch(() => {});
-  listenCouchStateChanged((cs) => {
-    if (!cs) return;
-    if (Array.isArray(cs.radialSlots)) state.radialSlots = cs.radialSlots;
-    applyCouchMode(Boolean(cs.enabled), false, cs.controllerKind);
-    if (cs.radialOpen) openRadialHotbar(cs.radialSlots);
-    else closeRadialHotbar();
-  }).catch(() => {});
-  listenCouchRadialToggled((cs) => {
-    if (!cs) return;
-    if (Array.isArray(cs.radialSlots)) state.radialSlots = cs.radialSlots;
-    if (cs.controllerKind) updateControllerGlyphLegend(cs.controllerKind);
-    if (cs.radialOpen) openRadialHotbar(cs.radialSlots);
-    else closeRadialHotbar();
-  }).catch(() => {});
-  listenCouchRadialAction((evt) => {
-    if (evt?.slot?.action) {
-      handleRadialActionDispatch(evt.slot.action, evt.slot.slotId);
-    }
-  }).catch(() => {});
   listenDkpackApplied((rep) => {
     if (rep?.summary) {
       showToast(rep.summary, "success", 4400);
@@ -12994,29 +13300,23 @@ async function init() {
     }
     activatePlayTonightFilter();
   }).catch(() => {});
-  try {
-    await Promise.resolve(loadEmulatorSettingsSection());
-  } catch (err) {
+  Promise.resolve(loadEmulatorSettingsSection()).catch((err) => {
     console.error("Initial loadEmulatorSettingsSection failed:", err);
-  }
-  try {
-    await Promise.resolve(refreshFriendsPanel(true));
-  } catch (err) {
+  });
+  Promise.resolve(refreshFriendsPanel(true)).catch((err) => {
     console.error("Initial refreshFriendsPanel failed:", err);
-  }
-  const pendingProtocolUrls = await takePendingProtocolUrls().catch(() => []);
-  if (Array.isArray(pendingProtocolUrls) && pendingProtocolUrls.length > 0) {
-    pendingProtocolUrls.forEach((u) => markClipboardUrlHandled(u));
-    switchTab("downloader");
-    await refreshDownloadJobs();
-    const suffix = pendingProtocolUrls.length === 1 ? "" : "s";
-    showToast(`Queued ${pendingProtocolUrls.length} download${suffix} from browser link.`, "success", 3400);
-  }
-  try {
-    startGamepadControllerLoop();
-  } catch (err) {
-    console.error("Gamepad loop init warning:", err);
-  }
+  });
+  takePendingProtocolUrls()
+    .then((pendingProtocolUrls) => {
+      if (Array.isArray(pendingProtocolUrls) && pendingProtocolUrls.length > 0) {
+        pendingProtocolUrls.forEach((u) => markClipboardUrlHandled(u));
+        switchTab("downloader");
+        refreshDownloadJobs();
+        const suffix = pendingProtocolUrls.length === 1 ? "" : "s";
+        showToast(`Queued ${pendingProtocolUrls.length} download${suffix} from browser link.`, "success", 3400);
+      }
+    })
+    .catch(() => {});
 }
 
 init().catch((err) => {

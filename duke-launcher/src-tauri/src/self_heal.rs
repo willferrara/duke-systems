@@ -288,7 +288,7 @@ pub(crate) fn verify_catalog_integrity(data_dir: &Path) -> bool {
     }
     match MappedCatalog::open(&dkcat_path) {
         Ok(cat) => {
-            if cat.verify_blake3() {
+            if cat.verify_header_fast() {
                 true
             } else {
                 drop(cat);

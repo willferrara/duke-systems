@@ -19,6 +19,9 @@ pub mod tray_daemon;
 #[cfg(feature = "hid-raw")]
 pub mod hid_raw;
 
+#[cfg(feature = "hid-raw")]
+pub use hidapi;
+
 #[cfg(feature = "macro-engine")]
 pub mod macro_engine;
 

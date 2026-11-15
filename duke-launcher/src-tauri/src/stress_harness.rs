@@ -366,8 +366,17 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
         .map_err(|e| format!("Failed reading tauri.conf.json: {e}"))?;
 
     // 1. Version & Window Safety Checks
-    if !index_html.contains("2.0.0") || !tauri_conf.contains("\"2.0.0\"") {
-        return Err("Expected v2.0.0 marker missing in index.html or tauri.conf.json.".to_string());
+    if !index_html.contains("2.1.0") || !tauri_conf.contains("\"2.1.0\"") {
+        return Err("Expected v2.1.0 marker missing in index.html or tauri.conf.json.".to_string());
+    }
+
+    let default_sites = crate::sites::default_search_sites();
+    if default_sites.len() != 8
+        || default_sites
+            .iter()
+            .any(|s| s.home_url.to_ascii_lowercase().contains("vimm") || s.name.to_ascii_lowercase().contains("vimm"))
+    {
+        return Err("Default search sites failed legal 8-directory compliance check.".to_string());
     }
     let conf_json: serde_json::Value =
         serde_json::from_str(&tauri_conf).map_err(|e| format!("Invalid tauri.conf.json: {e}"))?;

@@ -84,7 +84,7 @@
         </button>
         <img src="assets/dukeflaglogo.png" alt="Duke Launcher" class="titlebar-emblem" />
         <span class="titlebar-title">Duke Launcher</span>
-        <span class="titlebar-version mono-num" id="app-version-pill">v2.0.0</span>
+        <span class="titlebar-version mono-num" id="app-version-pill">v2.1.0</span>
       </div>
 
       <div class="titlebar-center">
@@ -541,9 +541,9 @@
                   <svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>
                   <span>Switch .exe</span>
                 </button>
-                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-cover" title="Pick or refresh cover artwork and icon">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-cover" title="Pick a local image, run Auto-Cover, or search the web for cover artwork">
                   <svg class="icon" aria-hidden="true"><use href="#icon-sparkles"/></svg>
-                  <span>Change Cover</span>
+                  <span>Pick Custom Cover / Search Web Cover</span>
                 </button>
                 <button type="button" class="btn btn-secondary btn-sm" id="btn-detail-preflight" title="Inspect Windows runtime libraries used by this game">
                   <svg class="icon" aria-hidden="true"><use href="#icon-box"/></svg>
@@ -1404,14 +1404,16 @@
                     <svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg>
                     <span>Clear Filters</span>
                   </button>
-                  <button type="button" class="btn btn-secondary btn-sm" id="btn-catalog-sync-retro">
-                    <svg class="icon" aria-hidden="true"><use href="#icon-gamepad-2"/></svg>
-                    <span>Sync Console Catalog</span>
-                  </button>
-                  <button type="button" class="btn btn-secondary btn-sm" id="btn-catalog-refresh">
-                    <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
-                    <span>Refresh Catalog</span>
-                  </button>
+                  <div class="catalog-sync-group">
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-catalog-sync-retro">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-gamepad-2"/></svg>
+                      <span>Sync Console Catalog</span>
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-catalog-refresh">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                      <span>Refresh Catalog</span>
+                    </button>
+                  </div>
                   <div class="card-zoom-controls" title="Zoom catalog cards (Ctrl+Wheel or Middle-Mouse+Wheel)">
                     <button type="button" class="btn btn-secondary btn-xs zoom-pill-btn" id="btn-catalog-zoom-out" aria-label="Zoom out catalog cards">-</button>
                     <span class="zoom-readout mono-num" id="catalog-zoom-label">185px</span>
@@ -1797,7 +1799,7 @@
                     <svg class="icon" aria-hidden="true"><use href="#icon-upload"/></svg>
                     <span>Bulk Import</span>
                   </button>
-                  <button type="button" class="btn btn-secondary btn-sm" id="btn-reset-default-sites" title="Restore the 6 built-in game directories">
+                  <button type="button" class="btn btn-secondary btn-sm" id="btn-reset-default-sites" title="Restore the 8 built-in legal game directories">
                     <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
                     <span>Reset Defaults</span>
                   </button>
@@ -1826,6 +1828,7 @@
               <div class="directory-filter-row">
                 <div class="filter-pills" id="directory-category-pills">
                   <button type="button" class="filter-pill active" data-dir-category="all">All</button>
+                  <button type="button" class="filter-pill" data-dir-category="Storefront">Storefront</button>
                   <button type="button" class="filter-pill" data-dir-category="DRM-Free">DRM-Free</button>
                   <button type="button" class="filter-pill" data-dir-category="Indie &amp; Free">Indie &amp; Free</button>
                   <button type="button" class="filter-pill" data-dir-category="Preservation">Preservation</button>
@@ -1833,7 +1836,7 @@
                   <button type="button" class="filter-pill" data-dir-category="Database">Database</button>
                   <button type="button" class="filter-pill" data-dir-category="Custom">Custom</button>
                 </div>
-                <span class="panel-sub mono-num" id="directory-count-summary">6 directories ready</span>
+                <span class="panel-sub mono-num" id="directory-count-summary">8 directories ready</span>
               </div>
 
               <div class="directory-grid" id="directory-grid"></div>
@@ -2994,8 +2997,8 @@
         <div class="kv-rows" id="details-meta-list"></div>
 
         <div class="modal-tabs" id="cover-modal-tabs">
-          <button type="button" class="filter-pill active" data-cover-tab="steam">Steam CDN (Zero-Key)</button>
-          <button type="button" class="filter-pill" data-cover-tab="sgdb">SteamGridDB &amp; .ICO</button>
+          <button type="button" class="pill filter-pill active" data-cover-tab="steam">Auto &amp; Web Covers</button>
+          <button type="button" class="pill filter-pill" data-cover-tab="sgdb">SteamGridDB &amp; .ICO</button>
         </div>
 
         <div id="cover-panel-steam" class="cover-tab-panel">
@@ -3003,8 +3006,19 @@
             <input type="text" id="input-cover-query" class="input-control" placeholder="Override cover search query..." />
             <button type="button" class="btn btn-primary btn-sm" id="btn-apply-cover-search">
               <svg class="icon" aria-hidden="true"><use href="#icon-sparkles"/></svg>
-              <span>Find Cover</span>
+              <span>Auto Match</span>
             </button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-search-web-covers">
+              <svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg>
+              <span>Search Web Covers</span>
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-pick-local-cover">
+              <svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg>
+              <span>Local Image...</span>
+            </button>
+          </div>
+          <div id="web-cover-results-container" class="sgdb-results">
+            <div class="panel-sub">Click Search Web Covers to browse candidate cover art via Steam, Libretro &amp; DoH Web Image Search, or pick a local image.</div>
           </div>
         </div>
 
@@ -3577,13 +3591,24 @@
   <!-- Duke Deck 10-Foot Controller Hint Bar -->
   <div id="duke-deck-hint-bar" class="duke-deck-hint-bar hidden" role="region" aria-label="Controller Legend">
     <div class="duke-deck-hint-left">
-      <span class="pill accent mono-num" id="couch-controller-glyph-badge">Xbox Layout</span>
+      <div class="couch-input-indicator" id="couch-input-indicator" title="Live Controller Connection & Stick Readout">
+        <span class="couch-input-dot" id="couch-input-dot"></span>
+        <span class="pill accent mono-num" id="couch-controller-glyph-badge">No Controller</span>
+        <span class="couch-mini-gimbals" aria-hidden="true">
+          <span class="couch-mini-pad"><span class="couch-mini-stick" id="couch-stick-dot-l"></span></span>
+          <span class="couch-mini-pad"><span class="couch-mini-stick" id="couch-stick-dot-r"></span></span>
+        </span>
+      </div>
       <span class="couch-glyph-item"><kbd id="glyph-btn-a">A</kbd> Select</span>
       <span class="couch-glyph-item"><kbd id="glyph-btn-b">B</kbd> Back</span>
       <span class="couch-glyph-item"><kbd id="glyph-btn-x">X</kbd> Exit Deck</span>
       <span class="couch-glyph-item"><kbd id="glyph-btn-lb">LB</kbd>/<kbd id="glyph-btn-rb">RB</kbd> Switch Tab</span>
     </div>
     <div class="duke-deck-hint-actions">
+      <button type="button" class="btn btn-secondary btn-xs" id="btn-couch-calibrate" title="Calibrate Stick Centers, Deadzone & FPV Throttle-Low Axes">
+        <svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>
+        <span>Calibrate Axes</span>
+      </button>
       <button type="button" class="btn btn-secondary btn-xs" id="btn-couch-radial">
         <svg class="icon" aria-hidden="true"><use href="#icon-compass"/></svg>
         <span>Radial Bar (Guide+LB)</span>
@@ -3596,6 +3621,55 @@
         <svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg>
         <span>Exit Couch Mode</span>
       </button>
+    </div>
+
+    <div id="couch-calibrator-popover" class="couch-calibrator-popover hidden" role="dialog" aria-label="Controller Axis Calibrator">
+      <div class="cal-pop-head">
+        <div>
+          <strong class="cal-pop-title">Controller Axis Calibrator</strong>
+          <div class="cal-pop-sub mono-num" id="cal-device-label">No USB/XInput controller active</div>
+        </div>
+        <button type="button" class="btn btn-secondary btn-xs" id="btn-cal-close" title="Close Calibrator">
+          <svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg>
+        </button>
+      </div>
+      <div class="cal-axes-list">
+        <div class="cal-axis-row">
+          <span class="cal-axis-name">CH1 / LX</span>
+          <div class="cal-axis-track"><div class="cal-axis-fill" id="cal-axis-bar-0"></div></div>
+          <span class="cal-axis-mode" id="cal-axis-mode-0">Centered</span>
+          <span class="cal-axis-val mono-num" id="cal-axis-val-0">0.00</span>
+        </div>
+        <div class="cal-axis-row">
+          <span class="cal-axis-name">CH2 / LY (Thr)</span>
+          <div class="cal-axis-track"><div class="cal-axis-fill" id="cal-axis-bar-1"></div></div>
+          <span class="cal-axis-mode" id="cal-axis-mode-1">Centered</span>
+          <span class="cal-axis-val mono-num" id="cal-axis-val-1">0.00</span>
+        </div>
+        <div class="cal-axis-row">
+          <span class="cal-axis-name">CH3 / RX</span>
+          <div class="cal-axis-track"><div class="cal-axis-fill" id="cal-axis-bar-2"></div></div>
+          <span class="cal-axis-mode" id="cal-axis-mode-2">Centered</span>
+          <span class="cal-axis-val mono-num" id="cal-axis-val-2">0.00</span>
+        </div>
+        <div class="cal-axis-row">
+          <span class="cal-axis-name">CH4 / RY</span>
+          <div class="cal-axis-track"><div class="cal-axis-fill" id="cal-axis-bar-3"></div></div>
+          <span class="cal-axis-mode" id="cal-axis-mode-3">Centered</span>
+          <span class="cal-axis-val mono-num" id="cal-axis-val-3">0.00</span>
+        </div>
+      </div>
+      <div class="cal-pop-controls">
+        <label class="cal-dz-label" for="cal-deadzone-slider">
+          <span>Deadzone</span>
+          <span class="mono-num" id="cal-deadzone-val">14%</span>
+        </label>
+        <input type="range" id="cal-deadzone-slider" min="2" max="40" step="1" value="14" />
+        <div class="cal-pop-btns">
+          <button type="button" class="btn btn-primary btn-xs" id="btn-cal-auto-center">Capture Rest / Auto-Detect</button>
+          <button type="button" class="btn btn-secondary btn-xs" id="btn-cal-reset">Reset</button>
+        </div>
+      </div>
     </div>
   </div>
 

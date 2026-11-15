@@ -907,7 +907,7 @@ pub struct PlaytimeSyncResult {
     pub games: Vec<crate::GameEntry>,
 }
 
-fn normalize_title_playtime_key(raw: &str) -> String {
+pub(crate) fn normalize_title_playtime_key(raw: &str) -> String {
     crate::clean_game_title(raw)
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -948,7 +948,7 @@ pub fn parse_steam_localconfig_playtime_vdf(vdf_text: &str) -> HashMap<u32, (u64
     out
 }
 
-fn find_steam_root_dirs() -> Vec<PathBuf> {
+pub(crate) fn find_steam_root_dirs() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(raw) = duke_core::win32_ffi::reg_read_string(false, "Software\\Valve\\Steam", "SteamPath")
         .or_else(|| {
@@ -971,7 +971,7 @@ fn find_steam_root_dirs() -> Vec<PathBuf> {
     roots
 }
 
-fn collect_steam_local_playtimes() -> HashMap<u32, (u64, Option<u64>)> {
+pub(crate) fn collect_steam_local_playtimes() -> HashMap<u32, (u64, Option<u64>)> {
     let mut merged: HashMap<u32, (u64, Option<u64>)> = HashMap::new();
     for steam_root in find_steam_root_dirs() {
         let userdata = steam_root.join("userdata");
@@ -1100,7 +1100,7 @@ pub fn read_gog_galaxy_playtime_from_db(db_path: &Path) -> Result<GogPlaytimeMap
     Ok((by_key, by_title))
 }
 
-fn collect_gog_local_playtimes() -> GogPlaytimeMaps {
+pub(crate) fn collect_gog_local_playtimes() -> GogPlaytimeMaps {
     let program_data = std::env::var("PROGRAMDATA")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -1113,7 +1113,7 @@ fn collect_gog_local_playtimes() -> GogPlaytimeMaps {
     read_gog_galaxy_playtime_from_db(&db_path).unwrap_or_default()
 }
 
-fn collect_epic_local_playtimes() -> HashMap<String, u64> {
+pub(crate) fn collect_epic_local_playtimes() -> HashMap<String, u64> {
     let mut artifact_to_title: HashMap<String, String> = HashMap::new();
     let program_data = std::env::var("PROGRAMDATA")
         .ok()
@@ -1278,7 +1278,7 @@ pub fn apply_playtimes_to_library(
             }
         }
 
-        if storefront_secs > 0 && storefront_secs != g.imported_playtime_secs {
+        if storefront_secs > g.imported_playtime_secs {
             g.imported_playtime_secs = storefront_secs;
             changed = true;
         }
