@@ -304,7 +304,13 @@ import {
   getCachedAppUpdate,
   downloadAndApplyAppUpdate,
   listenAppUpdateAvailable,
-  listenAppUpdateProgress
+  listenAppUpdateProgress,
+  getSteamMiniProfile,
+  setSteamProfileOverride,
+  getAppSystemStatus,
+  configureStartupAndTray,
+  createAppShortcutsAndRegisterProtocol,
+  exportDiagnosticsBundle
 } from "./api.js";
 
 const BOOKMARKLET_HREF =
@@ -1029,6 +1035,10 @@ function closeTopmostUiLayer() {
     closeDukePilotPopover();
     return true;
   }
+  if (isVisible("steam-mini-profile-popover")) {
+    closeSteamMiniProfilePopover(true);
+    return true;
+  }
   if (isVisible("emu-install-prompt-modal")) {
     closeEmulatorInstallModal();
     return true;
@@ -1101,6 +1111,7 @@ function switchTab(tab, keepDetail = false) {
   clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: false, resetRepeats: true });
   closeDukePilotPopover();
   closeCouchCalibratorPopover();
+  closeSteamMiniProfilePopover(false);
   if (el("catalog-genres-drawer-body")) {
     el("catalog-genres-drawer-body").classList.add("hidden");
     state.catalog.genresDrawerOpen = false;
@@ -4207,6 +4218,8 @@ function syncSettingsUiFromBackend(settings) {
   state.globalLaunchArgs = String(settings.globalLaunchArgs || "");
   state.swarmAutoSyncSaves = Boolean(settings.swarmAutoSyncSaves ?? true);
   state.startMinimizedWithWindows = Boolean(settings.startMinimizedWithWindows ?? false);
+  state.launchOnStartup = Boolean(settings.launchOnStartup ?? state.startMinimizedWithWindows);
+  state.startMinimizedToTray = Boolean(settings.startMinimizedToTray ?? state.startMinimizedWithWindows);
   state.minimizeToTray = Boolean(settings.minimizeToTray ?? false);
   state.closeToTray = Boolean(settings.closeToTray ?? false);
   state.autoCheckUpdates = Boolean(settings.autoCheckUpdates ?? true);
@@ -4278,6 +4291,12 @@ function syncSettingsUiFromBackend(settings) {
   if (el("setting-start-minimized-windows")) {
     el("setting-start-minimized-windows").checked = state.startMinimizedWithWindows;
   }
+  if (el("setting-launch-on-startup")) {
+    el("setting-launch-on-startup").checked = state.launchOnStartup;
+  }
+  if (el("setting-start-minimized-tray")) {
+    el("setting-start-minimized-tray").checked = state.startMinimizedToTray;
+  }
   if (el("setting-minimize-to-tray")) {
     el("setting-minimize-to-tray").checked = state.minimizeToTray;
   }
@@ -4294,6 +4313,9 @@ function syncSettingsUiFromBackend(settings) {
   }
   if (el("setting-steam-id-override")) {
     el("setting-steam-id-override").value = state.steamIdOverride;
+  }
+  if (el("input-steam-mini-override") && document.activeElement !== el("input-steam-mini-override")) {
+    el("input-steam-mini-override").value = state.steamIdOverride;
   }
   if (el("setting-steam-key-status")) {
     el("setting-steam-key-status").textContent = state.steamApiKeyConfigured ? "Configured" : "Not Set";
@@ -9586,6 +9608,97 @@ function wireEvents() {
     }
   });
 
+  el("setting-launch-on-startup")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const status = await configureStartupAndTray({
+        launchOnStartup: checked,
+        startMinimizedToTray: Boolean(el("setting-start-minimized-tray")?.checked)
+      });
+      state.launchOnStartup = Boolean(status?.launchOnStartup ?? checked);
+      state.startMinimizedToTray = Boolean(status?.startMinimizedToTray ?? state.startMinimizedToTray);
+      if (el("setting-launch-on-startup")) el("setting-launch-on-startup").checked = state.launchOnStartup;
+      showToast(
+        state.launchOnStartup
+          ? "Duke Launcher registered to launch automatically with Windows."
+          : "Removed Duke Launcher from Windows startup.",
+        "info",
+        2600
+      );
+    } catch (err) {
+      e.target.checked = !checked;
+      showToast(String(err), "error");
+    }
+  });
+
+  el("setting-start-minimized-tray")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const status = await configureStartupAndTray({
+        launchOnStartup: Boolean(el("setting-launch-on-startup")?.checked),
+        startMinimizedToTray: checked
+      });
+      state.launchOnStartup = Boolean(status?.launchOnStartup ?? state.launchOnStartup);
+      state.startMinimizedToTray = Boolean(status?.startMinimizedToTray ?? checked);
+      if (el("setting-launch-on-startup")) el("setting-launch-on-startup").checked = state.launchOnStartup;
+      if (el("setting-start-minimized-tray")) el("setting-start-minimized-tray").checked = state.startMinimizedToTray;
+      showToast(
+        state.startMinimizedToTray
+          ? "Duke Launcher will start minimized in the Windows system tray (--tray)."
+          : "Duke Launcher will open its main window normally on startup.",
+        "info",
+        2600
+      );
+    } catch (err) {
+      e.target.checked = !checked;
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-create-app-shortcuts")?.addEventListener("click", async () => {
+    const btn = el("btn-create-app-shortcuts");
+    const statusEl = el("settings-shortcuts-status");
+    if (btn) btn.disabled = true;
+    try {
+      const rep = await createAppShortcutsAndRegisterProtocol();
+      if (statusEl && rep?.message) {
+        statusEl.textContent = rep.message;
+        statusEl.classList.remove("hidden");
+      }
+      showToast(
+        rep?.message || "Created Desktop & Start Menu shortcuts and registered duke:// protocol.",
+        "success",
+        3400
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  el("btn-export-diagnostics-bundle")?.addEventListener("click", async () => {
+    const btn = el("btn-export-diagnostics-bundle");
+    const statusEl = el("settings-diagnostics-status");
+    if (btn) btn.disabled = true;
+    try {
+      const rep = await exportDiagnosticsBundle();
+      if (statusEl && rep?.zipPath) {
+        statusEl.textContent = `${rep.message || "Exported"}: ${rep.zipPath}`;
+        statusEl.classList.remove("hidden");
+      }
+      showToast(
+        rep?.message || "Redacted diagnostics bundle (.zip) exported.",
+        "success",
+        3800
+      );
+    } catch (err) {
+      showToast(String(err), "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
   el("setting-minimize-to-tray")?.addEventListener("change", async (e) => {
     const checked = Boolean(e.target.checked);
     try {
@@ -10321,11 +10434,16 @@ async function openCleanUninstallModalForGame(game) {
   // Multi-Platform Friends, Credentials & Playtime Sync
   el("btn-toggle-friends")?.addEventListener("click", () => toggleFriendsDrawer());
   el("btn-close-friends")?.addEventListener("click", () => toggleFriendsDrawer(false));
-  el("btn-refresh-friends")?.addEventListener("click", () => refreshFriendsPanel(false));
+  el("btn-refresh-friends")?.addEventListener("click", () => {
+    refreshFriendsPanel(false);
+    refreshSteamMiniProfile(true).catch(() => {});
+  });
   el("friends-drawer-list")?.addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-friend-action]");
     if (btn) handleFriendActionClick(btn);
   });
+
+  wireSteamMiniProfileEvents();
 
   el("btn-sync-playtime")?.addEventListener("click", runPlaytimeSyncFlow);
   el("btn-settings-sync-playtime")?.addEventListener("click", runPlaytimeSyncFlow);
@@ -10342,6 +10460,7 @@ async function openCleanUninstallModalForGame(game) {
       if (el("setting-steam-api-key")) el("setting-steam-api-key").value = "";
       showToast("Steam Web API key stored locally.", "success");
       if (state.friendsDrawerOpen) refreshFriendsPanel(true);
+      refreshSteamMiniProfile(true).catch(() => {});
     } catch (err) {
       showToast(String(err), "error");
     }
@@ -10353,6 +10472,7 @@ async function openCleanUninstallModalForGame(game) {
       syncSettingsUiFromBackend(updated);
       showToast("Steam Web API key removed.", "info");
       if (state.friendsDrawerOpen) refreshFriendsPanel(true);
+      refreshSteamMiniProfile(true).catch(() => {});
     } catch (err) {
       showToast(String(err), "error");
     }
@@ -10365,6 +10485,7 @@ async function openCleanUninstallModalForGame(game) {
       syncSettingsUiFromBackend(updated);
       showToast(val ? "SteamID64 override saved." : "SteamID64 override cleared (auto-detect active).", "success");
       if (state.friendsDrawerOpen) refreshFriendsPanel(true);
+      refreshSteamMiniProfile(true).catch(() => {});
     } catch (err) {
       showToast(String(err), "error");
     }
@@ -14670,6 +14791,32 @@ async function init() {
     .catch(() => {});
 
   refreshV22SubsystemStatuses().catch(() => {});
+  refreshSteamMiniProfile(false).catch(() => {});
+  refreshAppSystemStatusUi().catch(() => {});
+
+  listenEvent("tray-check-updates", () => {
+    switchTab("settings");
+    switchSettingsTab("essentials");
+    handleCheckForAppUpdates(true).catch(() => {});
+  }).catch(() => {});
+
+  listenEvent("duke-protocol-launch-game", (payload) => {
+    const rawTarget = String(payload?.target || "").trim();
+    if (!rawTarget) return;
+    const lowerTarget = rawTarget.toLowerCase();
+    const match = (state.library || []).find(
+      (g) =>
+        String(g.id || "").toLowerCase() === lowerTarget ||
+        String(g.steamAppId || "") === rawTarget ||
+        String(g.appId || "") === rawTarget ||
+        String(g.title || "").toLowerCase() === lowerTarget
+    );
+    if (match) {
+      launchGameById(match).catch((err) => showToast(String(err), "error"));
+    } else {
+      showToast(`No installed game matched duke://launch/${rawTarget}`, "error", 3200);
+    }
+  }).catch(() => {});
 }
 
 function renderAppUpdateReport(report) {
@@ -14688,7 +14835,7 @@ function renderAppUpdateReport(report) {
     return;
   }
 
-  const currentVer = String(report.currentVersion || "2.2.1");
+  const currentVer = String(report.currentVersion || "2.3.0");
   const latestTag = String(
     report.tagName || (report.latestVersion ? `v${report.latestVersion}` : "Unknown")
   );
@@ -14792,7 +14939,7 @@ async function handleCheckForAppUpdates(force = true) {
         3800
       );
     } else if (force) {
-      showToast(`Duke Launcher is up to date (v${report?.currentVersion || "2.2.1"}).`, "success", 2400);
+      showToast(`Duke Launcher is up to date (v${report?.currentVersion || "2.3.0"}).`, "success", 2400);
     }
     return report;
   } catch (err) {
@@ -14984,6 +15131,447 @@ async function refreshV22SubsystemStatuses() {
       el("settings-self-heal-detail").textContent =
         `${prev} · Net cache hits ${Number(n.cacheHits304 || 0)}/${Number(n.totalRequests || 0)}`;
     }
+  }
+}
+
+let steamMiniHoverOpenTimer = null;
+let steamMiniHoverCloseTimer = null;
+
+function clearSteamMiniHoverTimers() {
+  if (steamMiniHoverOpenTimer !== null) {
+    clearTimeout(steamMiniHoverOpenTimer);
+    steamMiniHoverOpenTimer = null;
+  }
+  if (steamMiniHoverCloseTimer !== null) {
+    clearTimeout(steamMiniHoverCloseTimer);
+    steamMiniHoverCloseTimer = null;
+  }
+}
+
+function openSteamMiniProfilePopover(triggeredByKeyboardOrButton = false) {
+  clearSteamMiniHoverTimers();
+  const pop = el("steam-mini-profile-popover");
+  const btn = el("btn-titlebar-steam-profile");
+  if (!pop) return;
+  const wasHidden = pop.classList.contains("hidden");
+  pop.classList.remove("hidden");
+  if (btn) btn.setAttribute("aria-expanded", "true");
+  if (wasHidden && !state.steamMiniProfile && !state.steamMiniProfileLoading) {
+    refreshSteamMiniProfile(false).catch(() => {});
+  }
+  if (triggeredByKeyboardOrButton) {
+    el("btn-steam-mini-open-steam")?.focus();
+  }
+}
+
+function closeSteamMiniProfilePopover(restoreFocus = false) {
+  clearSteamMiniHoverTimers();
+  const pop = el("steam-mini-profile-popover");
+  const btn = el("btn-titlebar-steam-profile");
+  if (!pop || pop.classList.contains("hidden")) return;
+  pop.classList.add("hidden");
+  if (btn) btn.setAttribute("aria-expanded", "false");
+  clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
+  if (restoreFocus && btn) {
+    btn.focus();
+  }
+}
+
+function wireSteamMiniProfileEvents() {
+  const anchor = el("steam-mini-profile-anchor");
+  const pillBtn = el("btn-titlebar-steam-profile");
+  const pop = el("steam-mini-profile-popover");
+  if (!anchor || !pillBtn || !pop) return;
+
+  const scheduleHoverOpen = () => {
+    if (steamMiniHoverCloseTimer !== null) {
+      clearTimeout(steamMiniHoverCloseTimer);
+      steamMiniHoverCloseTimer = null;
+    }
+    if (!pop.classList.contains("hidden") || steamMiniHoverOpenTimer !== null) return;
+    steamMiniHoverOpenTimer = setTimeout(() => {
+      steamMiniHoverOpenTimer = null;
+      openSteamMiniProfilePopover(false);
+    }, 250);
+  };
+
+  const scheduleHoverClose = () => {
+    if (steamMiniHoverOpenTimer !== null) {
+      clearTimeout(steamMiniHoverOpenTimer);
+      steamMiniHoverOpenTimer = null;
+    }
+    if (pop.classList.contains("hidden")) return;
+    if (document.activeElement && pop.contains(document.activeElement) && document.activeElement.tagName === "INPUT") {
+      return;
+    }
+    if (steamMiniHoverCloseTimer !== null) {
+      clearTimeout(steamMiniHoverCloseTimer);
+    }
+    steamMiniHoverCloseTimer = setTimeout(() => {
+      steamMiniHoverCloseTimer = null;
+      closeSteamMiniProfilePopover(false);
+    }, 300);
+  };
+
+  pillBtn.addEventListener("mouseenter", scheduleHoverOpen);
+  pillBtn.addEventListener("mouseleave", scheduleHoverClose);
+  pop.addEventListener("mouseenter", () => {
+    if (steamMiniHoverCloseTimer !== null) {
+      clearTimeout(steamMiniHoverCloseTimer);
+      steamMiniHoverCloseTimer = null;
+    }
+  });
+  pop.addEventListener("mouseleave", scheduleHoverClose);
+
+  pillBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (pop.classList.contains("hidden")) {
+      openSteamMiniProfilePopover(false);
+    } else {
+      closeSteamMiniProfilePopover(false);
+    }
+  });
+
+  document.addEventListener("pointerdown", (e) => {
+    if (pop.classList.contains("hidden")) return;
+    const bannerBtn = el("btn-friends-banner-open-card");
+    if (anchor.contains(e.target) || (bannerBtn && bannerBtn.contains(e.target))) return;
+    closeSteamMiniProfilePopover(false);
+  });
+
+  el("btn-steam-mini-refresh")?.addEventListener("click", () => {
+    refreshSteamMiniProfile(true).catch((err) => showToast(String(err), "error"));
+  });
+
+  el("btn-steam-mini-toggle-preview")?.addEventListener("click", () => {
+    const bar = el("steam-mini-preview-form");
+    if (!bar) return;
+    const nextHidden = !bar.classList.contains("hidden");
+    bar.classList.toggle("hidden", nextHidden);
+    if (!nextHidden) {
+      const inp = el("input-steam-mini-override");
+      if (inp) {
+        if (!inp.value && state.steamIdOverride) inp.value = state.steamIdOverride;
+        inp.focus();
+      }
+    }
+  });
+
+  el("btn-steam-mini-apply-override")?.addEventListener("click", () => {
+    const val = (el("input-steam-mini-override")?.value || "").trim();
+    handleApplySteamMiniOverride(val);
+  });
+
+  el("input-steam-mini-override")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const val = (el("input-steam-mini-override")?.value || "").trim();
+      handleApplySteamMiniOverride(val);
+    }
+  });
+
+  el("btn-steam-mini-reset-override")?.addEventListener("click", () => {
+    if (el("input-steam-mini-override")) el("input-steam-mini-override").value = "";
+    handleApplySteamMiniOverride("");
+  });
+
+  el("btn-steam-mini-open-steam")?.addEventListener("click", () => {
+    const url = state.steamMiniProfile?.profileUrl || "https://steamcommunity.com";
+    openExternalUrl(url);
+  });
+
+  el("btn-friends-banner-open-card")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openSteamMiniProfilePopover(true);
+  });
+}
+
+async function handleApplySteamMiniOverride(rawTarget) {
+  const cleaned = String(rawTarget || "").trim();
+  try {
+    state.steamIdOverride = cleaned;
+    if (el("setting-steam-id-override")) el("setting-steam-id-override").value = cleaned;
+    if (el("input-steam-mini-override")) el("input-steam-mini-override").value = cleaned;
+    const prof = await setSteamProfileOverride(cleaned);
+    if (prof) {
+      renderSteamMiniProfileUi(prof);
+    }
+    showToast(
+      cleaned
+        ? `Previewing public Steam profile: ${prof?.personaName || cleaned}`
+        : "Restored auto-detected local Steam profile.",
+      "info",
+      2600
+    );
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+async function refreshSteamMiniProfile(forceRefresh = false) {
+  if (state.steamMiniProfileLoading) return state.steamMiniProfile || null;
+  state.steamMiniProfileLoading = true;
+  const refreshBtn = el("btn-steam-mini-refresh");
+  if (refreshBtn) refreshBtn.disabled = true;
+  try {
+    const overrideTarget = (el("input-steam-mini-override")?.value || state.steamIdOverride || "").trim() || null;
+    const prof = await getSteamMiniProfile({
+      overrideTarget,
+      forceRefresh: Boolean(forceRefresh)
+    });
+    if (prof) {
+      renderSteamMiniProfileUi(prof);
+    }
+    return prof;
+  } catch {
+    return state.steamMiniProfile || null;
+  } finally {
+    state.steamMiniProfileLoading = false;
+    if (refreshBtn) refreshBtn.disabled = false;
+  }
+}
+
+function renderSteamMiniProfileUi(prof) {
+  if (!prof) return;
+  state.steamMiniProfile = prof;
+
+  const persona = String(prof.personaName || "Steam User");
+  const statusKind = String(prof.onlineState || "offline").toLowerCase();
+  const dotClass =
+    statusKind === "in-game" ? "in-game" : statusKind === "online" ? "online" : "offline";
+  const avatarSrc = String(
+    prof.cosmetics?.animatedAvatarUrl || prof.avatarFullUrl || prof.avatarMediumUrl || ""
+  ).trim();
+  const frameSrc = String(prof.cosmetics?.avatarFrameUrl || "").trim();
+  const bgSrc = String(prof.cosmetics?.profileBackgroundUrl || "").trim();
+  const statusMsg = prof.inGameTitle
+    ? `Playing ${prof.inGameTitle}`
+    : String(prof.stateMessage || (statusKind === "online" ? "Online" : "Offline"));
+
+  // 1. Titlebar Avatar Pill
+  const tbImg = el("titlebar-steam-avatar-img");
+  const tbFallback = el("titlebar-steam-avatar-fallback");
+  const tbDot = el("titlebar-steam-status-dot");
+  const tbName = el("titlebar-steam-name-label");
+  if (tbName) tbName.textContent = persona;
+  if (tbDot) tbDot.className = `titlebar-steam-status-dot ${dotClass}`;
+  if (tbImg && tbFallback) {
+    if (avatarSrc && isValidHttpUrl(avatarSrc)) {
+      tbImg.src = avatarSrc;
+      tbImg.classList.remove("hidden");
+      tbFallback.classList.add("hidden");
+    } else {
+      tbImg.removeAttribute("src");
+      tbImg.classList.add("hidden");
+      tbFallback.classList.remove("hidden");
+    }
+  }
+
+  // 2. Hover Mini-Profile Card
+  const bgEl = el("steam-mini-bg");
+  if (bgEl) {
+    if (bgSrc && isValidHttpUrl(bgSrc)) {
+      bgEl.style.backgroundImage = `url(${encodeURI(bgSrc)})`;
+    } else {
+      bgEl.style.backgroundImage = "";
+    }
+  }
+
+  const cardImg = el("steam-mini-avatar-img");
+  const cardPlaceholder = el("steam-mini-avatar-placeholder");
+  if (cardImg && cardPlaceholder) {
+    if (avatarSrc && isValidHttpUrl(avatarSrc)) {
+      cardImg.src = avatarSrc;
+      cardImg.classList.remove("hidden");
+      cardPlaceholder.classList.add("hidden");
+    } else {
+      cardImg.removeAttribute("src");
+      cardImg.classList.add("hidden");
+      cardPlaceholder.classList.remove("hidden");
+    }
+  }
+
+  const frameImg = el("steam-mini-frame-img");
+  if (frameImg) {
+    if (frameSrc && isValidHttpUrl(frameSrc)) {
+      frameImg.src = frameSrc;
+      frameImg.classList.remove("hidden");
+    } else {
+      frameImg.removeAttribute("src");
+      frameImg.classList.add("hidden");
+    }
+  }
+
+  const cardDot = el("steam-mini-status-dot");
+  if (cardDot) cardDot.className = `steam-mini-status-dot ${dotClass}`;
+
+  const personaEl = el("steam-mini-persona");
+  if (personaEl) personaEl.textContent = persona;
+
+  const levelEl = el("steam-mini-level-badge");
+  if (levelEl) {
+    if (typeof prof.steamLevel === "number" && prof.steamLevel >= 0) {
+      levelEl.textContent = `Lv. ${prof.steamLevel}`;
+      levelEl.classList.remove("hidden");
+    } else {
+      levelEl.classList.add("hidden");
+    }
+  }
+
+  const statusPillEl = el("steam-mini-status-pill");
+  if (statusPillEl) {
+    statusPillEl.textContent = statusMsg;
+    statusPillEl.className = `pill mono-num ${
+      dotClass === "in-game" ? "emerald" : dotClass === "online" ? "accent" : ""
+    }`;
+  }
+
+  const visBadge = el("steam-mini-visibility-badge");
+  if (visBadge) {
+    const isPublic = String(prof.privacyState || "public").toLowerCase() === "public";
+    visBadge.textContent = prof.visibilityLabel || (isPublic ? "What Strangers See: Public" : "What Strangers See: Friends Only / Private");
+    visBadge.className = `pill mono-num ${isPublic ? "emerald" : "amber"}`;
+  }
+
+  const metaEl = el("steam-mini-meta");
+  if (metaEl) {
+    const parts = [];
+    if (prof.steamId64) parts.push(`ID: ${prof.steamId64}`);
+    if (prof.memberSince) parts.push(`Since ${prof.memberSince}`);
+    if (prof.location) parts.push(prof.location);
+    metaEl.textContent = parts.join(" · ");
+    metaEl.classList.toggle("hidden", parts.length === 0);
+  }
+
+  const bioEl = el("steam-mini-bio");
+  if (bioEl) {
+    const summary = String(prof.summaryText || "").trim();
+    if (summary) {
+      bioEl.textContent = summary;
+      bioEl.classList.remove("hidden");
+    } else if (prof.offlineFallback && prof.errorMessage) {
+      bioEl.textContent = prof.errorMessage;
+      bioEl.classList.remove("hidden");
+    } else {
+      bioEl.textContent = "No public Steam bio set.";
+      bioEl.classList.remove("hidden");
+    }
+  }
+
+  const srcBadge = el("steam-mini-source-badge");
+  if (srcBadge) {
+    if (prof.offlineFallback) {
+      srcBadge.textContent = prof.fromCache ? "Offline Cache" : "Offline";
+    } else if (prof.webApiEnriched) {
+      srcBadge.textContent = "XML + Web API Cosmetics";
+    } else {
+      srcBadge.textContent = "Zero-Key Public XML";
+    }
+  }
+
+  const showcaseEl = el("steam-mini-showcase-list");
+  if (showcaseEl) {
+    const games = Array.isArray(prof.showcaseGames) ? prof.showcaseGames.slice(0, 3) : [];
+    if (games.length === 0) {
+      const msg =
+        String(prof.privacyState || "public").toLowerCase() !== "public"
+          ? "Game details are hidden by this profile's Steam privacy settings."
+          : "No recent showcase games listed on public Steam Community feed.";
+      showcaseEl.innerHTML = `<div class="muted small">${escapeHtml(msg)}</div>`;
+    } else {
+      showcaseEl.innerHTML = games
+        .map((g) => {
+          const hrsTotal = Number(g.hoursOnRecord || 0);
+          const hrsRecent = Number(g.hoursLast2Weeks || 0);
+          const hrsText =
+            hrsRecent > 0
+              ? `${hrsRecent.toFixed(1)}h past 2w · ${hrsTotal.toFixed(1)}h total`
+              : `${hrsTotal.toFixed(1)}h on record`;
+          const art = String(g.headerImageUrl || g.iconUrl || "").trim();
+          const thumbHtml =
+            art && isValidHttpUrl(art)
+              ? `<img class="steam-mini-showcase-thumb" src="${escapeHtml(art)}" alt="" loading="lazy" />`
+              : `<div class="steam-mini-showcase-thumb"></div>`;
+          const linkUrl = String(g.storeLink || `https://store.steampowered.com/app/${Number(g.appId || 0)}`);
+          return `
+            <div class="steam-mini-showcase-card" data-steam-store-url="${escapeHtml(linkUrl)}">
+              ${thumbHtml}
+              <div class="steam-mini-showcase-info">
+                <div class="steam-mini-showcase-title">${escapeHtml(g.title || "Steam Game")}</div>
+                <div class="steam-mini-showcase-hours mono-num">${escapeHtml(hrsText)}</div>
+              </div>
+            </div>
+          `;
+        })
+        .join("");
+      showcaseEl.querySelectorAll("[data-steam-store-url]").forEach((row) => {
+        row.style.cursor = "pointer";
+        row.addEventListener("click", () => {
+          const u = row.getAttribute("data-steam-store-url");
+          if (u) openExternalUrl(u);
+        });
+      });
+    }
+  }
+
+  // 3. Friends Drawer Banner
+  const bannerEl = el("friends-drawer-steam-banner");
+  if (bannerEl) {
+    bannerEl.classList.remove("hidden");
+    const fbImg = el("friends-banner-avatar");
+    const fbFallback = el("friends-banner-avatar-fallback");
+    const fbFrame = el("friends-banner-frame");
+    const fbDot = el("friends-banner-status-dot");
+    const fbPersona = el("friends-banner-persona");
+    const fbLevel = el("friends-banner-level");
+    const fbStatus = el("friends-banner-status-text");
+
+    if (fbPersona) fbPersona.textContent = persona;
+    if (fbDot) fbDot.className = `steam-mini-status-dot ${dotClass}`;
+    if (fbStatus) fbStatus.textContent = `${statusMsg} · ${prof.visibilityLabel || "Public View"}`;
+    if (fbLevel) {
+      if (typeof prof.steamLevel === "number" && prof.steamLevel >= 0) {
+        fbLevel.textContent = `Lv. ${prof.steamLevel}`;
+        fbLevel.classList.remove("hidden");
+      } else {
+        fbLevel.classList.add("hidden");
+      }
+    }
+    if (fbImg && fbFallback) {
+      if (avatarSrc && isValidHttpUrl(avatarSrc)) {
+        fbImg.src = avatarSrc;
+        fbImg.classList.remove("hidden");
+        fbFallback.classList.add("hidden");
+      } else {
+        fbImg.removeAttribute("src");
+        fbImg.classList.add("hidden");
+        fbFallback.classList.remove("hidden");
+      }
+    }
+    if (fbFrame) {
+      if (frameSrc && isValidHttpUrl(frameSrc)) {
+        fbFrame.src = frameSrc;
+        fbFrame.classList.remove("hidden");
+      } else {
+        fbFrame.removeAttribute("src");
+        fbFrame.classList.add("hidden");
+      }
+    }
+  }
+}
+
+async function refreshAppSystemStatusUi() {
+  try {
+    const st = await getAppSystemStatus();
+    if (!st) return;
+    state.launchOnStartup = Boolean(st.launchOnStartup);
+    state.startMinimizedToTray = Boolean(st.startMinimizedToTray);
+    if (el("setting-launch-on-startup")) el("setting-launch-on-startup").checked = state.launchOnStartup;
+    if (el("setting-start-minimized-tray")) el("setting-start-minimized-tray").checked = state.startMinimizedToTray;
+    if (el("setting-minimize-to-tray")) el("setting-minimize-to-tray").checked = Boolean(st.minimizeToTray);
+    if (el("setting-close-to-tray")) el("setting-close-to-tray").checked = Boolean(st.closeToTray);
+  } catch {
+    // Non-blocking status sync
   }
 }
 

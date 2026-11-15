@@ -144,7 +144,11 @@ export async function updateLauncherSettings(patch = {}) {
     closeToTray:
       typeof patch.closeToTray === "boolean" ? patch.closeToTray : null,
     autoCheckUpdates:
-      typeof patch.autoCheckUpdates === "boolean" ? patch.autoCheckUpdates : null
+      typeof patch.autoCheckUpdates === "boolean" ? patch.autoCheckUpdates : null,
+    launchOnStartup:
+      typeof patch.launchOnStartup === "boolean" ? patch.launchOnStartup : null,
+    startMinimizedToTray:
+      typeof patch.startMinimizedToTray === "boolean" ? patch.startMinimizedToTray : null
   });
 }
 
@@ -534,13 +538,13 @@ export function initWindowControls({ onCtrlK } = {}) {
   closeBtn?.addEventListener("click", () => win?.close?.().catch(() => {}));
 
   titlebar?.addEventListener("dblclick", (e) => {
-    if (e.target.closest("button, input, select, a, .titlebar-search-wrap")) return;
+    if (e.target.closest("button, input, select, a, .titlebar-search-wrap, .steam-mini-profile-anchor")) return;
     win?.toggleMaximize?.().catch(() => {});
   });
 
   titlebar?.addEventListener("mousedown", (e) => {
     if (e.button !== 0 || e.detail > 1) return;
-    if (e.target.closest("button, input, select, a, .titlebar-search-wrap")) return;
+    if (e.target.closest("button, input, select, a, .titlebar-search-wrap, .steam-mini-profile-anchor")) return;
     if (e.target.hasAttribute("data-tauri-drag-region")) return;
     win?.startDragging?.().catch(() => {});
   });
@@ -2258,4 +2262,48 @@ export function listenAppUpdateAvailable(callback) {
 
 export function listenAppUpdateProgress(callback) {
   return listenEvent("app-update-progress", callback);
+}
+
+export async function getSteamMiniProfile(targetOverride = null, forceRefresh = false) {
+  return invokeCommand("get_steam_mini_profile", {
+    targetOverride:
+      typeof targetOverride === "string" && targetOverride.trim()
+        ? targetOverride.trim()
+        : null,
+    forceRefresh: Boolean(forceRefresh)
+  });
+}
+
+export async function setSteamProfileOverride(targetOverride = null) {
+  return invokeCommand("set_steam_profile_override", {
+    targetOverride:
+      typeof targetOverride === "string" ? targetOverride.trim() : ""
+  });
+}
+
+export async function getAppSystemStatus() {
+  return invokeCommand("get_app_system_status");
+}
+
+export async function configureStartupAndTray({
+  launchOnStartup = null,
+  startMinimizedToTray = null,
+  minimizeToTray = null,
+  closeToTray = null
+} = {}) {
+  return invokeCommand("configure_startup_and_tray", {
+    launchOnStartup: typeof launchOnStartup === "boolean" ? launchOnStartup : null,
+    startMinimizedToTray:
+      typeof startMinimizedToTray === "boolean" ? startMinimizedToTray : null,
+    minimizeToTray: typeof minimizeToTray === "boolean" ? minimizeToTray : null,
+    closeToTray: typeof closeToTray === "boolean" ? closeToTray : null
+  });
+}
+
+export async function createAppShortcutsAndRegisterProtocol() {
+  return invokeCommand("create_app_shortcuts_and_register_protocol");
+}
+
+export async function exportDiagnosticsBundle() {
+  return invokeCommand("export_diagnostics_bundle");
 }

@@ -1,5 +1,5 @@
 /**
- * True Virtual-Viewport Grid Recycler for Duke Launcher v2.2.0.
+ * True Virtual-Viewport Grid Recycler for Duke Launcher v2.3.0.
  *
  * Keeps live DOM card nodes capped at ~60 (visible rows + overscan buffer)
  * across both My Games and Search Games (25,000+ catalog titles) and across
@@ -186,6 +186,9 @@ export class VirtualCardGrid {
     }
 
     if (totalCount === 0) {
+      if (this._emptyMessageActive) {
+        return;
+      }
       this.clear();
       return;
     }
@@ -197,15 +200,20 @@ export class VirtualCardGrid {
     const metrics = this._computeMetrics(containerWidth);
     const { cols, gap, layoutKey, rowStride } = metrics;
 
-    const totalRows = Math.ceil(totalCount / cols);
-    const totalHeight = Math.max(0, totalRows * rowStride - gap);
+    const totalRows = Math.max(1, Math.ceil(totalCount / cols));
+    const totalHeight = Math.max(metrics.cardHeight, totalRows * rowStride - gap);
     this.gridEl.style.height = `${totalHeight}px`;
     windowEl.style.setProperty("--vgrid-cols", String(cols));
     windowEl.style.setProperty("--vgrid-gap", `${gap}px`);
 
     const viewportHeight = this.scrollerEl.clientHeight || window.innerHeight || 720;
-    const scrollTop = this.scrollerEl.scrollTop || 0;
     const gridTop = this._getGridTopOffsetInScroller();
+    let scrollTop = this.scrollerEl.scrollTop || 0;
+    const maxValidScrollTop = Math.max(0, gridTop + totalHeight - Math.min(viewportHeight, totalHeight));
+    if (scrollTop > maxValidScrollTop + rowStride) {
+      scrollTop = maxValidScrollTop;
+      this.scrollerEl.scrollTop = scrollTop;
+    }
     const relTop = Math.max(0, scrollTop - gridTop);
     const relBottom = Math.max(0, scrollTop + viewportHeight - gridTop);
 
@@ -249,6 +257,7 @@ export class VirtualCardGrid {
 
     for (let idx = startIndex; idx <= endIndex; idx += 1) {
       const item = this.getItem(idx);
+      if (!item) continue;
       let cardEl = this._mounted.get(idx);
       const isNew = !cardEl;
       if (isNew) {

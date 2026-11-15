@@ -73,6 +73,8 @@ mod save_watcher;
 mod desktop_chord;
 mod redist_cleaner;
 mod updater;
+mod app_system;
+mod steam_profile;
 
 mod cmd_emulators;
 mod cmd_library;
@@ -149,8 +151,13 @@ fn main() {
     if !allow_multi_instance && !win32_clipboard_protocol::acquire_single_instance_or_forward(&raw_args) {
         return;
     }
+    let initial_protocol_routes: Vec<app_system::DukeProtocolRoute> = raw_args
+        .iter()
+        .filter_map(|arg| app_system::parse_duke_protocol_route(arg))
+        .collect();
     let initial_protocol_urls: Vec<String> = raw_args
         .iter()
+        .filter(|arg| app_system::parse_duke_protocol_route(arg).is_none())
         .filter_map(|arg| parse_duke_protocol_download_url(arg))
         .collect();
 
@@ -162,7 +169,7 @@ fn main() {
             tooltip: "Duke Launcher (Zero-RAM Tray Daemon)".to_string(),
             open_label: "Open Duke Launcher".to_string(),
             trim_label: "Trim RAM Now".to_string(),
-            exit_label: "Exit Duke Launcher".to_string(),
+            exit_label: "Quit Duke Launcher".to_string(),
             close_to_tray: Arc::new(AtomicBool::new(false)),
             minimize_to_tray: Arc::new(AtomicBool::new(false)),
         },
@@ -184,21 +191,15 @@ fn main() {
             let on_exit_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
                 shutdown_all_runtime_services(&exit_app);
             });
-            let _ = duke_core::tray_daemon::install_standard_tray(
+            let _ = app_system::install_full_launcher_tray(
                 app.handle(),
                 &daemon_for_setup,
-                None,
-                Some(on_exit_cb),
+                on_exit_cb,
             );
-            if let Some(tray) = app.tray_by_id("duke-launcher-tray") {
-                if let Ok(dyn_img) = image::load_from_memory(include_bytes!("../icons/32x32.png")) {
-                    let rgba = dyn_img.to_rgba8();
-                    let (w, h) = rgba.dimensions();
-                    let tray_img = tauri::image::Image::new_owned(rgba.into_raw(), w, h);
-                    let _ = tray.set_icon(Some(tray_img));
-                }
-            }
 
+            for route in &initial_protocol_routes {
+                app_system::dispatch_duke_protocol_route(app.handle(), route.clone());
+            }
             for initial_url in &initial_protocol_urls {
                 enqueue_protocol_download_url(
                     app.handle().clone(),
@@ -261,13 +262,14 @@ fn main() {
                 initial_settings.couch_mode = true;
             }
             apply_runtime_settings(&initial_settings);
+            app_system::restore_saved_window_geometry_on_boot(app.handle(), &initial_settings);
             fse_shell::apply_fse_boot_sequence_if_enabled(app.handle());
 
             if let Some(overlay) = app.get_webview_window("overlay") {
                 let _ = overlay.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
             }
 
-            if std::env::args().any(|a| a == "--minimized") {
+            if std::env::args().any(|a| a == "--minimized" || a == "--tray") {
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.minimize();
                     let _ = win.hide();
@@ -593,6 +595,12 @@ fn main() {
             cmd_system::stop_save_watcher,
             cmd_system::get_desktop_chord_status,
             cmd_system::set_desktop_chord_enabled,
+            cmd_library::get_steam_mini_profile,
+            cmd_library::set_steam_profile_override,
+            cmd_system::get_app_system_status,
+            cmd_system::configure_startup_and_tray,
+            cmd_system::create_app_shortcuts_and_register_protocol,
+            cmd_system::export_diagnostics_bundle,
             stress_harness::run_chaos_stress_harness
         ])
         .build(tauri::generate_context!())
@@ -621,17 +629,18 @@ fn main() {
                 }
                 return;
             }
-            if label == "main"
-                && !daemon_state.config.close_to_tray.load(Ordering::Relaxed)
-            {
-                daemon_state.app_exiting.store(true, Ordering::Release);
-                APP_SHUTDOWN.store(true, Ordering::Release);
-                shutdown_all_runtime_services(app_handle);
-                if let Some(overlay_win) = app_handle.get_webview_window("overlay") {
-                    let _ = overlay_win.destroy();
+            if label == "main" {
+                app_system::capture_and_save_window_geometry(app_handle);
+                if !daemon_state.config.close_to_tray.load(Ordering::Relaxed) {
+                    daemon_state.app_exiting.store(true, Ordering::Release);
+                    APP_SHUTDOWN.store(true, Ordering::Release);
+                    shutdown_all_runtime_services(app_handle);
+                    if let Some(overlay_win) = app_handle.get_webview_window("overlay") {
+                        let _ = overlay_win.destroy();
+                    }
+                    app_handle.exit(0);
+                    return;
                 }
-                app_handle.exit(0);
-                return;
             }
         }
         let exit_cb = || {

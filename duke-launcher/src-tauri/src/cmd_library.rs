@@ -26,7 +26,7 @@ use tauri_plugin_dialog::DialogExt;
 use tokio::sync::{oneshot, Semaphore};
 use walkdir::WalkDir;
 use crate::{
-    achievements, archive_native, artwork, bench, bios_vault, catalog_mmap, couch_mode,
+    achievements, app_system, archive_native, artwork, bench, bios_vault, catalog_mmap, couch_mode,
     deep_shrink, delta_patch, desktop_chord, direct_storage, discord_ipc, dkpack, duke_acoustics,
     duke_ai_rt,
     duke_capsule, duke_comms, duke_configurator, duke_director, duke_doctor, duke_ghost,
@@ -35,8 +35,9 @@ use crate::{
     ludusavi, mcp, metadata_ext, mod_dropper, mod_graph, net_engine, ntfs_compress, pe_inspect,
     platforms, playtime_sync, privacy_vault, projfs_stream, quick_resume, redist_cleaner,
     retro_achievements, retro_catalog, rom_inspect, rom_patcher, rom_shrink, save_watcher,
-    self_heal, shader_swarm, sidebar_icons, sites, snapshots, sources, steam_cm, store_direct,
-    stream_extract, stress_harness, swarm, time_machine, uninstaller, vhdx_stage, wasm_plugins,
+    self_heal, shader_swarm, sidebar_icons, sites, snapshots, sources, steam_cm, steam_profile,
+    store_direct, stream_extract, stress_harness, swarm, time_machine, uninstaller, vhdx_stage,
+    wasm_plugins,
 };
 use crate::cmd_emulators::*;
 use crate::cmd_security::*;
@@ -5289,4 +5290,36 @@ pub(crate) async fn scan_and_clean_desktop_shortcuts(app: AppHandle) -> Result<D
         library,
     })
 }
+
+#[tauri::command]
+pub(crate) async fn get_steam_mini_profile(
+    target_override: Option<String>,
+    force_refresh: Option<bool>,
+) -> Result<crate::steam_profile::SteamMiniProfile, String> {
+    crate::steam_profile::resolve_steam_mini_profile(
+        target_override,
+        force_refresh.unwrap_or(false),
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn set_steam_profile_override(
+    app: AppHandle,
+    target_override: Option<String>,
+) -> Result<crate::steam_profile::SteamMiniProfile, String> {
+    let clean = target_override
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let app_for_save = app.clone();
+    let clean_for_save = clean.clone();
+    let _ = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let mut settings = load_settings_from_disk(&app_for_save);
+        settings.steam_id_override = clean_for_save;
+        save_settings_to_disk(&app_for_save, &settings)
+    })
+    .await;
+    crate::steam_profile::resolve_steam_mini_profile(clean, true).await
+}
+
 

@@ -26,7 +26,7 @@ use tauri_plugin_dialog::DialogExt;
 use tokio::sync::{oneshot, Semaphore};
 use walkdir::WalkDir;
 use crate::{
-    achievements, archive_native, artwork, bench, bios_vault, catalog_mmap, couch_mode,
+    achievements, app_system, archive_native, artwork, bench, bios_vault, catalog_mmap, couch_mode,
     deep_shrink, delta_patch, desktop_chord, direct_storage, discord_ipc, dkpack, duke_acoustics,
     duke_ai_rt,
     duke_capsule, duke_comms, duke_configurator, duke_director, duke_doctor, duke_ghost,
@@ -35,9 +35,9 @@ use crate::{
     ludusavi, mcp, metadata_ext, mod_dropper, mod_graph, net_engine, ntfs_compress, pe_inspect,
     platforms, playtime_sync, privacy_vault, projfs_stream, quick_resume, redist_cleaner,
     retro_achievements, retro_catalog, rom_inspect, rom_patcher, rom_shrink, save_watcher,
-    self_heal, shader_swarm, sidebar_icons, sites, snapshots, sources, steam_cm, store_direct,
-    stream_extract, stress_harness, swarm, time_machine, uninstaller, updater, vhdx_stage,
-    wasm_plugins,
+    self_heal, shader_swarm, sidebar_icons, sites, snapshots, sources, steam_cm, steam_profile,
+    store_direct, stream_extract, stress_harness, swarm, time_machine, uninstaller, updater,
+    vhdx_stage, wasm_plugins,
 };
 use crate::cmd_emulators::*;
 use crate::cmd_library::*;
@@ -429,6 +429,20 @@ pub struct LauncherSettings {
     pub close_to_tray: bool,
     #[serde(default = "default_true", alias = "autoCheckUpdates", alias = "auto_check_updates")]
     pub auto_check_updates: bool,
+    #[serde(default, alias = "launchOnStartup", alias = "launch_on_startup")]
+    pub launch_on_startup: bool,
+    #[serde(default, alias = "startMinimizedToTray", alias = "start_minimized_to_tray")]
+    pub start_minimized_to_tray: bool,
+    #[serde(default, alias = "windowWidth", alias = "window_width")]
+    pub window_width: Option<u32>,
+    #[serde(default, alias = "windowHeight", alias = "window_height")]
+    pub window_height: Option<u32>,
+    #[serde(default, alias = "windowX", alias = "window_x")]
+    pub window_x: Option<i32>,
+    #[serde(default, alias = "windowY", alias = "window_y")]
+    pub window_y: Option<i32>,
+    #[serde(default, alias = "windowMaximized", alias = "window_maximized")]
+    pub window_maximized: bool,
 }
 
 pub(crate) fn default_disk_pressure_gb() -> f64 {
@@ -575,6 +589,13 @@ impl Default for LauncherSettings {
             minimize_to_tray: false,
             close_to_tray: false,
             auto_check_updates: true,
+            launch_on_startup: false,
+            start_minimized_to_tray: false,
+            window_width: None,
+            window_height: None,
+            window_x: None,
+            window_y: None,
+            window_maximized: false,
         }
     }
 }
@@ -767,6 +788,8 @@ pub(crate) async fn update_launcher_settings(
     minimize_to_tray: Option<bool>,
     close_to_tray: Option<bool>,
     auto_check_updates: Option<bool>,
+    launch_on_startup: Option<bool>,
+    start_minimized_to_tray: Option<bool>,
 ) -> Result<LauncherSettings, String> {
     let app_for_save = app.clone();
     let autostart_change = start_minimized_with_windows;
@@ -976,6 +999,22 @@ pub(crate) async fn update_launcher_settings(
         }
         if let Some(auto_chk) = auto_check_updates {
             current.auto_check_updates = auto_chk;
+        }
+        let mut startup_dirty = false;
+        if let Some(launch_startup) = launch_on_startup {
+            current.launch_on_startup = launch_startup;
+            startup_dirty = true;
+        }
+        if let Some(start_tray) = start_minimized_to_tray {
+            current.start_minimized_to_tray = start_tray;
+            current.start_minimized_with_windows = start_tray && current.launch_on_startup;
+            startup_dirty = true;
+        }
+        if startup_dirty {
+            app_system::apply_windows_startup_registration(
+                current.launch_on_startup,
+                current.start_minimized_to_tray,
+            )?;
         }
 
         save_settings_to_disk(&app_for_save, &current)?;
@@ -1333,10 +1372,16 @@ pub(crate) mod win32_clipboard_protocol {
         let command_line = format!("\"{}\" \"%1\"", exe_str);
         let icon_value = format!("\"{}\",0", exe_str);
 
-        let _ = reg_write_hkcu_sz(r"Software\Classes\duke", None, "URL:Duke Launcher Protocol");
+        let _ = reg_write_hkcu_sz(r"Software\Classes\duke", None, "URL:Duke Protocol");
         let _ = reg_write_hkcu_sz(r"Software\Classes\duke", Some("URL Protocol"), "");
         let _ = reg_write_hkcu_sz(r"Software\Classes\duke\DefaultIcon", None, &icon_value);
         let _ = reg_write_hkcu_sz(r"Software\Classes\duke\shell\open\command", None, &command_line);
+    }
+
+    pub fn set_windows_autostart_command(cmd: &str) -> Result<(), String> {
+        let subkey = r"Software\Microsoft\Windows\CurrentVersion\Run";
+        let value_name = "DukeLauncher";
+        reg_write_hkcu_sz(subkey, Some(value_name), cmd)
     }
 
     pub fn set_windows_autostart_minimized(enable: bool) -> Result<(), String> {
@@ -1393,7 +1438,9 @@ pub(crate) mod win32_clipboard_protocol {
 
         let mut payload = String::from("FOCUS\n");
         for arg in raw_args {
-            if super::parse_duke_protocol_download_url(arg).is_some() {
+            if crate::app_system::parse_duke_protocol_route(arg).is_some()
+                || super::parse_duke_protocol_download_url(arg).is_some()
+            {
                 payload.push_str("URI:");
                 payload.push_str(arg.trim());
                 payload.push('\n');
@@ -1477,7 +1524,12 @@ pub(crate) mod win32_clipboard_protocol {
                     if line == "FOCUS" {
                         requested_focus = true;
                     } else if let Some(uri) = line.strip_prefix("URI:") {
-                        if let Some(download_url) = super::parse_duke_protocol_download_url(uri) {
+                        if let Some(route) = crate::app_system::parse_duke_protocol_route(uri) {
+                            any_uri = true;
+                            crate::app_system::dispatch_duke_protocol_route(&app, route);
+                        } else if let Some(download_url) =
+                            super::parse_duke_protocol_download_url(uri)
+                        {
                             any_uri = true;
                             super::enqueue_protocol_download_url(
                                 app.clone(),
@@ -1509,6 +1561,10 @@ pub(crate) mod win32_clipboard_protocol {
     }
 
     pub fn register_duke_uri_protocol() {}
+
+    pub fn set_windows_autostart_command(_cmd: &str) -> Result<(), String> {
+        Ok(())
+    }
 
     pub fn set_windows_autostart_minimized(_enable: bool) -> Result<(), String> {
         Ok(())
@@ -4573,6 +4629,75 @@ pub(crate) async fn set_desktop_chord_enabled(
         apply_runtime_settings(&settings);
         Ok(desktop_chord::get_desktop_chord_status())
     })
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn get_app_system_status() -> Result<app_system::AppSystemStatus, String> {
+    run_blocking_timeout(5, "get_app_system_status", || {
+        Ok(app_system::get_app_system_status_sync())
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn configure_startup_and_tray(
+    app: AppHandle,
+    launch_on_startup: Option<bool>,
+    start_minimized_to_tray: Option<bool>,
+    minimize_to_tray: Option<bool>,
+    close_to_tray: Option<bool>,
+) -> Result<app_system::AppSystemStatus, String> {
+    run_blocking_timeout(8, "configure_startup_and_tray", move || {
+        let mut settings = load_settings_from_disk(&app);
+        let mut startup_changed = false;
+        if let Some(v) = launch_on_startup {
+            settings.launch_on_startup = v;
+            startup_changed = true;
+        }
+        if let Some(v) = start_minimized_to_tray {
+            settings.start_minimized_to_tray = v;
+            settings.start_minimized_with_windows = v && settings.launch_on_startup;
+            startup_changed = true;
+        }
+        if let Some(v) = minimize_to_tray {
+            settings.minimize_to_tray = v;
+        }
+        if let Some(v) = close_to_tray {
+            settings.close_to_tray = v;
+        }
+        if startup_changed {
+            app_system::apply_windows_startup_registration(
+                settings.launch_on_startup,
+                settings.start_minimized_to_tray,
+            )?;
+        }
+        save_settings_to_disk(&app, &settings)?;
+        apply_runtime_settings(&settings);
+        Ok(app_system::get_app_system_status_sync())
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn create_app_shortcuts_and_register_protocol(
+) -> Result<app_system::ShortcutProtocolReport, String> {
+    run_blocking_timeout(
+        10,
+        "create_app_shortcuts_and_register_protocol",
+        app_system::create_desktop_and_start_menu_shortcuts_sync,
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn export_diagnostics_bundle(
+) -> Result<app_system::DiagnosticsExportReport, String> {
+    run_blocking_timeout(
+        15,
+        "export_diagnostics_bundle",
+        app_system::export_diagnostics_bundle_sync,
+    )
     .await
 }
 

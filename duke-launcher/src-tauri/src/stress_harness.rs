@@ -726,7 +726,7 @@ fn case_minimize_settings_and_updater_sanity(root: &Path) -> Result<String, Stri
     }
 
     let sample_path = root.join("updater_sample.bin");
-    fs::write(&sample_path, b"duke-v2.2.1-binary-payload").map_err(|e| e.to_string())?;
+    fs::write(&sample_path, b"duke-v2.3.0-binary-payload").map_err(|e| e.to_string())?;
     let mismatch = crate::updater::verify_file_sha256_streaming(
         &sample_path,
         "0000000000000000000000000000000000000000000000000000000000000000",
@@ -734,13 +734,83 @@ fn case_minimize_settings_and_updater_sanity(root: &Path) -> Result<String, Stri
     if mismatch.is_ok() {
         return Err("Updater SHA-256 verification accepted a mismatched digest.".to_string());
     }
-    if !crate::updater::is_newer_version("2.2.0", "v2.2.1")
-        || crate::updater::is_newer_version("2.2.1", "v2.2.1")
+    if !crate::updater::is_newer_version("2.2.1", "v2.3.0")
+        || crate::updater::is_newer_version("2.3.0", "v2.3.0")
     {
-        return Err("Updater SemVer comparison failed v2.2.1 check.".to_string());
+        return Err("Updater SemVer comparison failed v2.3.0 check.".to_string());
     }
 
     Ok("Opt-in tray defaults (false/false), auto-check updates (true), SemVer, and SHA-256 rejection verified.".to_string())
+}
+
+fn case_steam_mini_profile_and_app_system(_root: &Path) -> Result<String, String> {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<profile>
+    <steamID64>76561198012345678</steamID64>
+    <steamID><![CDATA[DukeCommander]]></steamID>
+    <onlineState>in-game</onlineState>
+    <stateMessage><![CDATA[In-Game<br/>Cyberpunk 2077]]></stateMessage>
+    <privacyState>public</privacyState>
+    <avatarFull><![CDATA[https://avatars.steamstatic.com/abc_full.jpg]]></avatarFull>
+    <memberSince>November 15, 2014</memberSince>
+    <summary><![CDATA[<b>Zero Bloat</b> Gamer]]></summary>
+    <mostPlayedGames>
+        <mostPlayedGame>
+            <gameName><![CDATA[Cyberpunk 2077]]></gameName>
+            <gameLink><![CDATA[https://steamcommunity.com/app/1091500]]></gameLink>
+            <gameLogo><![CDATA[https://cdn.cloudflare.steamstatic.com/steam/apps/1091500/header.jpg]]></gameLogo>
+            <hoursPlayed>14.2</hoursPlayed>
+            <hoursOnRecord>218.5</hoursOnRecord>
+        </mostPlayedGame>
+    </mostPlayedGames>
+</profile>"#;
+    let target = crate::steam_profile::SteamProfileTarget::SteamId64("76561198012345678".to_string());
+    let prof = crate::steam_profile::parse_steam_community_xml(xml, &target)?;
+    if prof.persona_name != "DukeCommander"
+        || prof.privacy_state != "public"
+        || prof.showcase_games.len() != 1
+        || prof.showcase_games[0].app_id != Some(1091500)
+    {
+        return Err("Steam XML profile parsing failed validation.".to_string());
+    }
+
+    let exe = Path::new("C:\\Program Files\\Duke Launcher\\duke-launcher.exe");
+    let run_tray = crate::app_system::format_startup_run_command(exe, true);
+    let (enabled, tray) = crate::app_system::parse_startup_run_value(Some(&run_tray));
+    if !enabled || !tray {
+        return Err("Startup Run command formatting/parsing failed.".to_string());
+    }
+
+    let clamped = crate::app_system::clamp_window_geometry_to_work_area(
+        crate::app_system::SavedWindowGeometry {
+            width: 1360,
+            height: 860,
+            x: Some(-9000),
+            y: Some(5000),
+            maximized: false,
+        },
+        crate::app_system::MonitorWorkArea {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        },
+        false,
+    );
+    if clamped.x.unwrap_or(-1) < 0
+        || clamped.y.unwrap_or(-1) < 0
+        || clamped.width > 1920
+        || clamped.height > 1040
+    {
+        return Err("Multi-monitor work-area clamping failed.".to_string());
+    }
+
+    let diag = crate::app_system::export_diagnostics_bundle_sync()?;
+    if !Path::new(&diag.zip_path).is_file() || diag.size_bytes < 64 {
+        return Err("Diagnostics bundle (.zip) export failed.".to_string());
+    }
+
+    Ok("Steam Community XML showcase parser, Startup Run formatter, multi-monitor clamp, and redacted diagnostics ZIP verified.".to_string())
 }
 
 pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
@@ -763,8 +833,8 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
         .map_err(|e| format!("Failed reading tauri.conf.json: {e}"))?;
 
     // 1. Version & Window Safety Checks
-    if !index_html.contains("2.2.1") || !tauri_conf.contains("\"2.2.1\"") {
-        return Err("Expected v2.2.1 marker missing in index.html or tauri.conf.json.".to_string());
+    if !index_html.contains("2.3.0") || !tauri_conf.contains("\"2.3.0\"") {
+        return Err("Expected v2.3.0 marker missing in index.html or tauri.conf.json.".to_string());
     }
 
     let default_sites = crate::sites::default_search_sites();
@@ -912,7 +982,7 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
     }
 
     Ok(format!(
-        "Verified v2.2.1: 6 views, 10 modals, 10 themes, VirtualCardGrid, {} SVG symbols, {} DOM IDs checked, {} IPC commands registered.",
+        "Verified v2.3.0: 6 views, 10 modals, 10 themes, VirtualCardGrid, {} SVG symbols, {} DOM IDs checked, {} IPC commands registered.",
         symbol_ids.len(),
         html_ids.len(),
         invoke_cmds.len()
@@ -993,6 +1063,9 @@ pub fn run_chaos_stress_harness_sync(check_ui_contract: bool) -> StressHarnessRe
         run_case("minimize_settings_and_updater_sanity", || {
             case_minimize_settings_and_updater_sanity(&temp_root)
         }),
+        run_case("steam_mini_profile_and_app_system_features", || {
+            case_steam_mini_profile_and_app_system(&temp_root)
+        }),
     ];
 
     if check_ui_contract {
@@ -1065,6 +1138,6 @@ mod tests {
             );
         }
         assert_eq!(report.failed_cases, 0);
-        assert_eq!(report.passed_cases, 17);
+        assert_eq!(report.passed_cases, 18);
     }
 }

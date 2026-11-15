@@ -1,12 +1,12 @@
 <div align="center">
-  <img src="duke-launcher/src/assets/dukeflaglogo.png" alt="Duke Launcher v2.2.1" width="108" />
-  <h1>Duke Launcher <code>v2.2.1</code></h1>
+  <img src="duke-launcher/src/assets/dukeflaglogo.png" alt="Duke Launcher v2.3.0" width="108" />
+  <h1>Duke Launcher <code>v2.3.0</code></h1>
   <p>
     <strong>All Your Games. Maximum FPS. Zero Bloat.</strong><br />
     One tiny, free Windows 11 game launcher for PC, Steam, Xbox, Epic, GOG, Nintendo &amp; retro classics.
   </p>
   <p>
-    <a href="https://github.com/willferrara/duke-systems/releases/latest"><img src="https://img.shields.io/badge/Version-v2.2.1-0078d4?style=flat-square" alt="v2.2.1" /></a>
+    <a href="https://github.com/willferrara/duke-systems/releases/latest"><img src="https://img.shields.io/badge/Version-v2.3.0-0078d4?style=flat-square" alt="v2.3.0" /></a>
     <a href="https://github.com/willferrara/duke-systems/releases/latest"><img src="https://img.shields.io/badge/Platform-Windows%2011-1f6feb?style=flat-square" alt="Windows 11" /></a>
     <a href="https://github.com/willferrara/duke-systems/releases/latest"><img src="https://img.shields.io/badge/Size-~8.7%20MB%20Portable-2ea043?style=flat-square" alt="~8.7 MB Portable" /></a>
     <a href="https://github.com/willferrara/duke-systems/releases/latest"><img src="https://img.shields.io/badge/RAM-~20%20MB%20Idle-0e8a16?style=flat-square" alt="~20 MB Idle RAM" /></a>
@@ -15,24 +15,25 @@
   </p>
   <p>
     <a href="https://github.com/willferrara/duke-systems/releases/latest">
-      <img src="https://img.shields.io/badge/%E2%AC%87%20Download%20Duke%20Launcher%20(v2.2.1)-0078d4?style=for-the-badge" alt="Download Duke Launcher v2.2.1" />
+      <img src="https://img.shields.io/badge/%E2%AC%87%20Download%20Duke%20Launcher%20(v2.3.0)-0078d4?style=for-the-badge" alt="Download Duke Launcher v2.3.0" />
     </a>
   </p>
 </div>
 
 ---
 
-**Duke Launcher** is a tiny, super-fast, free game launcher that puts all of your **Steam, Xbox, Epic, GOG, and Nintendo/retro games** into one clean app. Most modern launchers keep heavy web browsers running in the background that quietly eat hundreds of megabytes of memory, pester you to log in, track your habits, and still leave you to troubleshoot broken downloads or missing DLLs on your own. **Duke Launcher (`v2.2.1`)** uses under 20 MB idle RAM (or just a few MB if you opt into minimizing to the system tray) so your games get **maximum FPS**, **never forces you to create an account or collects any data**, **scrolls 25,000+ games effortlessly with zero stutter**, **unpacks ZIP/7z/RAR downloads automatically without extra tools**, **shrinks oversized disc images & duplicate redistributables safely**, **protects game saves in real time while you play**, **checks GitHub Releases for SHA-256 verified 1-click updates**, and **heals itself automatically after crashes or `Alt+F4`**.
+**Duke Launcher** is a tiny, super-fast, free game launcher that puts all of your **Steam, Xbox, Epic, GOG, and Nintendo/retro games** into one clean app. Most modern launchers keep heavy web browsers running in the background that quietly eat hundreds of megabytes of memory, pester you to log in, track your habits, and still leave you to troubleshoot broken downloads or missing DLLs on your own. **Duke Launcher (`v2.3.0`)** uses under 20 MB idle RAM (or just a few MB if you opt into minimizing to the system tray) so your games get **maximum FPS**, **never forces you to create an account or collects any data**, **shows a live Steam Hover Mini-Profile card right in the titlebar without needing a Steam login**, **scrolls 25,000+ games effortlessly with zero stutter**, **unpacks ZIP/7z/RAR downloads automatically without extra tools**, **shrinks oversized disc images & duplicate redistributables safely**, **protects game saves in real time while you play**, **checks GitHub Releases for SHA-256 verified 1-click updates**, and **heals itself automatically after crashes or `Alt+F4`**.
 
 ---
 
 ## Why Gamers Switch
 
-| Everyday Question | Duke Launcher (`v2.2.1`) | Steam | Xbox App | Playnite | Hydra |
+| Everyday Question | Duke Launcher (`v2.3.0`) | Steam | Xbox App | Playnite | Hydra |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Memory Used While You Play** | **&lt;20 MB** (stays out of your way) | ~350–600 MB | ~250–500 MB | ~150–300 MB | ~250–450 MB |
 | **Account Login or Tracking?** | **Never — 100% private &amp; local** | Account required | Microsoft account required | Optional | Optional |
 | **Every Store &amp; Console in One App?** | **Steam, Xbox, Epic, GOG, Nintendo &amp; Retro** | Steam + manual shortcuts | Xbox + PC Game Pass | Yes (via plugins) | Limited |
+| **Live Steam Mini-Profile Card (Zero Login)?** | **Yes — Avatar, Frame, Level, Bio &amp; Top 3 Games** | Requires full client | No | No | No |
 | **Sets Up Downloads &amp; Retro Games For You?** | **Built-in ZIP/7z/RAR unpacker + 1-click `.chd`/`.rvz` shrink** | Store games only | Store games only | Manual setup | Partial |
 | **Malware &amp; Virus Shield Before Launch?** | **Built-in safety scanner &amp; isolated game jail** | No | No | No | No |
 | **Fixes Crashing or Broken Games (`0xC000007B`)?** | **1-click automatic repair + self-healing recovery** | Basic file verify | Basic repair | No | No |
@@ -41,8 +42,10 @@
 
 ---
 
-## Everyday Features Made Simple (`v2.2.1`)
+## Everyday Features Made Simple (`v2.3.0`)
 
+- **Live Steam Hover Mini-Profile Card (Zero Login Required):** Hover over your Steam avatar pill in the top titlebar (or open the **Friends** drawer) to see a sleek Windows 11 mini-profile card showing your avatar, equipped avatar frame, profile background, Steam Level, custom bio, **Top 3 Most-Played Showcase Games**, and a **"What Strangers See"** privacy badge—plus a **Preview ID** bar to preview how any Steam profile looks publicly.
+- **Complete Windows 11 Desktop App Experience:** Includes 1-click **Desktop &amp; Start Menu Shortcuts**, system-wide `duke://` links (`duke://open`, `duke://launch/<game_id>`, `duke://deck`), optional **Launch at Windows Startup** (`--tray` silent boot support), a full right-click **System Tray menu**, multi-monitor-safe window position memory, and a 1-click **Redacted Diagnostics Bundle (`.zip`)** exporter for clean bug reports.
 - **Instant Scrolling Across 25,000+ Games:** Virtualized library and catalog grids keep only visible cards in memory so browsing huge collections stays locked at 120 FPS with under 20 MB idle RAM.
 - **All Your Games in One Clean Screen:** Click **Import Existing Libraries** to pull in Steam, Xbox, Epic, and GOG games automatically, or drag and drop `.exe` files, folders, shortcuts, and ROMs straight onto the window.
 - **Zero-Hassle Retro Disc Shrinking (`.chd` / `.rvz`):** Automatically groups multi-disc `.cue`/`.bin` sets, verifies BIOS firmware hashes, patches ROMs safely without altering originals, and shrinks `.bin`/`.cue`/`.iso` or GameCube/Wii discs losslessly in 1 click.
@@ -64,7 +67,7 @@
 <details>
 <summary><strong>Under the Hood (For Developers &amp; Systems Engineers)</strong></summary>
 
-### Architecture Overview (`v2.2.1`)
+### Architecture Overview (`v2.3.0`)
 
 **Duke Launcher** is built in Rust + Win32 FFI + Tauri v2 (`WebView2` UI rendered with Vanilla ES2022 JS and 10 zero-bloat solid CSS themes — zero Electron, zero Chromium bundling, zero runtime `.unwrap()` calls under `panic = "abort"`). All UI-facing Tauri commands offload I/O, FFI, and network work asynchronously via `tokio::task::spawn_blocking` across four domain routers (`cmd_library.rs`, `cmd_emulators.rs`, `cmd_security.rs`, `cmd_system.rs`) while keeping `main.rs` as a crisp bootstrap entrypoint.
 
@@ -73,7 +76,9 @@ flowchart TD
     UI["Vanilla ES2022 + VirtualCardGrid (10 Solid Themes + SVG Sprites)"] -->|"Async Tauri v2 IPC"| Routers["Domain Routers (cmd_library / cmd_emulators / cmd_security / cmd_system)"]
     CLI["Headless CLI Modes (--mcp / --bench / --stress-test)"] -->|"0 MB WebView2 RAM"| Routers
 
-    subgraph CoreV22["v2.2.1 Core Engine Modules"]
+    subgraph CoreV23["v2.3.0 Core Engine & Desktop Modules"]
+        SteamProf["steam_profile.rs (Zero-Key XML + Cosmetics + 10m Cache)"]
+        AppSys["app_system.rs (Startup Run + Shortcuts + Multi-Monitor + Redacted ZIP)"]
         LibStore["lib_store.rs (DKLIB Binary + DKWAL Log)"]
         NetEngine["net_engine.rs (Pooled Reqwest + ETag Cache + DoH)"]
         ArchiveNative["archive_native.rs (Pure-Rust ZIP/7z/RAR5 + Zip-Slip Guard)"]
@@ -87,12 +92,14 @@ flowchart TD
         ChordDiscord["desktop_chord.rs (Guide/FPV SendInput) + discord_ipc.rs (Named Pipe)"]
     end
 
-    Routers --> CoreV22
+    Routers --> CoreV23
     Routers --> PreservationAndUx
 ```
 
-### Key `v2.2.1` Engineering Systems
+### Key `v2.3.0` Engineering Systems
 
+- **Zero-Account Steam Public Profile & Cosmetics Resolver (`steam_profile.rs`):** Auto-detects the local `SteamID64` from `Steam\config\loginusers.vdf` (or accepts any custom `SteamID64` / `steamcommunity.com/id/<vanity>` override), parses public Steam Community XML feeds (`?xml=1`) for persona, status, bio, visibility state, and Top 3 Most-Played Showcase Games, and optionally enriches with Steam Level, animated avatars, avatar frames, and profile backgrounds via DPAPI-protected Web API keys with a 10-minute memory/disk cache.
+- **Full Windows 11 Desktop System Layer (`app_system.rs`):** Manages `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\DukeLauncher` (`"<exe>"` or `"<exe>" --tray`), creates Desktop and Start Menu `.lnk` shortcuts + `HKCU\Software\Classes\duke` (`duke://open`, `duke://launch/<id>`, `duke://deck`, `duke://download`), installs the 4-action system tray menu (`Open Duke Launcher`, `Duke Deck Mode`, `Check for Updates`, `Quit Duke Launcher`), validates saved window geometry against connected displays via `MonitorFromPoint` / `GetMonitorInfoW`, and exports privacy-redacted `.zip` diagnostics bundles.
 - **Decomposed Async Command Layer (`cmd_library.rs`, `cmd_emulators.rs`, `cmd_security.rs`, `cmd_system.rs`):** Splits 4,800+ lines out of `main.rs`, offloads blocking I/O/Win32/network calls via `run_blocking_timeout` without holding `std::sync::Mutex` across `.await` points, and uses a shared shutdown teardown hook.
 - **GitHub Releases Self-Updater (`updater.rs`):** Queries the GitHub Releases API over `net_engine` with DoH/proxy support, parses SemVer tags, detects portable vs. installed deployments and extra release bundle assets, verifies every byte with SHA-256 (`digest: "sha256:<hex>"`), and swaps binaries cleanly via a detached PID-waiting trampoline preserving `data/` and `portable.txt`.
 - **Zero-Copy Virtual Viewport Recycler (`virtual_grid.js`):** Keeps live DOM card nodes capped at `~60` across both `My Games` and sparse `25,000+`-title `Search Games` (`query_catalog_mmap`) with responsive zoom (`125px`–`280px`), compact cards, and `Duke Deck` Couch Mode.

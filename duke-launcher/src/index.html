@@ -84,7 +84,7 @@
         </button>
         <img src="assets/dukeflaglogo.png" alt="Duke Launcher" class="titlebar-emblem" />
         <span class="titlebar-title">Duke Launcher</span>
-        <span class="titlebar-version mono-num" id="app-version-pill">v2.2.1</span>
+        <span class="titlebar-version mono-num" id="app-version-pill">v2.3.0</span>
       </div>
 
       <div class="titlebar-center">
@@ -135,6 +135,123 @@
 
       <div class="titlebar-right">
         <div class="titlebar-drag-filler" data-tauri-drag-region></div>
+        <div class="steam-mini-profile-anchor" id="steam-mini-profile-anchor">
+          <button
+            type="button"
+            class="titlebar-steam-pill"
+            id="btn-titlebar-steam-profile"
+            aria-expanded="false"
+            aria-controls="steam-mini-profile-popover"
+            title="Hover or click to view your Steam Mini-Profile &amp; Public Visibility"
+          >
+            <span class="titlebar-steam-avatar-wrap">
+              <img
+                id="titlebar-steam-avatar-img"
+                class="titlebar-steam-avatar hidden"
+                src=""
+                alt=""
+              />
+              <span class="titlebar-steam-avatar-fallback" id="titlebar-steam-avatar-fallback">
+                <svg class="icon" aria-hidden="true"><use href="#icon-users"/></svg>
+              </span>
+              <span class="titlebar-steam-status-dot status-offline" id="titlebar-steam-status-dot"></span>
+            </span>
+            <span class="titlebar-steam-name" id="titlebar-steam-name-label">Steam</span>
+          </button>
+
+          <section
+            id="steam-mini-profile-popover"
+            class="steam-mini-profile-popover hidden"
+            role="dialog"
+            aria-label="Steam Mini-Profile Card"
+          >
+            <div class="steam-mini-bg-wrap">
+              <img id="steam-mini-bg" class="steam-mini-bg hidden" src="" alt="" />
+              <div class="steam-mini-bg-scrim"></div>
+            </div>
+
+            <div class="steam-mini-body">
+              <div class="steam-mini-top-row">
+                <div class="steam-mini-avatar-stack">
+                  <img
+                    id="steam-mini-avatar-img"
+                    class="steam-mini-avatar-img hidden"
+                    src=""
+                    alt=""
+                  />
+                  <div class="steam-mini-avatar-placeholder" id="steam-mini-avatar-placeholder">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-users"/></svg>
+                  </div>
+                  <img
+                    id="steam-mini-frame-img"
+                    class="steam-mini-frame-overlay hidden"
+                    src=""
+                    alt=""
+                  />
+                  <span class="steam-mini-status-dot status-offline" id="steam-mini-status-dot"></span>
+                </div>
+
+                <div class="steam-mini-identity">
+                  <div class="steam-mini-name-row">
+                    <strong class="steam-mini-persona" id="steam-mini-persona">Steam Profile</strong>
+                    <span class="steam-mini-level-badge mono-num hidden" id="steam-mini-level-badge">Lv 0</span>
+                  </div>
+                  <div class="steam-mini-badges-row">
+                    <span class="pill mono-num" id="steam-mini-status-pill">Detecting...</span>
+                    <span
+                      class="pill mono-num"
+                      id="steam-mini-visibility-badge"
+                      title="Shows whether strangers can view your public Steam Community profile"
+                    >What Strangers See: Public</span>
+                  </div>
+                  <div class="steam-mini-meta mono-num" id="steam-mini-meta">Auto-detected from local Steam</div>
+                </div>
+              </div>
+
+              <p class="steam-mini-bio" id="steam-mini-bio">Hover or click Refresh to inspect your public Steam profile, cosmetics, and showcase games.</p>
+
+              <div class="steam-mini-showcase-section" id="steam-mini-showcase-section">
+                <div class="steam-mini-section-head">
+                  <span>Top 3 Most-Played Showcase</span>
+                  <span class="mono-num" id="steam-mini-source-badge">Public XML</span>
+                </div>
+                <div class="steam-mini-showcase-list" id="steam-mini-showcase-list">
+                  <div class="panel-sub">No recent public games listed.</div>
+                </div>
+              </div>
+
+              <div class="steam-mini-preview-form hidden" id="steam-mini-preview-form">
+                <input
+                  type="text"
+                  id="input-steam-mini-override"
+                  class="input-control mono-num"
+                  placeholder="SteamID64 or steamcommunity.com/id/vanity..."
+                  autocomplete="off"
+                />
+                <button type="button" class="btn btn-primary btn-xs" id="btn-steam-mini-apply-override">Preview</button>
+                <button type="button" class="btn btn-secondary btn-xs" id="btn-steam-mini-reset-override" title="Reset to auto-detected local Steam account">Auto</button>
+              </div>
+
+              <div class="steam-mini-foot">
+                <div class="steam-mini-foot-left">
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-steam-mini-refresh" title="Refresh live Steam profile">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                    <span>Refresh</span>
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-xs" id="btn-steam-mini-toggle-preview" title="Preview another SteamID64 or vanity URL">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-eye"/></svg>
+                    <span>Preview ID</span>
+                  </button>
+                </div>
+                <button type="button" class="btn btn-primary btn-xs" id="btn-steam-mini-open-steam">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-external-link"/></svg>
+                  <span>Open on Steam</span>
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+
         <button type="button" class="titlebar-friends-btn" id="btn-toggle-friends" aria-expanded="false" aria-controls="friends-drawer" title="Toggle Live Multi-Platform Friends Panel (Steam, Xbox, PSN, Duke Swarm)">
           <svg class="icon" aria-hidden="true"><use href="#icon-users"/></svg>
           <span>Friends</span>
@@ -2073,14 +2190,28 @@
                 <div id="desktop-cleanup-summary" class="detail-autofix-summary hidden" role="status"></div>
               </div>
 
-              <!-- 7. Window & System Tray -->
+              <!-- 7. Window, Startup & System Integration -->
               <div class="panel-card" id="settings-tray-card">
                 <div class="panel-head">
                   <div>
-                    <h3>7. Window &amp; System Tray</h3>
-                    <p class="panel-sub">Choose how minimizing or closing the window behaves so you can keep Duke Launcher running quietly in the background when needed.</p>
+                    <h3>7. Window, Startup &amp; System Integration</h3>
+                    <p class="panel-sub">Configure Windows startup behavior, system tray minimize/close rules, Desktop &amp; Start Menu shortcuts, and redacted bug-report bundles.</p>
                   </div>
                 </div>
+                <label class="setting-toggle-row" for="setting-launch-on-startup">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Launch Duke Launcher at Windows Startup</div>
+                    <div class="setting-toggle-desc">Registers <code>HKCU\Software\Microsoft\Windows\CurrentVersion\Run\DukeLauncher</code> without requiring administrator privileges.</div>
+                  </div>
+                  <input type="checkbox" id="setting-launch-on-startup" class="setting-checkbox" />
+                </label>
+                <label class="setting-toggle-row" for="setting-start-minimized-tray">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Start Minimized to System Tray (<code>--tray</code>)</div>
+                    <div class="setting-toggle-desc">When Launch at Windows Startup is enabled, boots directly into the system tray so your desktop stays clear on sign-in.</div>
+                  </div>
+                  <input type="checkbox" id="setting-start-minimized-tray" class="setting-checkbox" />
+                </label>
                 <label class="setting-toggle-row" for="setting-minimize-to-tray">
                   <div class="setting-toggle-copy">
                     <div class="setting-toggle-title">Minimize to System Tray</div>
@@ -2095,6 +2226,30 @@
                   </div>
                   <input type="checkbox" id="setting-close-to-tray" class="setting-checkbox" />
                 </label>
+                <div class="settings-input-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Desktop &amp; Start Menu Shortcuts + <code>duke://</code> Protocol</div>
+                    <div class="setting-toggle-desc" id="settings-shortcuts-status">Creates Desktop and Start Menu <code>.lnk</code> shortcuts with the Duke emblem and registers <code>duke://open</code>, <code>duke://launch/&lt;id&gt;</code>, and <code>duke://deck</code>.</div>
+                  </div>
+                  <div class="settings-btn-group">
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-create-app-shortcuts">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-pin"/></svg>
+                      <span>Create Desktop &amp; Start Menu Shortcuts</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="settings-input-row">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Redacted Diagnostics Bundle (<code>.zip</code>)</div>
+                    <div class="setting-toggle-desc" id="settings-diagnostics-status">Packages <code>freeze-breadcrumb.log</code>, crash reports, OS/RAM summary, and active settings with all usernames and personal paths automatically redacted.</div>
+                  </div>
+                  <div class="settings-btn-group">
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-export-diagnostics-bundle">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-archive"/></svg>
+                      <span>Export Diagnostics Bundle</span>
+                    </button>
+                  </div>
+                </div>
               </div>
 
               <!-- 8. App Updates -->
@@ -2126,7 +2281,7 @@
                 <div class="update-meta-grid">
                   <div class="update-meta-tile">
                     <span class="detail-metric-label">Current Version</span>
-                    <strong class="detail-metric-val mono-num" id="settings-update-current-version">v2.2.1</strong>
+                    <strong class="detail-metric-val mono-num" id="settings-update-current-version">v2.3.0</strong>
                   </div>
                   <div class="update-meta-tile">
                     <span class="detail-metric-label">Latest Release</span>
@@ -3127,6 +3282,28 @@
               <svg class="icon-win" aria-hidden="true"><use href="#icon-win-close"/></svg>
             </button>
           </div>
+        </div>
+        <div class="friends-steam-banner" id="friends-drawer-steam-banner">
+          <div class="friends-steam-banner-left">
+            <div class="friends-steam-avatar-wrap">
+              <img id="friends-banner-avatar" class="friends-steam-avatar hidden" src="" alt="" />
+              <span class="friends-steam-avatar-fallback" id="friends-banner-avatar-fallback">
+                <svg class="icon" aria-hidden="true"><use href="#icon-users"/></svg>
+              </span>
+              <img id="friends-banner-frame" class="friends-steam-frame hidden" src="" alt="" />
+              <span class="titlebar-steam-status-dot status-offline" id="friends-banner-status-dot"></span>
+            </div>
+            <div class="friends-steam-copy">
+              <div class="friends-steam-name-row">
+                <strong id="friends-banner-persona">Steam Profile</strong>
+                <span class="steam-mini-level-badge mono-num hidden" id="friends-banner-level">Lv 0</span>
+              </div>
+              <span class="panel-sub mono-num" id="friends-banner-status-text">Checking local Steam...</span>
+            </div>
+          </div>
+          <button type="button" class="btn btn-secondary btn-xs" id="btn-friends-banner-open-card" title="Open Full Steam Mini-Profile Card">
+            <span>Profile Card</span>
+          </button>
         </div>
         <div class="friends-status-summary panel-sub" id="friends-drawer-summary">Connecting multi-platform presence...</div>
         <div id="friends-coop-status-banner" class="friends-coop-banner hidden">
