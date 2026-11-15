@@ -29,6 +29,7 @@ export class VirtualCardGrid {
     this.createCard = options.createCard || (() => document.createElement("article"));
     this.updateCard = options.updateCard || (() => {});
     this.onVisibleRange = options.onVisibleRange || null;
+    this.onRender = typeof options.onRender === "function" ? options.onRender : null;
 
     this._windowEl = null;
     this._mounted = new Map();
@@ -87,6 +88,9 @@ export class VirtualCardGrid {
     this.gridEl.style.height = "";
     this.gridEl.innerHTML = html;
     this._lastRange = { startIndex: -1, endIndex: -1, cols: 0, rowHeight: 0, totalCount: 0 };
+    if (typeof this.onRender === "function") {
+      this.onRender({ totalCount: 0, startIndex: -1, endIndex: -1, mountedCount: 0 });
+    }
   }
 
   clear() {
@@ -100,6 +104,9 @@ export class VirtualCardGrid {
       this._windowEl.style.transform = "translate3d(0, 0, 0)";
     }
     this._lastRange = { startIndex: -1, endIndex: -1, cols: 0, rowHeight: 0, totalCount: 0 };
+    if (typeof this.onRender === "function") {
+      this.onRender({ totalCount: 0, startIndex: -1, endIndex: -1, mountedCount: 0 });
+    }
   }
 
   scheduleRender() {
@@ -282,6 +289,9 @@ export class VirtualCardGrid {
 
     if (typeof this.onVisibleRange === "function") {
       this.onVisibleRange(startIndex, endIndex, totalCount);
+    }
+    if (typeof this.onRender === "function") {
+      this.onRender({ totalCount, startIndex, endIndex, mountedCount: this._mounted.size });
     }
   }
 

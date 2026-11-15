@@ -196,20 +196,8 @@ try {
     $BannedTheme = 'frosted' + '-obsidian'
     $ThemeHits = New-Object System.Collections.Generic.List[string]
     $LeakHits = New-Object System.Collections.Generic.List[string]
-
-    $RawThemeMatches = @(& git grep -I -n -i $BannedTheme 2>$null)
-    foreach ($Line in $RawThemeMatches) {
-        $Parts = $Line -split ':', 3
-        if ($Parts.Count -lt 3) { continue }
-        $FileRel = $Parts[0]
-        $LineNo = $Parts[1]
-        $Content = $Parts[2]
-        if ($FileRel -eq 'scripts/verify-hygiene.ps1') { continue }
-        if ($FileRel -match '^(?:\.agents/|AGENTS\.md$|CLAUDE\.md$|GEMINI\.md$)' -and $Content -match '(?i)\b(?:zero|never|ban|no|forbid|exclude)\b') {
-            continue
-        }
-        $ThemeHits.Add("${FileRel}:${LineNo}")
-    }
+    $ActiveUser = $env:USERNAME
+    $InGitRepo = Test-Path -LiteralPath (Join-Path $RepoRoot '.git')
 
     function Test-PersonalLeakLine {
         param(
@@ -236,47 +224,91 @@ try {
         }
     }
 
-    $WinPathMatches = @(& git grep -I -n -E -i '[A-Z]:[/\\]+Users[/\\]+' 2>$null)
-    foreach ($Line in $WinPathMatches) {
-        $Parts = $Line -split ':', 3
-        if ($Parts.Count -lt 3) { continue }
-        if ($Parts[0] -eq 'scripts/verify-hygiene.ps1') { continue }
-        Test-PersonalLeakLine -FileRel $Parts[0] -LineNo $Parts[1] -Content $Parts[2] -ActiveUser '' -OutLeaks $LeakHits
-    }
+    if ($InGitRepo) {
+        $PrevPref = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $RawThemeMatches = @(& git grep -I -n -i $BannedTheme 2>$null)
+            foreach ($Line in $RawThemeMatches) {
+                $Parts = $Line -split ':', 3
+                if ($Parts.Count -lt 3) { continue }
+                $FileRel = $Parts[0]
+                $LineNo = $Parts[1]
+                $Content = $Parts[2]
+                if ($FileRel -eq 'scripts/verify-hygiene.ps1') { continue }
+                if ($FileRel -match '^(?:\.agents/|AGENTS\.md$|CLAUDE\.md$|GEMINI\.md$)' -and $Content -match '(?i)\b(?:zero|never|ban|no|forbid|exclude)\b') {
+                    continue
+                }
+                $ThemeHits.Add("${FileRel}:${LineNo}")
+            }
 
-    $UnixPathMatches = @(& git grep -I -n -E '(^|[^A-Za-z0-9_])/(Users|home)/[A-Za-z0-9._<>-]+' 2>$null)
-    foreach ($Line in $UnixPathMatches) {
-        $Parts = $Line -split ':', 3
-        if ($Parts.Count -lt 3) { continue }
-        if ($Parts[0] -eq 'scripts/verify-hygiene.ps1') { continue }
-        Test-PersonalLeakLine -FileRel $Parts[0] -LineNo $Parts[1] -Content $Parts[2] -ActiveUser '' -OutLeaks $LeakHits
-    }
+            $WinPathMatches = @(& git grep -I -n -E -i '[A-Z]:[/\\]+Users[/\\]+' 2>$null)
+            foreach ($Line in $WinPathMatches) {
+                $Parts = $Line -split ':', 3
+                if ($Parts.Count -lt 3) { continue }
+                if ($Parts[0] -eq 'scripts/verify-hygiene.ps1') { continue }
+                Test-PersonalLeakLine -FileRel $Parts[0] -LineNo $Parts[1] -Content $Parts[2] -ActiveUser '' -OutLeaks $LeakHits
+            }
 
-    $ActiveUser = $env:USERNAME
-    if ($ActiveUser -and $ActiveUser.Length -ge 3) {
-        $UserHits = @(& git grep -I -n -w -i $ActiveUser 2>$null)
-        foreach ($Line in $UserHits) {
-            $Parts = $Line -split ':', 3
-            if ($Parts.Count -ge 2) {
-                $LeakHits.Add("$($Parts[0]):$($Parts[1]) (ActiveOSUsername)")
+            $UnixPathMatches = @(& git grep -I -n -E '(^|[^A-Za-z0-9_])/(Users|home)/[A-Za-z0-9._<>-]+' 2>$null)
+            foreach ($Line in $UnixPathMatches) {
+                $Parts = $Line -split ':', 3
+                if ($Parts.Count -lt 3) { continue }
+                if ($Parts[0] -eq 'scripts/verify-hygiene.ps1') { continue }
+                Test-PersonalLeakLine -FileRel $Parts[0] -LineNo $Parts[1] -Content $Parts[2] -ActiveUser '' -OutLeaks $LeakHits
+            }
+
+            if ($ActiveUser -and $ActiveUser.Length -ge 3) {
+                $UserHits = @(& git grep -I -n -w -i $ActiveUser 2>$null)
+                foreach ($Line in $UserHits) {
+                    $Parts = $Line -split ':', 3
+                    if ($Parts.Count -ge 2) {
+                        $LeakHits.Add("$($Parts[0]):$($Parts[1]) (ActiveOSUsername)")
+                    }
+                }
+            }
+
+            $Untracked = @(& git ls-files --others --exclude-standard 2>$null)
+            foreach ($Rel in $Untracked) {
+                if ($Rel -eq 'scripts/verify-hygiene.ps1') { continue }
+                if ($Rel -match '\.(png|ico|icns|jpg|jpeg|webp|exe|dll|woff2?|ttf|bin|dat)$') { continue }
+                $Abs = Join-Path $RepoRoot $Rel
+                if (-not [System.IO.File]::Exists($Abs)) { continue }
+                $Txt = [System.IO.File]::ReadAllText($Abs)
+                if ($Txt -match $BannedTheme) {
+                    if (-not ($Rel -match '^(?:\.agents/|AGENTS\.md$)' -and $Txt -match '(?i)\b(?:zero|never|ban|no)\b')) {
+                        $ThemeHits.Add("$Rel (untracked)")
+                    }
+                }
+                Test-PersonalLeakLine -FileRel $Rel -LineNo 'untracked' -Content $Txt -ActiveUser $ActiveUser -OutLeaks $LeakHits
             }
         }
-    }
-
-    # Also scan newly created/untracked non-ignored files so pre-commit checks catch them
-    $Untracked = @(& git ls-files --others --exclude-standard 2>$null)
-    foreach ($Rel in $Untracked) {
-        if ($Rel -eq 'scripts/verify-hygiene.ps1') { continue }
-        if ($Rel -match '\.(png|ico|icns|jpg|jpeg|webp|exe|dll|woff2?|ttf|bin|dat)$') { continue }
-        $Abs = Join-Path $RepoRoot $Rel
-        if (-not [System.IO.File]::Exists($Abs)) { continue }
-        $Txt = [System.IO.File]::ReadAllText($Abs)
-        if ($Txt -match $BannedTheme) {
-            if (-not ($Rel -match '^(?:\.agents/|AGENTS\.md$)' -and $Txt -match '(?i)\b(?:zero|never|ban|no)\b')) {
-                $ThemeHits.Add("$Rel (untracked)")
+        finally {
+            $ErrorActionPreference = $PrevPref
+        }
+    } else {
+        $Stack = New-Object System.Collections.Generic.Stack[string]
+        $Stack.Push($RepoRoot)
+        while ($Stack.Count -gt 0) {
+            $Dir = $Stack.Pop()
+            foreach ($SubDir in [System.IO.Directory]::GetDirectories($Dir)) {
+                $Leaf = [System.IO.Path]::GetFileName($SubDir)
+                if ($Leaf -in @('.git', 'target', 'node_modules', '.design-tools')) { continue }
+                $Stack.Push($SubDir)
+            }
+            foreach ($FilePath in [System.IO.Directory]::GetFiles($Dir)) {
+                $Rel = $FilePath.Substring($RepoRoot.Length).TrimStart('\', '/').Replace('\', '/')
+                if ($Rel -eq 'scripts/verify-hygiene.ps1') { continue }
+                if ($Rel -match '\.(png|ico|icns|jpg|jpeg|webp|exe|dll|woff2?|ttf|bin|dat|pdb|lib)$') { continue }
+                $Txt = [System.IO.File]::ReadAllText($FilePath)
+                if ($Txt -match $BannedTheme) {
+                    if (-not ($Rel -match '^(?:\.agents/|AGENTS\.md$)' -and $Txt -match '(?i)\b(?:zero|never|ban|no|forbid|exclude)\b')) {
+                        $ThemeHits.Add($Rel)
+                    }
+                }
+                Test-PersonalLeakLine -FileRel $Rel -LineNo 'scan' -Content $Txt -ActiveUser $ActiveUser -OutLeaks $LeakHits
             }
         }
-        Test-PersonalLeakLine -FileRel $Rel -LineNo 'untracked' -Content $Txt -ActiveUser $ActiveUser -OutLeaks $LeakHits
     }
 
     Add-CheckResult 'Zero Forbidden Theme' ($ThemeHits.Count -eq 0) $(if ($ThemeHits.Count -eq 0) { '0 banned theme references' } else { $ThemeHits -join '; ' })

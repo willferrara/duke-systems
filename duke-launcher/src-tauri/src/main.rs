@@ -72,6 +72,7 @@ mod discord_ipc;
 mod save_watcher;
 mod desktop_chord;
 mod redist_cleaner;
+mod updater;
 
 mod cmd_emulators;
 mod cmd_library;
@@ -116,7 +117,7 @@ pub(crate) use cmd_system::{
 use duke_core::shm_bus::{DukeShmBus, ShmSourceApp};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 fn main() {
     crash_guard::install();
 
@@ -162,8 +163,8 @@ fn main() {
             open_label: "Open Duke Launcher".to_string(),
             trim_label: "Trim RAM Now".to_string(),
             exit_label: "Exit Duke Launcher".to_string(),
-            close_to_tray: Arc::new(AtomicBool::new(true)),
-            minimize_to_tray: Arc::new(AtomicBool::new(true)),
+            close_to_tray: Arc::new(AtomicBool::new(false)),
+            minimize_to_tray: Arc::new(AtomicBool::new(false)),
         },
     );
     let _ = TRAY_DAEMON.set(daemon_state.clone());
@@ -239,9 +240,20 @@ fn main() {
             });
 
             // Map `catalog.dkcat` via zero-copy mmap asynchronously so setup never blocks first paint.
+            let catalog_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let _ = tokio::task::spawn_blocking(catalog_mmap::ensure_catalog_mapped_standalone)
                     .await;
+                let (record_count, fetched_at, _) = catalog_mmap::catalog_mmap_header_meta();
+                if record_count > 0 {
+                    let _ = catalog_app.emit(
+                        "catalog-mmap-ready",
+                        serde_json::json!({
+                            "recordCount": record_count,
+                            "fetchedAt": fetched_at,
+                        }),
+                    );
+                }
             });
 
             let mut initial_settings = load_settings_from_disk(app.handle());
@@ -281,10 +293,17 @@ fn main() {
                 trim_process_working_set();
             }
             spawn_idle_ram_trim_watcher(app.handle().clone());
+            if initial_settings.auto_check_updates {
+                updater::spawn_startup_update_check(app.handle().clone());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             cmd_system::get_app_version,
+            cmd_system::get_system_ram_mb,
+            cmd_system::check_for_app_updates,
+            cmd_system::get_cached_app_update,
+            cmd_system::download_and_apply_app_update,
             cmd_system::apply_window_backdrop,
             cmd_security::enqueue_download,
             cmd_security::install_downloaded_job,
@@ -600,6 +619,18 @@ fn main() {
                 if let Some(overlay_win) = app_handle.get_webview_window("overlay") {
                     let _ = overlay_win.hide();
                 }
+                return;
+            }
+            if label == "main"
+                && !daemon_state.config.close_to_tray.load(Ordering::Relaxed)
+            {
+                daemon_state.app_exiting.store(true, Ordering::Release);
+                APP_SHUTDOWN.store(true, Ordering::Release);
+                shutdown_all_runtime_services(app_handle);
+                if let Some(overlay_win) = app_handle.get_webview_window("overlay") {
+                    let _ = overlay_win.destroy();
+                }
+                app_handle.exit(0);
                 return;
             }
         }

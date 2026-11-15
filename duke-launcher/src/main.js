@@ -297,7 +297,14 @@ import {
   stopSaveWatcher,
   getDesktopChordStatus,
   setDesktopChordEnabled,
-  getNetEngineStats
+  getNetEngineStats,
+  getSystemRamMb,
+  getSystemTelemetry,
+  checkForAppUpdates,
+  getCachedAppUpdate,
+  downloadAndApplyAppUpdate,
+  listenAppUpdateAvailable,
+  listenAppUpdateProgress
 } from "./api.js";
 
 const BOOKMARKLET_HREF =
@@ -386,6 +393,15 @@ const state = {
   globalLaunchArgs: "",
   swarmAutoSyncSaves: true,
   startMinimizedWithWindows: false,
+  minimizeToTray: false,
+  closeToTray: false,
+  autoCheckUpdates: true,
+  lastTelemetry: null,
+  ramTelemetryTimer: null,
+  ramTelemetryInFlight: false,
+  appUpdateReport: null,
+  appUpdateChecking: false,
+  appUpdateApplying: false,
   clipboardBannerUrl: "",
   seenClipboardUrls: new Set(),
   clipboardFocusTimer: null,
@@ -1120,6 +1136,19 @@ function switchTab(tab, keepDetail = false) {
       refreshFrontierDiagnostics().catch(() => {});
       refreshWave3AiDiagnostics().catch(() => {});
       refreshV22SubsystemStatuses().catch(() => {});
+      getCachedAppUpdate()
+        .then((rep) => {
+          if (rep) {
+            renderAppUpdateReport(rep);
+          } else if (
+            !state.appUpdateReport &&
+            !state.autoCheckUpdates &&
+            el("settings-update-latest-tag")
+          ) {
+            el("settings-update-latest-tag").textContent = "Click Check for Updates";
+          }
+        })
+        .catch(() => {});
     }
   }
 }
@@ -1139,12 +1168,18 @@ function getTotalPlaytimeSecs(game) {
   return Math.max(split, Number(game.playtimeSeconds || 0));
 }
 
-function updateSidebarTelemetry(telemetry) {
-  const totalBytes = state.library.reduce((acc, g) => acc + Number(g.sizeBytes || 0), 0);
+function updateSidebarStats(telemetry = null) {
+  const effectiveTele = telemetry || state.lastTelemetry;
+  if (telemetry) {
+    state.lastTelemetry = telemetry;
+  }
 
-  if (el("nav-library-count")) el("nav-library-count").textContent = String(state.library.length);
-  if (el("sidebar-list-count")) el("sidebar-list-count").textContent = String(state.library.length);
-  if (el("stat-installed-count")) el("stat-installed-count").textContent = String(state.library.length);
+  const games = Array.isArray(state.library) ? state.library : [];
+  const totalBytes = games.reduce((acc, g) => acc + Number(g?.sizeBytes || 0), 0);
+
+  if (el("nav-library-count")) el("nav-library-count").textContent = String(games.length);
+  if (el("sidebar-list-count")) el("sidebar-list-count").textContent = String(games.length);
+  if (el("stat-installed-count")) el("stat-installed-count").textContent = String(games.length);
   if (el("stat-total-size")) el("stat-total-size").textContent = formatBytesJs(totalBytes);
 
   const activeDls = state.downloadJobs.filter((j) =>
@@ -1155,16 +1190,55 @@ function updateSidebarTelemetry(telemetry) {
   if (el("nav-dl-count")) el("nav-dl-count").textContent = String(activeDls);
   updateNavCatalogBadge();
 
-  if (telemetry) {
+  if (effectiveTele) {
     if (el("sidebar-doh-badge")) {
-      el("sidebar-doh-badge").textContent = telemetry.dohShield === "ACTIVE" ? "Active" : "Standby";
+      el("sidebar-doh-badge").textContent = effectiveTele.dohShield === "ACTIVE" ? "Active" : "Standby";
     }
     if (el("sidebar-ram-badge")) {
-      const mb = Number(telemetry.workingSetMb || 0).toFixed(1);
-      const statusSuffix = telemetry.status === "GAME BOOST" ? " · Eco" : "";
+      const mb = Number(effectiveTele.workingSetMb || 0).toFixed(1);
+      const statusSuffix = effectiveTele.status === "GAME BOOST" ? " · Eco" : "";
       el("sidebar-ram-badge").textContent = `${mb} MB${statusSuffix}`;
     }
   }
+}
+
+function updateSidebarTelemetry(telemetry) {
+  updateSidebarStats(telemetry);
+}
+
+async function refreshSidebarRamTelemetry() {
+  if (state.ramTelemetryInFlight) return;
+  state.ramTelemetryInFlight = true;
+  try {
+    const tele = await getSystemTelemetry().catch(() => null);
+    if (tele && typeof tele.workingSetMb === "number") {
+      updateSidebarStats(tele);
+      return;
+    }
+    const mb = await getSystemRamMb().catch(() => null);
+    if (typeof mb === "number" && Number.isFinite(mb) && mb > 0) {
+      updateSidebarStats({
+        workingSetMb: mb,
+        dohShield: state.dohEnabled ? "ACTIVE" : "SYSTEM DNS",
+        status: document.body.classList.contains("game-running-idle") ? "GAME BOOST" : "IDLE TRIMMED"
+      });
+    }
+  } finally {
+    state.ramTelemetryInFlight = false;
+  }
+}
+
+function startSidebarRamTicker() {
+  if (state.ramTelemetryTimer !== null) {
+    clearInterval(state.ramTelemetryTimer);
+    state.ramTelemetryTimer = null;
+  }
+  refreshSidebarRamTelemetry().catch(() => {});
+  state.ramTelemetryTimer = setInterval(() => {
+    if (document.visibilityState === "visible") {
+      refreshSidebarRamTelemetry().catch(() => {});
+    }
+  }, 5000);
 }
 
 function resolveGameSourceLabel(game) {
@@ -1554,7 +1628,8 @@ function ensureLibraryVirtualGrid() {
     getItemsCount: () => state.libraryFiltered.length,
     getItem: (idx) => state.libraryFiltered[idx] || null,
     createCard: () => createLibraryCardElement(),
-    updateCard: (cardEl, game) => updateLibraryCardElement(cardEl, game)
+    updateCard: (cardEl, game) => updateLibraryCardElement(cardEl, game),
+    onRender: () => updateSidebarStats()
   });
   return libraryVirtualGrid;
 }
@@ -1573,10 +1648,12 @@ function renderLibraryGrid() {
     vgrid?.showEmptyHtml(
       `<div class="empty-card"><h3>No matching games</h3><p>Adjust your search filter to view your installed titles.</p></div>`
     );
+    updateSidebarStats();
     return;
   }
 
   vgrid?.invalidateAll();
+  updateSidebarStats();
 }
 
 function patchChangedLibraryCards(changedIds = null) {
@@ -4130,6 +4207,9 @@ function syncSettingsUiFromBackend(settings) {
   state.globalLaunchArgs = String(settings.globalLaunchArgs || "");
   state.swarmAutoSyncSaves = Boolean(settings.swarmAutoSyncSaves ?? true);
   state.startMinimizedWithWindows = Boolean(settings.startMinimizedWithWindows ?? false);
+  state.minimizeToTray = Boolean(settings.minimizeToTray ?? false);
+  state.closeToTray = Boolean(settings.closeToTray ?? false);
+  state.autoCheckUpdates = Boolean(settings.autoCheckUpdates ?? true);
   state.diskPressureThresholdGb = Number(settings.diskPressureThresholdGb || 50);
 
   applyCompactLibraryCards(state.compactLibraryCards);
@@ -4197,6 +4277,15 @@ function syncSettingsUiFromBackend(settings) {
   if (el("setting-suspend-hotkey")) el("setting-suspend-hotkey").value = state.suspendHotkey;
   if (el("setting-start-minimized-windows")) {
     el("setting-start-minimized-windows").checked = state.startMinimizedWithWindows;
+  }
+  if (el("setting-minimize-to-tray")) {
+    el("setting-minimize-to-tray").checked = state.minimizeToTray;
+  }
+  if (el("setting-close-to-tray")) {
+    el("setting-close-to-tray").checked = state.closeToTray;
+  }
+  if (el("setting-auto-check-updates")) {
+    el("setting-auto-check-updates").checked = state.autoCheckUpdates;
   }
 
   if (el("setting-detected-steam-id")) {
@@ -5796,7 +5885,8 @@ function ensureCatalogVirtualGrid() {
     updateCard: (cardEl, entry) => updateCatalogCardElement(cardEl, entry),
     onVisibleRange: (startIdx, endIdx, total) => {
       ensureCatalogRangeLoaded(startIdx, endIdx, total);
-    }
+    },
+    onRender: () => updateNavCatalogBadge()
   });
   return catalogVirtualGrid;
 }
@@ -7072,6 +7162,7 @@ async function refreshAllData() {
         state.library = lib;
         renderSidebarGameList();
         renderLibraryGrid();
+        updateSidebarStats();
       }
       return lib;
     });
@@ -7084,7 +7175,7 @@ async function refreshAllData() {
         return jobs;
       })
       .catch(() => null);
-    const telemetryPromise = invokeCommand("get_system_telemetry").catch(() => null);
+    const telemetryPromise = getSystemTelemetry().catch(() => null);
     const sessionsPromise = getActiveGameSessions().catch(() => []);
 
     await libPromise;
@@ -7095,18 +7186,33 @@ async function refreshAllData() {
     ]);
     state.activeSessions = Array.isArray(sessions) ? sessions : [];
     syncActiveSessionsUi();
-    updateSidebarTelemetry(telemetry);
+    updateSidebarStats(telemetry);
+    if (!telemetry) {
+      refreshSidebarRamTelemetry().catch(() => {});
+    }
     checkDiskPressureAutopilotBanner(false).catch(() => {});
     refreshSourcesView();
-    getCatalogMmapStats()
-      .then((mmap) => {
-        if (mmap?.active && Number(mmap.recordCount || 0) > 0) {
-          state.catalog.totalCached = Number(mmap.recordCount);
-          if (Number(mmap.fetchedAt || 0) > 0) state.catalog.fetchedAt = Number(mmap.fetchedAt);
-          updateNavCatalogBadge();
-        }
-      })
-      .catch(() => {});
+    const syncCatalogMmapBadge = () =>
+      getCatalogMmapStats()
+        .then((mmap) => {
+          if (mmap?.active && Number(mmap.recordCount || 0) > 0) {
+            state.catalog.totalCached = Number(mmap.recordCount);
+            if (Number(mmap.fetchedAt || 0) > 0) state.catalog.fetchedAt = Number(mmap.fetchedAt);
+            updateNavCatalogBadge();
+            return true;
+          }
+          return false;
+        })
+        .catch(() => false);
+    syncCatalogMmapBadge().then((mapped) => {
+      if (!mapped) {
+        setTimeout(() => {
+          if (Number(state.catalog.totalCached || 0) === 0) {
+            syncCatalogMmapBadge().catch(() => {});
+          }
+        }, 1500);
+      }
+    });
   } catch (err) {
     showToast(String(err), "error");
   }
@@ -8712,6 +8818,10 @@ function wireEvents() {
     }
   });
   window.addEventListener("beforeunload", () => {
+    if (state.ramTelemetryTimer !== null) {
+      clearInterval(state.ramTelemetryTimer);
+      state.ramTelemetryTimer = null;
+    }
     if (state.friendsPollTimer !== null) {
       clearInterval(state.friendsPollTimer);
       state.friendsPollTimer = null;
@@ -9473,6 +9583,85 @@ function wireEvents() {
       );
     } catch (err) {
       showToast(String(err), "error");
+    }
+  });
+
+  el("setting-minimize-to-tray")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const updated = await updateLauncherSettings({ minimizeToTray: checked });
+      syncSettingsUiFromBackend(updated);
+      showToast(
+        checked
+          ? "Minimizing now hides Duke Launcher to the system tray to save extra memory."
+          : "Standard Windows taskbar minimize enabled.",
+        "info",
+        2600
+      );
+    } catch (err) {
+      e.target.checked = !checked;
+      showToast(String(err), "error");
+    }
+  });
+
+  el("setting-close-to-tray")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const updated = await updateLauncherSettings({ closeToTray: checked });
+      syncSettingsUiFromBackend(updated);
+      showToast(
+        checked
+          ? "Close button now minimizes Duke Launcher to the system tray to save extra memory."
+          : "Close button now shuts down Duke Launcher cleanly.",
+        "info",
+        2600
+      );
+    } catch (err) {
+      e.target.checked = !checked;
+      showToast(String(err), "error");
+    }
+  });
+
+  el("setting-auto-check-updates")?.addEventListener("change", async (e) => {
+    const checked = Boolean(e.target.checked);
+    try {
+      const updated = await updateLauncherSettings({ autoCheckUpdates: checked });
+      syncSettingsUiFromBackend(updated);
+      showToast(
+        checked
+          ? "Startup update checks enabled (GitHub Releases with SHA-256 verification)."
+          : "Automatic startup update checks disabled.",
+        "info",
+        2600
+      );
+    } catch (err) {
+      e.target.checked = !checked;
+      showToast(String(err), "error");
+    }
+  });
+
+  el("btn-titlebar-update-pill")?.addEventListener("click", () => {
+    switchTab("settings");
+    switchSettingsTab("essentials");
+    requestAnimationFrame(() => {
+      el("settings-updates-card")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    if (!state.appUpdateReport) {
+      handleCheckForAppUpdates(false).catch(() => {});
+    }
+  });
+
+  el("btn-check-app-updates")?.addEventListener("click", () => {
+    handleCheckForAppUpdates(true).catch(() => {});
+  });
+
+  el("btn-apply-app-update")?.addEventListener("click", () => {
+    handleApplyAppUpdate().catch(() => {});
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      refreshSidebarRamTelemetry().catch(() => {});
     }
   });
 
@@ -14371,6 +14560,34 @@ async function init() {
     .then((fse) => syncFseShellUi(fse))
     .catch(() => {});
   refreshWasmPluginsUi().catch(() => {});
+  listenEvent("catalog-mmap-ready", (payload) => {
+    const count = Number(payload?.recordCount || 0);
+    if (count > 0) {
+      state.catalog.totalCached = count;
+      if (Number(payload?.fetchedAt || 0) > 0 && !state.catalog.fetchedAt) {
+        state.catalog.fetchedAt = Number(payload.fetchedAt);
+      }
+      updateNavCatalogBadge();
+      updateSidebarStats();
+    }
+  }).catch(() => {});
+  listenAppUpdateAvailable((report) => {
+    if (!report) return;
+    renderAppUpdateReport(report);
+    if (report.updateAvailable) {
+      const tag = report.tagName || (report.latestVersion ? `v${report.latestVersion}` : "new build");
+      showToast(`Duke Launcher ${tag} is available on GitHub Releases.`, "info", 4200);
+    }
+  }).catch(() => {});
+  listenAppUpdateProgress((prog) => {
+    renderAppUpdateProgress(prog);
+  }).catch(() => {});
+  getCachedAppUpdate()
+    .then((report) => {
+      if (report) renderAppUpdateReport(report);
+    })
+    .catch(() => {});
+  startSidebarRamTicker();
   listenDkpackApplied((rep) => {
     if (rep?.summary) {
       showToast(rep.summary, "success", 4400);
@@ -14453,6 +14670,177 @@ async function init() {
     .catch(() => {});
 
   refreshV22SubsystemStatuses().catch(() => {});
+}
+
+function renderAppUpdateReport(report) {
+  state.appUpdateReport = report || null;
+  const titlebarBtn = el("btn-titlebar-update-pill");
+  const titlebarLabel = el("titlebar-update-pill-label");
+  const statusPill = el("settings-update-status-pill");
+  const currentVerEl = el("settings-update-current-version");
+  const latestTagEl = el("settings-update-latest-tag");
+  const assetMetaEl = el("settings-update-asset-meta");
+  const notesEl = el("settings-update-notes");
+  const applyBtn = el("btn-apply-app-update");
+
+  if (!report) {
+    if (titlebarBtn) titlebarBtn.classList.add("hidden");
+    return;
+  }
+
+  const currentVer = String(report.currentVersion || "2.2.1");
+  const latestTag = String(
+    report.tagName || (report.latestVersion ? `v${report.latestVersion}` : "Unknown")
+  );
+  const avail = Boolean(report.updateAvailable);
+  const primary = report.selectedAsset || null;
+  const extras = Array.isArray(report.extraAssets) ? report.extraAssets : [];
+
+  if (currentVerEl) {
+    currentVerEl.textContent = currentVer.startsWith("v") ? currentVer : `v${currentVer}`;
+  }
+  if (latestTagEl) {
+    latestTagEl.textContent = latestTag;
+  }
+  if (assetMetaEl) {
+    if (primary) {
+      const sizeText = formatBytesJs(Number(primary.sizeBytes || 0));
+      const modeText = report.installMode === "installed" ? "Installer" : "Portable";
+      const extraText = extras.length > 0 ? ` + ${extras.length} bundle asset${extras.length === 1 ? "" : "s"}` : "";
+      const shaOk = primary.sha256Digest ? "SHA-256" : "No Digest";
+      assetMetaEl.textContent = `${primary.name} (${sizeText} · ${modeText} · ${shaOk}${extraText})`;
+    } else {
+      assetMetaEl.textContent = "No matching release asset";
+    }
+  }
+  if (statusPill) {
+    if (report.error) {
+      statusPill.className = "pill amber mono-num";
+      statusPill.textContent = "Check Warning";
+    } else if (avail) {
+      statusPill.className = "pill accent mono-num";
+      statusPill.textContent = `${latestTag} Ready`;
+    } else {
+      statusPill.className = "pill emerald mono-num";
+      statusPill.textContent = "Up to Date";
+    }
+  }
+  if (titlebarBtn && titlebarLabel) {
+    if (avail) {
+      titlebarLabel.textContent = `Update ${latestTag} Available`;
+      titlebarBtn.classList.remove("hidden");
+    } else {
+      titlebarBtn.classList.add("hidden");
+    }
+  }
+  if (applyBtn) {
+    applyBtn.classList.toggle("hidden", !(avail && primary && primary.sha256Digest));
+    applyBtn.disabled = state.appUpdateApplying;
+  }
+  if (notesEl) {
+    const notesText = String(report.releaseNotes || "").trim();
+    if (notesText) {
+      notesEl.textContent = notesText;
+      notesEl.classList.remove("hidden");
+    } else {
+      notesEl.textContent = "";
+      notesEl.classList.add("hidden");
+    }
+  }
+}
+
+function renderAppUpdateProgress(prog) {
+  const wrap = el("settings-update-progress-wrap");
+  const labelEl = el("settings-update-progress-label");
+  const pctEl = el("settings-update-progress-pct");
+  const fillEl = el("settings-update-progress-fill");
+  if (!wrap || !prog) return;
+  wrap.classList.remove("hidden");
+  const pct = Math.max(0, Math.min(100, Math.round(Number(prog.progressPct || 0))));
+  if (labelEl) {
+    labelEl.textContent = String(prog.message || prog.stage || "Updating...");
+  }
+  if (pctEl) {
+    pctEl.textContent = `${pct}%`;
+  }
+  if (fillEl) {
+    fillEl.style.width = `${pct}%`;
+  }
+}
+
+async function handleCheckForAppUpdates(force = true) {
+  if (state.appUpdateChecking) return null;
+  state.appUpdateChecking = true;
+  const checkBtn = el("btn-check-app-updates");
+  const statusPill = el("settings-update-status-pill");
+  const latestTagEl = el("settings-update-latest-tag");
+  if (checkBtn) checkBtn.disabled = true;
+  if (statusPill) {
+    statusPill.className = "pill mono-num";
+    statusPill.textContent = "Checking...";
+  }
+  if (latestTagEl && !state.appUpdateReport) {
+    latestTagEl.textContent = "Checking GitHub Releases...";
+  }
+  try {
+    const report = await checkForAppUpdates(force);
+    renderAppUpdateReport(report);
+    if (report?.updateAvailable) {
+      showToast(
+        `Update ${report.tagName || report.latestVersion} is ready to download (SHA-256 verified).`,
+        "info",
+        3800
+      );
+    } else if (force) {
+      showToast(`Duke Launcher is up to date (v${report?.currentVersion || "2.2.1"}).`, "success", 2400);
+    }
+    return report;
+  } catch (err) {
+    if (statusPill) {
+      statusPill.className = "pill rose mono-num";
+      statusPill.textContent = "Check Failed";
+    }
+    if (latestTagEl && !state.appUpdateReport) {
+      latestTagEl.textContent = "Offline / Unreachable";
+    }
+    if (force) {
+      showToast(`Update check failed: ${err}`, "error");
+    }
+    return null;
+  } finally {
+    state.appUpdateChecking = false;
+    if (checkBtn) checkBtn.disabled = false;
+  }
+}
+
+async function handleApplyAppUpdate() {
+  if (state.appUpdateApplying) return;
+  const applyBtn = el("btn-apply-app-update");
+  state.appUpdateApplying = true;
+  if (applyBtn) applyBtn.disabled = true;
+  renderAppUpdateProgress({
+    stage: "downloading",
+    message: "Downloading & verifying SHA-256 release package...",
+    progressPct: 0
+  });
+  try {
+    const targetVer = state.appUpdateReport?.latestVersion || null;
+    const res = await downloadAndApplyAppUpdate(targetVer);
+    showToast(
+      res?.message || "Verified update staged. Duke Launcher will restart momentarily.",
+      "success",
+      5000
+    );
+  } catch (err) {
+    state.appUpdateApplying = false;
+    if (applyBtn) applyBtn.disabled = false;
+    renderAppUpdateProgress({
+      stage: "error",
+      message: `Update failed: ${err}`,
+      progressPct: 0
+    });
+    showToast(`Update failed: ${err}`, "error", 5000);
+  }
 }
 
 function hasSelfHealRecoveryActivity(rep) {

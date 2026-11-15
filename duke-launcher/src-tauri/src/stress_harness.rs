@@ -716,6 +716,33 @@ fn case_redist_cleaner_cas_reclaim(root: &Path) -> Result<String, String> {
     ))
 }
 
+fn case_minimize_settings_and_updater_sanity(root: &Path) -> Result<String, String> {
+    let defaults = crate::LauncherSettings::default();
+    if defaults.minimize_to_tray || defaults.close_to_tray || !defaults.auto_check_updates {
+        return Err(format!(
+            "Unexpected default tray/updater flags: minimize_to_tray={}, close_to_tray={}, auto_check_updates={}",
+            defaults.minimize_to_tray, defaults.close_to_tray, defaults.auto_check_updates
+        ));
+    }
+
+    let sample_path = root.join("updater_sample.bin");
+    fs::write(&sample_path, b"duke-v2.2.1-binary-payload").map_err(|e| e.to_string())?;
+    let mismatch = crate::updater::verify_file_sha256_streaming(
+        &sample_path,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    );
+    if mismatch.is_ok() {
+        return Err("Updater SHA-256 verification accepted a mismatched digest.".to_string());
+    }
+    if !crate::updater::is_newer_version("2.2.0", "v2.2.1")
+        || crate::updater::is_newer_version("2.2.1", "v2.2.1")
+    {
+        return Err("Updater SemVer comparison failed v2.2.1 check.".to_string());
+    }
+
+    Ok("Opt-in tray defaults (false/false), auto-check updates (true), SemVer, and SHA-256 rejection verified.".to_string())
+}
+
 pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
     let Some((launcher_dir, tauri_dir)) = resolve_workspace_launcher_dirs() else {
         return Ok("Source tree not adjacent to binary; skipped static UI parity scan.".to_string());
@@ -736,8 +763,8 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
         .map_err(|e| format!("Failed reading tauri.conf.json: {e}"))?;
 
     // 1. Version & Window Safety Checks
-    if !index_html.contains("2.2.0") || !tauri_conf.contains("\"2.2.0\"") {
-        return Err("Expected v2.2.0 marker missing in index.html or tauri.conf.json.".to_string());
+    if !index_html.contains("2.2.1") || !tauri_conf.contains("\"2.2.1\"") {
+        return Err("Expected v2.2.1 marker missing in index.html or tauri.conf.json.".to_string());
     }
 
     let default_sites = crate::sites::default_search_sites();
@@ -885,7 +912,7 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
     }
 
     Ok(format!(
-        "Verified v2.2.0: 6 views, 10 modals, 10 themes, VirtualCardGrid, {} SVG symbols, {} DOM IDs checked, {} IPC commands registered.",
+        "Verified v2.2.1: 6 views, 10 modals, 10 themes, VirtualCardGrid, {} SVG symbols, {} DOM IDs checked, {} IPC commands registered.",
         symbol_ids.len(),
         html_ids.len(),
         invoke_cmds.len()
@@ -963,6 +990,9 @@ pub fn run_chaos_stress_harness_sync(check_ui_contract: bool) -> StressHarnessRe
         run_case("redist_cleaner_cas_reclaim", || {
             case_redist_cleaner_cas_reclaim(&temp_root)
         }),
+        run_case("minimize_settings_and_updater_sanity", || {
+            case_minimize_settings_and_updater_sanity(&temp_root)
+        }),
     ];
 
     if check_ui_contract {
@@ -1035,6 +1065,6 @@ mod tests {
             );
         }
         assert_eq!(report.failed_cases, 0);
-        assert_eq!(report.passed_cases, 16);
+        assert_eq!(report.passed_cases, 17);
     }
 }

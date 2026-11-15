@@ -84,7 +84,7 @@
         </button>
         <img src="assets/dukeflaglogo.png" alt="Duke Launcher" class="titlebar-emblem" />
         <span class="titlebar-title">Duke Launcher</span>
-        <span class="titlebar-version mono-num" id="app-version-pill">v2.2.0</span>
+        <span class="titlebar-version mono-num" id="app-version-pill">v2.2.1</span>
       </div>
 
       <div class="titlebar-center">
@@ -139,6 +139,10 @@
           <svg class="icon" aria-hidden="true"><use href="#icon-users"/></svg>
           <span>Friends</span>
           <span class="friends-count-pill mono-num" id="friends-online-pill">0</span>
+        </button>
+        <button type="button" class="titlebar-status-pill titlebar-update-pill hidden" id="btn-titlebar-update-pill" title="A newer Duke Launcher update is available">
+          <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
+          <span id="titlebar-update-pill-label">Update Available</span>
         </button>
         <button type="button" class="titlebar-status-pill hidden" id="titlebar-suspend-pill" title="Freeze or resume active game process">
           <svg class="icon" aria-hidden="true"><use href="#icon-pause"/></svg>
@@ -1958,7 +1962,7 @@
               <div class="suite-autonomy-daemons-row" id="suite-autonomy-daemons-row"></div>
             </div>
 
-            <!-- TAB 1: ESSENTIALS (6 Clean, Everyday Controls) -->
+            <!-- TAB 1: ESSENTIALS (8 Clean, Everyday Controls) -->
             <div id="settings-panel-essentials" class="settings-tab-panel" role="tabpanel">
               <!-- 1. Where Games Save -->
               <div class="panel-card">
@@ -2067,6 +2071,82 @@
                   </button>
                 </div>
                 <div id="desktop-cleanup-summary" class="detail-autofix-summary hidden" role="status"></div>
+              </div>
+
+              <!-- 7. Window & System Tray -->
+              <div class="panel-card" id="settings-tray-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>7. Window &amp; System Tray</h3>
+                    <p class="panel-sub">Choose how minimizing or closing the window behaves so you can keep Duke Launcher running quietly in the background when needed.</p>
+                  </div>
+                </div>
+                <label class="setting-toggle-row" for="setting-minimize-to-tray">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Minimize to System Tray</div>
+                    <div class="setting-toggle-desc">Turning this on hides Duke Launcher into the system tray when minimized to save extra memory (off by default for standard taskbar minimize).</div>
+                  </div>
+                  <input type="checkbox" id="setting-minimize-to-tray" class="setting-checkbox" />
+                </label>
+                <label class="setting-toggle-row" for="setting-close-to-tray">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Close Button Minimizes to Tray</div>
+                    <div class="setting-toggle-desc">Turning this on hides Duke Launcher to the system tray when clicking &times; instead of exiting, saving extra memory until reopened.</div>
+                  </div>
+                  <input type="checkbox" id="setting-close-to-tray" class="setting-checkbox" />
+                </label>
+              </div>
+
+              <!-- 8. App Updates -->
+              <div class="panel-card" id="settings-updates-card">
+                <div class="panel-head">
+                  <div>
+                    <h3>8. App Updates</h3>
+                    <p class="panel-sub">Check GitHub Releases for newer Duke Launcher builds with SHA-256 verification and one-click install.</p>
+                  </div>
+                  <div class="detail-head-actions-inline">
+                    <span class="pill mono-num" id="settings-update-status-pill">Up to Date</span>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-check-app-updates">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                      <span>Check for Updates</span>
+                    </button>
+                    <button type="button" class="btn btn-primary btn-sm hidden" id="btn-apply-app-update">
+                      <svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>
+                      <span>Download &amp; Restart to Update</span>
+                    </button>
+                  </div>
+                </div>
+                <label class="setting-toggle-row" for="setting-auto-check-updates">
+                  <div class="setting-toggle-copy">
+                    <div class="setting-toggle-title">Check for Updates Automatically on Startup</div>
+                    <div class="setting-toggle-desc">Silently checks GitHub Releases when Duke Launcher starts and verifies downloaded packages with SHA-256 before updating.</div>
+                  </div>
+                  <input type="checkbox" id="setting-auto-check-updates" class="setting-checkbox" checked />
+                </label>
+                <div class="update-meta-grid">
+                  <div class="update-meta-tile">
+                    <span class="detail-metric-label">Current Version</span>
+                    <strong class="detail-metric-val mono-num" id="settings-update-current-version">v2.2.1</strong>
+                  </div>
+                  <div class="update-meta-tile">
+                    <span class="detail-metric-label">Latest Release</span>
+                    <strong class="detail-metric-val mono-num" id="settings-update-latest-tag">Checking GitHub Releases...</strong>
+                  </div>
+                  <div class="update-meta-tile">
+                    <span class="detail-metric-label">Release Package</span>
+                    <strong class="detail-metric-val mono-num" id="settings-update-asset-meta">--</strong>
+                  </div>
+                </div>
+                <pre id="settings-update-notes" class="update-release-notes hidden"></pre>
+                <div id="settings-update-progress-wrap" class="drive-space-widget hidden">
+                  <div class="drive-space-row">
+                    <span class="mono-num" id="settings-update-progress-label">Preparing update...</span>
+                    <span class="mono-num panel-sub" id="settings-update-progress-pct">0%</span>
+                  </div>
+                  <div class="progress-track">
+                    <div class="progress-fill" id="settings-update-progress-fill" style="width:0%"></div>
+                  </div>
+                </div>
               </div>
             </div>
 

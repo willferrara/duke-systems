@@ -138,7 +138,13 @@ export async function updateLauncherSettings(patch = {}) {
         ? patch.realtimeSaveWatcherEnabled
         : null,
     desktopChordEnabled:
-      typeof patch.desktopChordEnabled === "boolean" ? patch.desktopChordEnabled : null
+      typeof patch.desktopChordEnabled === "boolean" ? patch.desktopChordEnabled : null,
+    minimizeToTray:
+      typeof patch.minimizeToTray === "boolean" ? patch.minimizeToTray : null,
+    closeToTray:
+      typeof patch.closeToTray === "boolean" ? patch.closeToTray : null,
+    autoCheckUpdates:
+      typeof patch.autoCheckUpdates === "boolean" ? patch.autoCheckUpdates : null
   });
 }
 
@@ -2224,7 +2230,32 @@ export async function getNetEngineStats() {
   return invokeCommand("get_net_engine_stats_cmd");
 }
 
+export async function getSystemRamMb() {
+  return invokeCommand("get_system_ram_mb");
+}
 
+export async function getSystemTelemetry() {
+  return invokeCommand("get_system_telemetry");
+}
 
+export async function checkForAppUpdates(force = true) {
+  return invokeCommand("check_for_app_updates", { force: Boolean(force) });
+}
 
+export async function getCachedAppUpdate() {
+  return invokeCommand("get_cached_app_update");
+}
 
+export async function downloadAndApplyAppUpdate(version = null) {
+  return invokeCommand("download_and_apply_app_update", {
+    version: version ? String(version) : null
+  });
+}
+
+export function listenAppUpdateAvailable(callback) {
+  return listenEvent("app-update-available", callback);
+}
+
+export function listenAppUpdateProgress(callback) {
+  return listenEvent("app-update-progress", callback);
+}

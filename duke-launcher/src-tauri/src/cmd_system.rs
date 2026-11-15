@@ -36,7 +36,8 @@ use crate::{
     platforms, playtime_sync, privacy_vault, projfs_stream, quick_resume, redist_cleaner,
     retro_achievements, retro_catalog, rom_inspect, rom_patcher, rom_shrink, save_watcher,
     self_heal, shader_swarm, sidebar_icons, sites, snapshots, sources, steam_cm, store_direct,
-    stream_extract, stress_harness, swarm, time_machine, uninstaller, vhdx_stage, wasm_plugins,
+    stream_extract, stress_harness, swarm, time_machine, uninstaller, updater, vhdx_stage,
+    wasm_plugins,
 };
 use crate::cmd_emulators::*;
 use crate::cmd_library::*;
@@ -422,6 +423,12 @@ pub struct LauncherSettings {
     pub realtime_save_watcher_enabled: bool,
     #[serde(default = "default_true", alias = "desktopChordEnabled", alias = "desktop_chord_enabled")]
     pub desktop_chord_enabled: bool,
+    #[serde(default, alias = "minimizeToTray", alias = "minimize_to_tray")]
+    pub minimize_to_tray: bool,
+    #[serde(default, alias = "closeToTray", alias = "close_to_tray")]
+    pub close_to_tray: bool,
+    #[serde(default = "default_true", alias = "autoCheckUpdates", alias = "auto_check_updates")]
+    pub auto_check_updates: bool,
 }
 
 pub(crate) fn default_disk_pressure_gb() -> f64 {
@@ -565,6 +572,9 @@ impl Default for LauncherSettings {
             discord_rpc_enabled: true,
             realtime_save_watcher_enabled: true,
             desktop_chord_enabled: true,
+            minimize_to_tray: false,
+            close_to_tray: false,
+            auto_check_updates: true,
         }
     }
 }
@@ -601,6 +611,16 @@ pub(crate) fn apply_runtime_settings(settings: &LauncherSettings) {
     desktop_chord::set_desktop_chord_enabled(settings.desktop_chord_enabled);
     if !settings.realtime_save_watcher_enabled {
         save_watcher::stop_all_save_watchers();
+    }
+    if let Some(daemon) = TRAY_DAEMON.get() {
+        daemon
+            .config
+            .minimize_to_tray
+            .store(settings.minimize_to_tray, Ordering::Release);
+        daemon
+            .config
+            .close_to_tray
+            .store(settings.close_to_tray, Ordering::Release);
     }
     if let Ok(mut guard) = get_active_hotkey_cell().lock() {
         *guard = settings.suspend_hotkey.clone();
@@ -744,6 +764,9 @@ pub(crate) async fn update_launcher_settings(
     discord_rpc_enabled: Option<bool>,
     realtime_save_watcher_enabled: Option<bool>,
     desktop_chord_enabled: Option<bool>,
+    minimize_to_tray: Option<bool>,
+    close_to_tray: Option<bool>,
+    auto_check_updates: Option<bool>,
 ) -> Result<LauncherSettings, String> {
     let app_for_save = app.clone();
     let autostart_change = start_minimized_with_windows;
@@ -944,6 +967,15 @@ pub(crate) async fn update_launcher_settings(
         }
         if let Some(chord) = desktop_chord_enabled {
             current.desktop_chord_enabled = chord;
+        }
+        if let Some(min_tray) = minimize_to_tray {
+            current.minimize_to_tray = min_tray;
+        }
+        if let Some(close_tray) = close_to_tray {
+            current.close_to_tray = close_tray;
+        }
+        if let Some(auto_chk) = auto_check_updates {
+            current.auto_check_updates = auto_chk;
         }
 
         save_settings_to_disk(&app_for_save, &current)?;
@@ -2952,13 +2984,43 @@ pub(crate) async fn trim_working_set(app: AppHandle) -> Result<Value, String> {
 }
 
 #[tauri::command]
+pub(crate) async fn get_system_ram_mb() -> Result<f64, String> {
+    run_blocking_timeout(5, "get_system_ram_mb", || Ok(get_process_working_set_mb())).await
+}
+
+#[tauri::command]
+pub(crate) async fn check_for_app_updates(
+    force: Option<bool>,
+) -> Result<updater::UpdateCheckReport, String> {
+    if !force.unwrap_or(true) {
+        if let Some(cached) = updater::get_cached_update_report() {
+            return Ok(cached);
+        }
+    }
+    updater::check_for_app_updates_internal().await
+}
+
+#[tauri::command]
+pub(crate) async fn get_cached_app_update() -> Result<Option<updater::UpdateCheckReport>, String> {
+    Ok(updater::get_cached_update_report())
+}
+
+#[tauri::command]
+pub(crate) async fn download_and_apply_app_update(
+    app: AppHandle,
+    version: Option<String>,
+) -> Result<updater::UpdateApplyResult, String> {
+    updater::download_and_apply_app_update_internal(&app, version).await
+}
+
+#[tauri::command]
 pub(crate) async fn get_system_telemetry() -> Result<Value, String> {
     run_blocking_timeout(5, "get_system_telemetry", || {
         let ram_mb = get_process_working_set_mb();
         let doh_hosts = duke_core::net_doh::cached_doh_host_count();
         Ok(serde_json::json!({
             "workingSetMb": ram_mb,
-            "dohShield": "ACTIVE",
+            "dohShield": if duke_core::net_doh::is_doh_enabled() { "ACTIVE" } else { "SYSTEM DNS" },
             "dohCachedHosts": doh_hosts,
             "portableMode": resolve_portable_data_dir().is_some(),
             "status": "IDLE TRIMMED"
@@ -4299,6 +4361,21 @@ pub(crate) fn init_duke_bus(bus_app: AppHandle) {
 
 pub(crate) fn spawn_idle_ram_trim_watcher(app_handle: AppHandle) {
     tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        if !APP_SHUTDOWN.load(Ordering::Acquire) {
+            let ram_mb = get_process_working_set_mb();
+            let doh_hosts = duke_core::net_doh::cached_doh_host_count();
+            let _ = app_handle.emit(
+                "memory-telemetry",
+                serde_json::json!({
+                    "workingSetMb": ram_mb,
+                    "dohShield": if duke_core::net_doh::is_doh_enabled() { "ACTIVE" } else { "SYSTEM DNS" },
+                    "dohCachedHosts": doh_hosts,
+                    "portableMode": resolve_portable_data_dir().is_some(),
+                    "status": "IDLE TRIMMED"
+                }),
+            );
+        }
         let mut tick_count: u64 = 0;
         let mut interval = tokio::time::interval(Duration::from_secs(15));
         loop {
@@ -4604,6 +4681,9 @@ pub(crate) mod tests {
         assert!(defaults.global_launch_args.is_none());
         assert!(!defaults.swarm_auto_sync_saves);
         assert!(!defaults.start_minimized_with_windows);
+        assert!(!defaults.minimize_to_tray);
+        assert!(!defaults.close_to_tray);
+        assert!(defaults.auto_check_updates);
 
         let partial_settings: LauncherSettings = serde_json::from_str(
             r#"{"downloadSpeedPreset":"balanced","nvmeCacheBudgetPct":40,"customProxyUrl":"socks5://127.0.0.1:1080","maxRestorePoints":10}"#,

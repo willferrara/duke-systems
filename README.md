@@ -1,12 +1,12 @@
 <div align="center">
-  <img src="duke-launcher/src/assets/dukeflaglogo.png" alt="Duke Launcher v2.2.0" width="108" />
-  <h1>Duke Launcher <code>v2.2.0</code></h1>
+  <img src="duke-launcher/src/assets/dukeflaglogo.png" alt="Duke Launcher v2.2.1" width="108" />
+  <h1>Duke Launcher <code>v2.2.1</code></h1>
   <p>
     <strong>All Your Games. Maximum FPS. Zero Bloat.</strong><br />
     One tiny, free Windows 11 game launcher for PC, Steam, Xbox, Epic, GOG, Nintendo &amp; retro classics.
   </p>
   <p>
-    <a href="https://github.com/willferrara/duke-systems/releases/latest"><img src="https://img.shields.io/badge/Version-v2.2.0-0078d4?style=flat-square" alt="v2.2.0" /></a>
+    <a href="https://github.com/willferrara/duke-systems/releases/latest"><img src="https://img.shields.io/badge/Version-v2.2.1-0078d4?style=flat-square" alt="v2.2.1" /></a>
     <a href="https://github.com/willferrara/duke-systems/releases/latest"><img src="https://img.shields.io/badge/Platform-Windows%2011-1f6feb?style=flat-square" alt="Windows 11" /></a>
     <a href="https://github.com/willferrara/duke-systems/releases/latest"><img src="https://img.shields.io/badge/Size-~8.7%20MB%20Portable-2ea043?style=flat-square" alt="~8.7 MB Portable" /></a>
     <a href="https://github.com/willferrara/duke-systems/releases/latest"><img src="https://img.shields.io/badge/RAM-~20%20MB%20Idle-0e8a16?style=flat-square" alt="~20 MB Idle RAM" /></a>
@@ -15,20 +15,20 @@
   </p>
   <p>
     <a href="https://github.com/willferrara/duke-systems/releases/latest">
-      <img src="https://img.shields.io/badge/%E2%AC%87%20Download%20Duke%20Launcher%20(v2.2.0)-0078d4?style=for-the-badge" alt="Download Duke Launcher v2.2.0" />
+      <img src="https://img.shields.io/badge/%E2%AC%87%20Download%20Duke%20Launcher%20(v2.2.1)-0078d4?style=for-the-badge" alt="Download Duke Launcher v2.2.1" />
     </a>
   </p>
 </div>
 
 ---
 
-**Duke Launcher** is a tiny, super-fast, free game launcher that puts all of your **Steam, Xbox, Epic, GOG, and Nintendo/retro games** into one clean app. Most modern launchers keep heavy web browsers running in the background that quietly eat hundreds of megabytes of memory, pester you to log in, track your habits, and still leave you to troubleshoot broken downloads or missing DLLs on your own. **Duke Launcher (`v2.2.0`)** uses under 20 MB idle RAM (or just a few MB in the system tray) so your games get **maximum FPS**, **never forces you to create an account or collects any data**, **scrolls 25,000+ games effortlessly with zero stutter**, **unpacks ZIP/7z/RAR downloads automatically without extra tools**, **shrinks oversized disc images & duplicate redistributables safely**, **protects game saves in real time while you play**, and **heals itself automatically after crashes or `Alt+F4`**.
+**Duke Launcher** is a tiny, super-fast, free game launcher that puts all of your **Steam, Xbox, Epic, GOG, and Nintendo/retro games** into one clean app. Most modern launchers keep heavy web browsers running in the background that quietly eat hundreds of megabytes of memory, pester you to log in, track your habits, and still leave you to troubleshoot broken downloads or missing DLLs on your own. **Duke Launcher (`v2.2.1`)** uses under 20 MB idle RAM (or just a few MB if you opt into minimizing to the system tray) so your games get **maximum FPS**, **never forces you to create an account or collects any data**, **scrolls 25,000+ games effortlessly with zero stutter**, **unpacks ZIP/7z/RAR downloads automatically without extra tools**, **shrinks oversized disc images & duplicate redistributables safely**, **protects game saves in real time while you play**, **checks GitHub Releases for SHA-256 verified 1-click updates**, and **heals itself automatically after crashes or `Alt+F4`**.
 
 ---
 
 ## Why Gamers Switch
 
-| Everyday Question | Duke Launcher (`v2.2.0`) | Steam | Xbox App | Playnite | Hydra |
+| Everyday Question | Duke Launcher (`v2.2.1`) | Steam | Xbox App | Playnite | Hydra |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Memory Used While You Play** | **&lt;20 MB** (stays out of your way) | ~350–600 MB | ~250–500 MB | ~150–300 MB | ~250–450 MB |
 | **Account Login or Tracking?** | **Never — 100% private &amp; local** | Account required | Microsoft account required | Optional | Optional |
@@ -41,13 +41,15 @@
 
 ---
 
-## Everyday Features Made Simple (`v2.2.0`)
+## Everyday Features Made Simple (`v2.2.1`)
 
 - **Instant Scrolling Across 25,000+ Games:** Virtualized library and catalog grids keep only visible cards in memory so browsing huge collections stays locked at 120 FPS with under 20 MB idle RAM.
 - **All Your Games in One Clean Screen:** Click **Import Existing Libraries** to pull in Steam, Xbox, Epic, and GOG games automatically, or drag and drop `.exe` files, folders, shortcuts, and ROMs straight onto the window.
 - **Zero-Hassle Retro Disc Shrinking (`.chd` / `.rvz`):** Automatically groups multi-disc `.cue`/`.bin` sets, verifies BIOS firmware hashes, patches ROMs safely without altering originals, and shrinks `.bin`/`.cue`/`.iso` or GameCube/Wii discs losslessly in 1 click.
 - **Reclaim Gigabytes of Duplicate Installers Safely:** Remove dead `_CommonRedist`, DirectX, `vcredist`, `.NET` installers, and old crash dumps in one click with automatic `.duke-cas` rollback protection.
 - **Real-Time Auto Save Snapshots While Playing:** Detects save changes during gameplay and quietly saves instant deduplicated restore points without overwriting good saves.
+- **Built-In GitHub Auto-Updater (SHA-256 Verified):** Quietly checks official [GitHub Releases](https://github.com/willferrara/duke-systems/releases/latest) in the background (you can turn this off in **Settings**), previews full release notes including core engine (`duke-core`) updates, picks the right installer or portable `.exe` automatically, verifies the cryptographic SHA-256 file fingerprint before touching anything, and updates cleanly in one click while keeping your games and `data/` folder untouched.
+- **Taskbar Minimize &amp; Opt-In System Tray Controls:** Clicking **Minimize** drops Duke Launcher to your Windows taskbar like a normal app by default, and clicking **Close (`×`)** exits cleanly. Want even lower background memory while gaming? Enable **Minimize to System Tray** or **Close Button Minimizes to Tray** in **Settings** anytime.
 - **Self-Healing Startup Protection:** If Windows reboots or a download is interrupted mid-flight, Duke Launcher automatically restores backups, cleans temp files, repairs library indexes, and tells you via a brief startup toast.
 - **Built-In Discord Status &amp; Controller Desktop Mode:** Shows your currently playing game on Discord with zero extra background apps, and lets you hold **Guide** (or `LB+RB` on FPV radios) to move the mouse, click, scroll, and `Alt+Tab` right from your couch.
 - **Take Your Library on a USB Drive:** Drop an empty `portable.txt` file next to `Duke Launcher.exe` to store everything neatly in `./data/` with zero Registry or AppData clutter.
@@ -62,7 +64,7 @@
 <details>
 <summary><strong>Under the Hood (For Developers &amp; Systems Engineers)</strong></summary>
 
-### Architecture Overview (`v2.2.0`)
+### Architecture Overview (`v2.2.1`)
 
 **Duke Launcher** is built in Rust + Win32 FFI + Tauri v2 (`WebView2` UI rendered with Vanilla ES2022 JS and 10 zero-bloat solid CSS themes — zero Electron, zero Chromium bundling, zero runtime `.unwrap()` calls under `panic = "abort"`). All UI-facing Tauri commands offload I/O, FFI, and network work asynchronously via `tokio::task::spawn_blocking` across four domain routers (`cmd_library.rs`, `cmd_emulators.rs`, `cmd_security.rs`, `cmd_system.rs`) while keeping `main.rs` as a crisp bootstrap entrypoint.
 
@@ -71,11 +73,11 @@ flowchart TD
     UI["Vanilla ES2022 + VirtualCardGrid (10 Solid Themes + SVG Sprites)"] -->|"Async Tauri v2 IPC"| Routers["Domain Routers (cmd_library / cmd_emulators / cmd_security / cmd_system)"]
     CLI["Headless CLI Modes (--mcp / --bench / --stress-test)"] -->|"0 MB WebView2 RAM"| Routers
 
-    subgraph CoreV22["v2.2.0 Core Engine Modules"]
+    subgraph CoreV22["v2.2.1 Core Engine Modules"]
         LibStore["lib_store.rs (DKLIB Binary + DKWAL Log)"]
         NetEngine["net_engine.rs (Pooled Reqwest + ETag Cache + DoH)"]
         ArchiveNative["archive_native.rs (Pure-Rust ZIP/7z/RAR5 + Zip-Slip Guard)"]
-        SelfHeal["self_heal.rs v2 (session.lock + Breadcrumb Watchdog + .bak Recovery)"]
+        SelfHeal["self_heal.rs v2 + updater.rs (SHA-256 GitHub Self-Updater)"]
     end
 
     subgraph PreservationAndUx["Preservation, QoL & Native Integration"]
@@ -89,9 +91,10 @@ flowchart TD
     Routers --> PreservationAndUx
 ```
 
-### Key `v2.2.0` Engineering Systems
+### Key `v2.2.1` Engineering Systems
 
 - **Decomposed Async Command Layer (`cmd_library.rs`, `cmd_emulators.rs`, `cmd_security.rs`, `cmd_system.rs`):** Splits 4,800+ lines out of `main.rs`, offloads blocking I/O/Win32/network calls via `run_blocking_timeout` without holding `std::sync::Mutex` across `.await` points, and uses a shared shutdown teardown hook.
+- **GitHub Releases Self-Updater (`updater.rs`):** Queries the GitHub Releases API over `net_engine` with DoH/proxy support, parses SemVer tags, detects portable vs. installed deployments and extra release bundle assets, verifies every byte with SHA-256 (`digest: "sha256:<hex>"`), and swaps binaries cleanly via a detached PID-waiting trampoline preserving `data/` and `portable.txt`.
 - **Zero-Copy Virtual Viewport Recycler (`virtual_grid.js`):** Keeps live DOM card nodes capped at `~60` across both `My Games` and sparse `25,000+`-title `Search Games` (`query_catalog_mmap`) with responsive zoom (`125px`–`280px`), compact cards, and `Duke Deck` Couch Mode.
 - **Binary Library Engine (`lib_store.rs` `DKLIB` + `.dkwal`):** Stores library metadata in compact `postcard` binary records with an append-only CRC-protected WAL for constant-time playtime, favorite, and cover updates instead of rewriting large JSON blobs.
 - **Self-Healing Engine v2 (`self_heal.rs`):** Tracks clean exits via `session.lock`, logs stall breadcrumbs via an IPC watchdog, disables repeating stall offenders in `disabled_jobs.json`, auto-restores corrupt `.bak` configs, repairs `library.dklib`/`.dkcat`/`.duke-cas`, clears stale WebView2 locks, and emits startup toast summaries.
