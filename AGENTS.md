@@ -5,6 +5,7 @@ Before executing any file edits, searches, or shell commands on tasks touching 2
 - Break the task into numbered phases (e.g., `Phase 1: Codebase Audit`, `Phase 2: duke-core / Rust Backend`, `Phase 3: Frontend UI & SVG Polish`, `Phase 4: cargo check, cargo test & Binary Audit`).
 - Estimate realistic wall-clock minutes per phase across the ENTIRE multi-file workflow (including `cargo check` / `npm` execution), and state **Estimated Total Process Time: ~X–Y min** up front.
 - Before starting each phase, print a single status line: `[Phase N/Total | Elapsed: ~Xm | Est. Remaining: ~Ym]`.
+- **Calibrated 20-Block Progress Bar:** Accompany phase transitions and progress updates with a calibrated 20-block Unicode progress bar (`█` / `░`) showing exact deliverable completion (`Done/N`, e.g., `Progress: [██████████░░░░░░░░░░] 50% (4/8 deliverables)`), real wall-clock elapsed time, and throughput-calibrated ETA.
 
 ## 2. Duke Suite Architecture & Zero-Bloat Standards
 - **Workspace Layout:** `duke-core` (shared feature-gated library), `duke-systems` (central command hub), `duke-launcher`, `duke-monitor`, `duke-capture`, `duke-input`.
@@ -118,3 +119,10 @@ Before executing any file edits, searches, or shell commands on tasks touching 2
   - `sources.json`: array of Hydra feeds matching `{ "name": "Source Name", "downloads": [{ "title": "...", "uris": ["https://..."], "uploadDate": "...", "fileSize": "..." }] }`.
   - `ludusavi_cache.json`: normalized save schema cache fetched via `duke-core` DoH with 7-day TTL.
   - `settings.json`: `{ "autoCleanCompleted": true, "steamgriddbApiKey": "", "suspendHotkey": "Ctrl+Alt+P", "couchMode": false, "autoDetectClipboard": true, "nvmePrefetchEnabled": true, "swarmEnabled": false, "swarmNodeName": "...", "swarmPeers": [] }`.
+
+## 7. Spec-Locked Delegation Protocol (`Hydrogen XHigh`)
+When `Hydrogen XHigh` orchestrates parallel or multi-crate work using `.agents/agents/` (`rust-engine-builder`, `win11-ui-crafter`, `static-verifier`) and `.agents/rules/duke-invariants.md`, strictly enforce:
+- **Disjoint File Ownership:** Never assign two subagents to edit the same file concurrently. `rust-engine-builder` workers edit only isolated backend modules (`duke-launcher/src-tauri/src/<module>.rs` or `duke-core/src/<module>.rs`); `Hydrogen XHigh` wires thin `#[tauri::command]` wrappers and `generate_handler!` entries in `duke-launcher/src-tauri/src/main.rs` itself after workers complete their modules. `win11-ui-crafter` workers edit only assigned disjoint frontend files (`duke-launcher/src/index.html`, `styles.css`, `main.js`, `api.js`).
+- **Exact Contract Handoff:** Always pass workers a locked mini-spec containing exact `struct`/`enum`/`pub fn` signatures, exact DOM IDs and `#icon-...` `<symbol>` IDs, exact Tauri `invokeCommand` parameter shapes, CSS custom properties, and exact target verification commands (`cargo test -p <crate> <module>::tests`, `node --check`).
+- **Digest-Only Return:** Subagents must return concise `<= 10`-line digests (exported types/signatures, modified selectors/IDs/handlers, test pass counts, or `static-verifier` pass/fail tables with `file:line` diagnostics) rather than raw file dumps so the primary `XHigh` context window stays lean.
+- **Zero-Token Pre-Check:** Run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-hygiene.ps1` (`<2s`) after edits, and delegate full `cargo clippy --workspace --all-targets -- -D warnings` + `cargo test --workspace` verification to `static-verifier`.
