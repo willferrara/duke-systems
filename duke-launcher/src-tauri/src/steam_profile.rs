@@ -145,6 +145,32 @@ fn mem_cache() -> &'static Mutex<HashMap<String, SteamMiniProfile>> {
     PROFILE_MEM_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+pub fn clear_steam_profile_cache() {
+    mem_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    if let Ok(path) = crate::get_app_data_file_standalone(STEAM_PROFILE_CACHE_FILE) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn insert_cached_profile_for_test(key: &str, profile: SteamMiniProfile) {
+    mem_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key.to_string(), profile);
+}
+
+#[cfg(test)]
+pub(crate) fn cached_profile_count_for_test() -> usize {
+    mem_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .len()
+}
+
 pub fn is_valid_steam_id64(raw: &str) -> bool {
     let trimmed = raw.trim();
     trimmed.len() == 17
@@ -305,17 +331,28 @@ fn extract_xml_tag_raw<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
+pub fn strip_cdata_wrappers(raw: &str) -> String {
+    let mut current = raw.trim().to_string();
+    loop {
+        let trimmed = current.trim();
+        if let Some(stripped) = trimmed
+            .strip_prefix("<![CDATA[")
+            .and_then(|s| s.strip_suffix("]]>"))
+        {
+            current = stripped.trim().to_string();
+            continue;
+        }
+        break;
+    }
+    if current.contains("<![CDATA[") || current.contains("]]>") {
+        current = current.replace("<![CDATA[", "").replace("]]>", "");
+    }
+    current.trim().to_string()
+}
+
 fn clean_xml_value(raw: &str) -> String {
-    let trimmed = raw.trim();
-    let inner = if let Some(stripped) = trimmed
-        .strip_prefix("<![CDATA[")
-        .and_then(|s| s.strip_suffix("]]>"))
-    {
-        stripped.trim()
-    } else {
-        trimmed
-    };
-    decode_html_entities(inner)
+    let stripped = strip_cdata_wrappers(raw);
+    decode_html_entities(&stripped)
 }
 
 fn decode_html_entities(input: &str) -> String {
@@ -324,16 +361,23 @@ fn decode_html_entities(input: &str) -> String {
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
+        .replace("&#34;", "\"")
         .replace("&#39;", "'")
+        .replace("&#039;", "'")
+        .replace("&#x27;", "'")
+        .replace("&#X27;", "'")
         .replace("&apos;", "'")
         .replace("&nbsp;", " ")
 }
 
 pub fn strip_html_to_plain_text(raw: &str) -> String {
-    let with_breaks = raw
+    let without_cdata = strip_cdata_wrappers(raw);
+    let with_breaks = without_cdata
         .replace("<br/>", "\n")
         .replace("<br />", "\n")
         .replace("<br>", "\n")
+        .replace("<BR/>", "\n")
+        .replace("<BR />", "\n")
         .replace("<BR>", "\n")
         .replace("</p>", "\n");
     let mut out = String::with_capacity(with_breaks.len());
@@ -480,6 +524,8 @@ pub fn parse_steam_community_xml(
             "Online".to_string()
         };
         ("online".to_string(), label)
+    } else if privacy_state != "public" {
+        ("offline".to_string(), "Steam Profile Private".to_string())
     } else {
         let label = if !state_msg.is_empty() {
             state_msg
@@ -720,6 +766,215 @@ async fn fetch_pooled_json(url: &str) -> Result<Value, String> {
         .map_err(|_| "Invalid Steam Web API JSON".to_string())
 }
 
+pub fn classify_diagnostic_status_label(reason: &str) -> &'static str {
+    let lower = reason.to_ascii_lowercase();
+    if lower.contains("invalid api key")
+        || lower.contains("http 401")
+        || lower.contains("http 403")
+        || lower.contains("access is denied")
+    {
+        "Invalid API Key"
+    } else if lower.contains("private") || lower.contains("friendsonly") || lower.contains("friends-only") {
+        "Steam Profile Private"
+    } else if lower.contains("no local steamid64") || lower.contains("no steam account") {
+        "No Local SteamID64"
+    } else {
+        "Network Unreachable"
+    }
+}
+
+/// Parses a `SteamMiniProfile` directly from Valve's `ISteamUser/GetPlayerSummaries/v2/` JSON response.
+pub fn parse_player_summaries_v2_json(
+    root: &Value,
+    fallback_target: &SteamProfileTarget,
+) -> Result<SteamMiniProfile, String> {
+    let player = root
+        .get("response")
+        .and_then(|r| r.get("players"))
+        .and_then(|p| p.as_array())
+        .and_then(|arr| arr.first())
+        .ok_or_else(|| "Steam Web API returned no player summary for this SteamID64".to_string())?;
+
+    let steam_id64 = player
+        .get("steamid")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| is_valid_steam_id64(s))
+        .map(ToString::to_string)
+        .unwrap_or_else(|| match fallback_target {
+            SteamProfileTarget::SteamId64(id) => id.clone(),
+            SteamProfileTarget::VanityId(_) => String::new(),
+        });
+
+    let persona_name = player
+        .get("personaname")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| fallback_target.display_input());
+
+    let real_name = player
+        .get("realname")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+
+    let avatar_url = player
+        .get("avatarfull")
+        .or_else(|| player.get("avatarmedium"))
+        .or_else(|| player.get("avatar"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+
+    let vis_code = player
+        .get("communityvisibilitystate")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .to_string();
+    let (privacy_state, visibility_label) = format_stranger_visibility_label(&vis_code);
+
+    let game_extra = player
+        .get("gameextrainfo")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+    let game_id = player
+        .get("gameid")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    let pstate = player
+        .get("personastate")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let (online_state, status_label) = if let Some(ref gtitle) = game_extra {
+        ("in-game".to_string(), format!("In-Game · {gtitle}"))
+    } else if pstate != 0 {
+        let lbl = match pstate {
+            2 => "Busy".to_string(),
+            3 => "Away".to_string(),
+            4 => "Snooze".to_string(),
+            _ => "Online".to_string(),
+        };
+        ("online".to_string(), lbl)
+    } else if privacy_state != "public" {
+        ("offline".to_string(), "Steam Profile Private".to_string())
+    } else {
+        ("offline".to_string(), "Offline".to_string())
+    };
+
+    let profile_url = player
+        .get("profileurl")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            if !steam_id64.is_empty() {
+                format!("https://steamcommunity.com/profiles/{steam_id64}")
+            } else {
+                fallback_target.web_profile_url()
+            }
+        });
+
+    let location = player
+        .get("loccountrycode")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+
+    let summary_text = if privacy_state != "public" {
+        "Steam Profile Private — public community bio and game details are hidden.".to_string()
+    } else {
+        String::new()
+    };
+
+    Ok(SteamMiniProfile {
+        configured: true,
+        target_input: fallback_target.display_input(),
+        steam_id64,
+        vanity_id: match fallback_target {
+            SteamProfileTarget::VanityId(v) => Some(v.clone()),
+            _ => None,
+        },
+        is_override_preview: false,
+        detected_local_steam_id: None,
+        persona_name,
+        real_name,
+        avatar_url,
+        animated_avatar_url: None,
+        avatar_frame_url: None,
+        avatar_frame_title: None,
+        profile_background_url: None,
+        profile_background_title: None,
+        online_state,
+        status_label,
+        in_game_title: game_extra,
+        in_game_app_id: game_id,
+        summary_text,
+        member_since: None,
+        location,
+        steam_level: None,
+        privacy_state: privacy_state.to_string(),
+        stranger_visibility_label: visibility_label.to_string(),
+        profile_url,
+        showcase_games: Vec::new(),
+        enriched_via_api_key: true,
+        from_cache: false,
+        offline_fallback: false,
+        status_note: None,
+        fetched_at: now_unix_secs(),
+    })
+}
+
+async fn fetch_profile_from_web_api(
+    target: &SteamProfileTarget,
+    api_key: &str,
+    detected_id: Option<String>,
+    is_override_preview: bool,
+) -> Result<SteamMiniProfile, String> {
+    let key_trimmed = api_key.trim();
+    if key_trimmed.is_empty() {
+        return Err("No Steam Web API key configured".to_string());
+    }
+    let key_enc = urlencoding::encode(key_trimmed);
+    let resolved_sid = match target {
+        SteamProfileTarget::SteamId64(id) => id.clone(),
+        SteamProfileTarget::VanityId(vanity) => {
+            let v_enc = urlencoding::encode(vanity.trim());
+            let resolve_url = format!(
+                "https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/?key={key_enc}&vanityurl={v_enc}"
+            );
+            let val = fetch_pooled_json(&resolve_url).await?;
+            val.get("response")
+                .and_then(|r| r.get("steamid"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| is_valid_steam_id64(s))
+                .map(ToString::to_string)
+                .ok_or_else(|| format!("Could not resolve Steam vanity URL '{vanity}'"))?
+        }
+    };
+
+    let sid_enc = urlencoding::encode(resolved_sid.trim());
+    let summaries_url = format!(
+        "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key={key_enc}&steamids={sid_enc}"
+    );
+    let sum_val = fetch_pooled_json(&summaries_url).await?;
+    let mut profile = parse_player_summaries_v2_json(&sum_val, target)?;
+    profile.steam_id64 = resolved_sid;
+    profile.is_override_preview = is_override_preview;
+    profile.detected_local_steam_id = detected_id;
+    enrich_profile_with_web_api(&mut profile, key_trimmed).await;
+    Ok(profile)
+}
+
 async fn enrich_profile_with_web_api(profile: &mut SteamMiniProfile, api_key: &str) {
     if !is_valid_steam_id64(&profile.steam_id64) || api_key.trim().is_empty() {
         return;
@@ -728,7 +983,7 @@ async fn enrich_profile_with_web_api(profile: &mut SteamMiniProfile, api_key: &s
     let sid_enc = urlencoding::encode(profile.steam_id64.trim());
 
     let summaries_url = format!(
-        "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key={key_enc}&steamids={sid_enc}"
+        "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key={key_enc}&steamids={sid_enc}"
     );
     let level_url = format!(
         "https://api.steampowered.com/IPlayerService/GetSteamLevel/v1/?key={key_enc}&steamid={sid_enc}"
@@ -745,64 +1000,75 @@ async fn enrich_profile_with_web_api(profile: &mut SteamMiniProfile, api_key: &s
 
     let mut any_enriched = false;
 
-    if let Ok(sum_val) = sum_res {
-        if let Some(player) = sum_val
-            .get("response")
-            .and_then(|r| r.get("players"))
-            .and_then(|p| p.as_array())
-            .and_then(|arr| arr.first())
-        {
-            any_enriched = true;
-            if let Some(name) = player
-                .get("personaname")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
+    match sum_res {
+        Ok(sum_val) => {
+            if let Some(player) = sum_val
+                .get("response")
+                .and_then(|r| r.get("players"))
+                .and_then(|p| p.as_array())
+                .and_then(|arr| arr.first())
             {
-                profile.persona_name = name.to_string();
-            }
-            if let Some(av) = player
-                .get("avatarfull")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                profile.avatar_url = av.to_string();
-            }
-            if let Some(vis) = player.get("communityvisibilitystate").and_then(|v| v.as_u64()) {
-                let code = vis.to_string();
-                let (state, label) = format_stranger_visibility_label(&code);
-                profile.privacy_state = state.to_string();
-                profile.stranger_visibility_label = label.to_string();
-            }
-            let game_extra = player
-                .get("gameextrainfo")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(ToString::to_string);
-            let game_id = player
-                .get("gameid")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.trim().parse::<u32>().ok());
-            if let Some(gtitle) = game_extra {
-                profile.in_game_title = Some(gtitle.clone());
-                profile.in_game_app_id = game_id.or(profile.in_game_app_id);
-                profile.online_state = "in-game".to_string();
-                profile.status_label = format!("In-Game · {gtitle}");
-            } else if let Some(pstate) = player.get("personastate").and_then(|v| v.as_u64()) {
-                if pstate == 0 {
-                    profile.online_state = "offline".to_string();
-                    profile.status_label = "Offline".to_string();
-                } else {
-                    profile.online_state = "online".to_string();
-                    profile.status_label = match pstate {
-                        2 => "Busy".to_string(),
-                        3 => "Away".to_string(),
-                        4 => "Snooze".to_string(),
-                        _ => "Online".to_string(),
-                    };
+                any_enriched = true;
+                if let Some(name) = player
+                    .get("personaname")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    profile.persona_name = name.to_string();
                 }
+                if let Some(av) = player
+                    .get("avatarfull")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    profile.avatar_url = av.to_string();
+                }
+                if let Some(vis) = player.get("communityvisibilitystate").and_then(|v| v.as_u64()) {
+                    let code = vis.to_string();
+                    let (state, label) = format_stranger_visibility_label(&code);
+                    profile.privacy_state = state.to_string();
+                    profile.stranger_visibility_label = label.to_string();
+                }
+                let game_extra = player
+                    .get("gameextrainfo")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string);
+                let game_id = player
+                    .get("gameid")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.trim().parse::<u32>().ok());
+                if let Some(gtitle) = game_extra {
+                    profile.in_game_title = Some(gtitle.clone());
+                    profile.in_game_app_id = game_id.or(profile.in_game_app_id);
+                    profile.online_state = "in-game".to_string();
+                    profile.status_label = format!("In-Game · {gtitle}");
+                } else if let Some(pstate) = player.get("personastate").and_then(|v| v.as_u64()) {
+                    if pstate == 0 {
+                        profile.online_state = "offline".to_string();
+                        profile.status_label = if profile.privacy_state != "public" {
+                            "Steam Profile Private".to_string()
+                        } else {
+                            "Offline".to_string()
+                        };
+                    } else {
+                        profile.online_state = "online".to_string();
+                        profile.status_label = match pstate {
+                            2 => "Busy".to_string(),
+                            3 => "Away".to_string(),
+                            4 => "Snooze".to_string(),
+                            _ => "Online".to_string(),
+                        };
+                    }
+                }
+            }
+        }
+        Err(err) => {
+            if classify_diagnostic_status_label(&err) == "Invalid API Key" {
+                profile.status_note = Some("Invalid API Key".to_string());
             }
         }
     }
@@ -904,7 +1170,8 @@ fn save_disk_cache_entry(key: &str, profile: &SteamMiniProfile) {
 
 fn lookup_cached_profile(key: &str, allow_stale: bool) -> Option<SteamMiniProfile> {
     let now = now_unix_secs();
-    if let Ok(guard) = mem_cache().lock() {
+    {
+        let guard = mem_cache().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(hit) = guard.get(key) {
             if allow_stale
                 || now.saturating_sub(hit.fetched_at) <= STEAM_PROFILE_CACHE_TTL_SECS
@@ -920,9 +1187,8 @@ fn lookup_cached_profile(key: &str, allow_stale: bool) -> Option<SteamMiniProfil
         if allow_stale || now.saturating_sub(hit.fetched_at) <= STEAM_PROFILE_CACHE_TTL_SECS {
             let mut cloned = hit.clone();
             cloned.from_cache = true;
-            if let Ok(mut guard) = mem_cache().lock() {
-                guard.insert(key.to_string(), hit.clone());
-            }
+            let mut guard = mem_cache().lock().unwrap_or_else(|e| e.into_inner());
+            guard.insert(key.to_string(), hit.clone());
             return Some(cloned);
         }
     }
@@ -958,16 +1224,17 @@ pub async fn resolve_steam_mini_profile(
     let Some(raw_target) = chosen_raw else {
         return Ok(SteamMiniProfile {
             configured: false,
-            persona_name: "Steam Profile".to_string(),
+            persona_name: "No Local SteamID64".to_string(),
             online_state: "offline".to_string(),
-            status_label: "No Steam Account Detected".to_string(),
+            status_label: "No Local SteamID64".to_string(),
             privacy_state: "public".to_string(),
             stranger_visibility_label:
-                "Enter any SteamID64 or vanity URL to preview public profile".to_string(),
+                "No Local SteamID64 — enter a SteamID64 or vanity URL to preview".to_string(),
             profile_url: "https://steamcommunity.com".to_string(),
             offline_fallback: true,
             status_note: Some(
-                "Sign into Steam locally or enter a SteamID64 / vanity URL to preview.".to_string(),
+                "No Local SteamID64 detected. Sign into Steam locally or save a SteamID64 override in Settings."
+                    .to_string(),
             ),
             fetched_at: now_unix_secs(),
             ..Default::default()
@@ -992,49 +1259,87 @@ pub async fn resolve_steam_mini_profile(
         }
     }
 
+    let api_key_opt = settings
+        .steam_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
     let xml_url = target.xml_url();
-    match fetch_pooled_text(&xml_url, "application/xml, text/xml, */*").await {
-        Ok(xml_body) => match parse_steam_community_xml(&xml_body, &target) {
-            Ok(mut profile) => {
-                profile.is_override_preview = is_override_preview;
-                profile.detected_local_steam_id = detected_id.clone();
-                if let Some(ref api_key) = settings.steam_api_key {
-                    if !api_key.trim().is_empty() {
-                        enrich_profile_with_web_api(&mut profile, api_key).await;
+    let xml_outcome = match fetch_pooled_text(&xml_url, "application/xml, text/xml, */*").await {
+        Ok(xml_body) => parse_steam_community_xml(&xml_body, &target),
+        Err(net_err) => Err(net_err),
+    };
+
+    match xml_outcome {
+        Ok(mut profile) => {
+            profile.is_override_preview = is_override_preview;
+            profile.detected_local_steam_id = detected_id.clone();
+            if let Some(api_key) = api_key_opt {
+                enrich_profile_with_web_api(&mut profile, api_key).await;
+            }
+            if !is_override_preview {
+                fill_local_library_showcase_fallback(&mut profile);
+            }
+            {
+                let mut guard = mem_cache().lock().unwrap_or_else(|e| e.into_inner());
+                guard.insert(cache_key.clone(), profile.clone());
+            }
+            save_disk_cache_entry(&cache_key, &profile);
+            Ok(profile)
+        }
+        Err(xml_err) => {
+            if let Some(api_key) = api_key_opt {
+                match fetch_profile_from_web_api(
+                    &target,
+                    api_key,
+                    detected_id.clone(),
+                    is_override_preview,
+                )
+                .await
+                {
+                    Ok(mut api_profile) => {
+                        if !is_override_preview {
+                            fill_local_library_showcase_fallback(&mut api_profile);
+                        }
+                        {
+                            let mut guard = mem_cache().lock().unwrap_or_else(|e| e.into_inner());
+                            guard.insert(cache_key.clone(), api_profile.clone());
+                        }
+                        save_disk_cache_entry(&cache_key, &api_profile);
+                        return Ok(api_profile);
+                    }
+                    Err(api_err) => {
+                        let combined = format!("{api_err} (XML: {xml_err})");
+                        if let Some(mut stale) = lookup_cached_profile(&cache_key, true) {
+                            stale.offline_fallback = true;
+                            stale.is_override_preview = is_override_preview;
+                            stale.detected_local_steam_id = detected_id;
+                            stale.status_note = Some(format!(
+                                "{} — showing cached profile ({combined})",
+                                classify_diagnostic_status_label(&combined)
+                            ));
+                            return Ok(stale);
+                        }
+                        return Ok(build_local_offline_fallback(
+                            &target,
+                            detected_id,
+                            detected_persona,
+                            is_override_preview,
+                            &combined,
+                        ));
                     }
                 }
-                if !is_override_preview {
-                    fill_local_library_showcase_fallback(&mut profile);
-                }
-                if let Ok(mut guard) = mem_cache().lock() {
-                    guard.insert(cache_key.clone(), profile.clone());
-                }
-                save_disk_cache_entry(&cache_key, &profile);
-                Ok(profile)
             }
-            Err(parse_err) => {
-                if let Some(mut stale) = lookup_cached_profile(&cache_key, true) {
-                    stale.offline_fallback = true;
-                    stale.is_override_preview = is_override_preview;
-                    stale.detected_local_steam_id = detected_id;
-                    stale.status_note = Some(format!("Showing cached profile ({parse_err})"));
-                    return Ok(stale);
-                }
-                Ok(build_local_offline_fallback(
-                    &target,
-                    detected_id,
-                    detected_persona,
-                    is_override_preview,
-                    &parse_err,
-                ))
-            }
-        },
-        Err(net_err) => {
+
             if let Some(mut stale) = lookup_cached_profile(&cache_key, true) {
                 stale.offline_fallback = true;
                 stale.is_override_preview = is_override_preview;
                 stale.detected_local_steam_id = detected_id;
-                stale.status_note = Some(format!("Offline — showing cached profile ({net_err})"));
+                stale.status_note = Some(format!(
+                    "{} — showing cached profile ({xml_err})",
+                    classify_diagnostic_status_label(&xml_err)
+                ));
                 return Ok(stale);
             }
             Ok(build_local_offline_fallback(
@@ -1042,7 +1347,7 @@ pub async fn resolve_steam_mini_profile(
                 detected_id,
                 detected_persona,
                 is_override_preview,
-                &net_err,
+                &xml_err,
             ))
         }
     }
@@ -1059,10 +1364,16 @@ fn build_local_offline_fallback(
         SteamProfileTarget::SteamId64(id) => id.clone(),
         SteamProfileTarget::VanityId(_) => String::new(),
     };
+    let diag_label = classify_diagnostic_status_label(reason);
     let persona = if !is_override_preview {
         detected_persona.unwrap_or_else(|| target.display_input())
     } else {
         target.display_input()
+    };
+    let (privacy_state, vis_label) = if diag_label == "Steam Profile Private" {
+        ("private", "Steam Profile Private — Hidden From Strangers")
+    } else {
+        ("public", "Local Fallback — Connect to Preview Stranger Visibility")
     };
     let mut fallback = SteamMiniProfile {
         configured: true,
@@ -1077,18 +1388,16 @@ fn build_local_offline_fallback(
         persona_name: persona,
         avatar_url: String::new(),
         online_state: "offline".to_string(),
-        status_label: "Local Profile (Offline)".to_string(),
-        summary_text: "Steam Community is currently unreachable; displaying local profile state."
-            .to_string(),
-        privacy_state: "public".to_string(),
-        stranger_visibility_label: "Local Fallback — Connect to Preview Stranger Visibility"
-            .to_string(),
+        status_label: diag_label.to_string(),
+        summary_text: format!("{diag_label} ({reason})"),
+        privacy_state: privacy_state.to_string(),
+        stranger_visibility_label: vis_label.to_string(),
         profile_url: target.web_profile_url(),
         showcase_games: Vec::new(),
         enriched_via_api_key: false,
         from_cache: false,
         offline_fallback: true,
-        status_note: Some(format!("Offline fallback ({reason})")),
+        status_note: Some(format!("{diag_label}: {reason}")),
         fetched_at: now_unix_secs(),
         ..Default::default()
     };
@@ -1215,10 +1524,59 @@ mod tests {
         let target = SteamProfileTarget::SteamId64("76561198000000001".to_string());
         let profile = parse_steam_community_xml(private_xml, &target).expect("private XML");
         assert_eq!(profile.privacy_state, "private");
+        assert_eq!(profile.status_label, "Steam Profile Private");
         assert!(profile
             .stranger_visibility_label
             .contains("Private Profile — Hidden From Strangers"));
         assert!(profile.showcase_games.is_empty());
+    }
+
+    #[test]
+    fn test_cdata_entity_decoding_and_player_summaries_v2_fallback() {
+        let nested_cdata = "  <![CDATA[Duke &quot;King&quot; &#39;3D&#39; &amp; Co.<br>Line 2]]>  ";
+        assert_eq!(
+             strip_html_to_plain_text(nested_cdata),
+            "Duke \"King\" '3D' & Co.\nLine 2"
+        );
+
+        let target = SteamProfileTarget::SteamId64("76561197960287930".to_string());
+        let summary_json = serde_json::json!({
+            "response": {
+                "players": [{
+                    "steamid": "76561197960287930",
+                    "personaname": "DukeFallback",
+                    "avatarfull": "https://avatars.steamstatic.com/fb.jpg",
+                    "communityvisibilitystate": 1,
+                    "personastate": 0
+                }]
+            }
+        });
+        let parsed = parse_player_summaries_v2_json(&summary_json, &target).expect("valid v2 summary");
+        assert_eq!(parsed.persona_name, "DukeFallback");
+        assert_eq!(parsed.privacy_state, "private");
+        assert_eq!(parsed.status_label, "Steam Profile Private");
+
+        assert_eq!(classify_diagnostic_status_label("Steam Web API HTTP 403"), "Invalid API Key");
+        assert_eq!(classify_diagnostic_status_label("Steam Profile Private"), "Steam Profile Private");
+        assert_eq!(classify_diagnostic_status_label("No Local SteamID64"), "No Local SteamID64");
+        assert_eq!(classify_diagnostic_status_label("connection timed out"), "Network Unreachable");
+    }
+
+    #[test]
+    fn test_cache_invalidation_on_key_save() {
+        insert_cached_profile_for_test(
+            "id64:76561197960287930",
+            SteamMiniProfile {
+                configured: true,
+                steam_id64: "76561197960287930".to_string(),
+                persona_name: "CachedUser".to_string(),
+                fetched_at: now_unix_secs(),
+                ..Default::default()
+            },
+        );
+        assert!(cached_profile_count_for_test() >= 1);
+        clear_steam_profile_cache();
+        assert_eq!(cached_profile_count_for_test(), 0);
     }
 
     #[test]

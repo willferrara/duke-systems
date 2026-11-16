@@ -388,8 +388,10 @@ pub fn hydrate_settings_from_vault(settings: &mut crate::LauncherSettings) -> bo
 }
 
 pub fn build_privacy_status() -> PrivacyVaultStatus {
-    let _g = vault_io_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let vault = load_vault_disk_inner();
+    let vault = {
+        let _g = vault_io_lock().lock().unwrap_or_else(|e| e.into_inner());
+        load_vault_disk_inner()
+    };
     let settings = crate::load_settings_standalone();
     let effective_proxy = resolve_proxy_preset_url(
         &vault.proxy_preset,
@@ -438,11 +440,10 @@ pub async fn get_privacy_vault_status() -> Result<PrivacyVaultStatus, String> {
         .map_err(|e| format!("Privacy vault status task failed: {e}"))
 }
 
-#[tauri::command]
-pub async fn set_vault_api_key(
-    slot: String,
-    api_key: Option<String>,
-    username: Option<String>,
+pub fn set_vault_api_key_sync(
+    slot: &str,
+    api_key: Option<&str>,
+    username: Option<&str>,
 ) -> Result<PrivacyVaultStatus, String> {
     let normalized_slot = match slot.trim().to_ascii_lowercase().as_str() {
         "steam" => SLOT_STEAM,
@@ -452,31 +453,51 @@ pub async fn set_vault_api_key(
         "retroachievements" | "retro_achievements" | "ra" => SLOT_RETRO_ACHIEVEMENTS,
         other => return Err(format!("Unsupported vault key slot '{other}'")),
     };
-
-    tokio::task::spawn_blocking(move || -> Result<PrivacyVaultStatus, String> {
-        {
-            let _g = vault_io_lock().lock().unwrap_or_else(|e| e.into_inner());
-            let mut vault = load_vault_disk_inner();
-            match api_key.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                Some(secret) => {
-                    let enc = dpapi_encrypt_secret(secret)?;
-                    vault.encrypted_keys.insert(normalized_slot.to_string(), enc);
-                }
-                None => {
-                    vault.encrypted_keys.remove(normalized_slot);
-                }
+    {
+        let _g = vault_io_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let mut vault = load_vault_disk_inner();
+        match api_key.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(secret) => {
+                let enc = dpapi_encrypt_secret(secret)?;
+                vault
+                    .encrypted_keys
+                    .insert(normalized_slot.to_string(), enc);
             }
-            if normalized_slot == SLOT_RETRO_ACHIEVEMENTS {
-                if let Some(u) = username {
-                    vault.retro_achievements_username = u.trim().to_string();
-                }
+            None => {
+                vault.encrypted_keys.remove(normalized_slot);
             }
-            save_vault_disk_inner(&vault)?;
         }
-        Ok(build_privacy_status())
+        if normalized_slot == SLOT_RETRO_ACHIEVEMENTS {
+            if let Some(u) = username {
+                vault.retro_achievements_username = u.trim().to_string();
+            }
+        }
+        save_vault_disk_inner(&vault)?;
+    }
+    crate::steam_profile::clear_steam_profile_cache();
+    crate::friends::clear_friends_cache();
+    Ok(build_privacy_status())
+}
+
+#[tauri::command]
+pub async fn set_vault_api_key(
+    app: tauri::AppHandle,
+    slot: String,
+    api_key: Option<String>,
+    username: Option<String>,
+) -> Result<PrivacyVaultStatus, String> {
+    let slot_for_evt = slot.clone();
+    let status = tokio::task::spawn_blocking(move || -> Result<PrivacyVaultStatus, String> {
+        set_vault_api_key_sync(&slot, api_key.as_deref(), username.as_deref())
     })
     .await
-    .map_err(|e| format!("Vault update task failed: {e}"))?
+    .map_err(|e| format!("Vault update task failed: {e}"))??;
+    crate::emit_if_alive(
+        &app,
+        "steam-profile-updated",
+        serde_json::json!({ "action": "set_vault_api_key", "slot": slot_for_evt }),
+    );
+    Ok(status)
 }
 
 #[tauri::command]

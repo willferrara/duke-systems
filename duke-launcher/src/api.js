@@ -2,6 +2,12 @@
    DUKE LAUNCHER — TAURI IPC, WINDOW CHROME & UTILITIES
    ========================================================================== */
 
+if (typeof window !== "undefined" && typeof window.__dukeUnloading !== "boolean") {
+  window.__dukeUnloading = false;
+}
+
+const NEVER_SETTLED_PROMISE = new Promise(() => {});
+
 function getInvoke() {
   return (
     window.__TAURI__?.core?.invoke ||
@@ -11,9 +17,33 @@ function getInvoke() {
 }
 
 export async function invokeCommand(cmd, args = {}) {
+  if (
+    typeof window !== "undefined" &&
+    window.__dukeUnloading &&
+    cmd !== "quit_app" &&
+    cmd !== "hide_overlay_window"
+  ) {
+    return NEVER_SETTLED_PROMISE;
+  }
   const fn = getInvoke();
   if (!fn) throw new Error(`Tauri IPC unavailable for '${cmd}'`);
-  return fn(cmd, args);
+  try {
+    const res = await fn(cmd, args);
+    if (
+      typeof window !== "undefined" &&
+      window.__dukeUnloading &&
+      cmd !== "quit_app" &&
+      cmd !== "hide_overlay_window"
+    ) {
+      return NEVER_SETTLED_PROMISE;
+    }
+    return res;
+  } catch (err) {
+    if (typeof window !== "undefined" && window.__dukeUnloading) {
+      return NEVER_SETTLED_PROMISE;
+    }
+    throw err;
+  }
 }
 
 export async function setGameLaunchArgs(gameId, launchArgs) {
@@ -509,7 +539,10 @@ export async function listenEvent(eventName, callback) {
   try {
     const listenFn = window.__TAURI__?.event?.listen;
     if (typeof listenFn === "function") {
-      return await listenFn(eventName, (event) => callback(event.payload));
+      return await listenFn(eventName, (event) => {
+        if (typeof window !== "undefined" && window.__dukeUnloading) return;
+        callback(event.payload);
+      });
     }
   } catch {
     // WebView event capability or Tauri IPC may be unavailable during early startup or browser preview.
@@ -521,7 +554,7 @@ export function listenDownloadProgress(callback) {
   return listenEvent("download-progress", callback);
 }
 
-export function initWindowControls({ onCtrlK } = {}) {
+export function initWindowControls({ onCtrlK, shouldCloseToTray } = {}) {
   let win = null;
   try {
     win = window.__TAURI__?.window?.getCurrentWindow?.() ?? null;
@@ -535,7 +568,16 @@ export function initWindowControls({ onCtrlK } = {}) {
 
   minBtn?.addEventListener("click", () => win?.minimize?.().catch(() => {}));
   maxBtn?.addEventListener("click", () => win?.toggleMaximize?.().catch(() => {}));
-  closeBtn?.addEventListener("click", () => win?.close?.().catch(() => {}));
+  closeBtn?.addEventListener("click", () => {
+    const closingToTray =
+      typeof shouldCloseToTray === "function"
+        ? Boolean(shouldCloseToTray())
+        : Boolean(window.__dukeCloseToTray);
+    if (!closingToTray) {
+      window.__dukeUnloading = true;
+    }
+    win?.close?.().catch(() => {});
+  });
 
   titlebar?.addEventListener("dblclick", (e) => {
     if (e.target.closest("button, input, select, a, .titlebar-search-wrap, .steam-mini-profile-anchor")) return;
@@ -2265,6 +2307,15 @@ export function listenAppUpdateProgress(callback) {
 }
 
 export async function getSteamMiniProfile(targetOverride = null, forceRefresh = false) {
+  if (targetOverride && typeof targetOverride === "object") {
+    const rawTarget = targetOverride.targetOverride ?? targetOverride.overrideTarget ?? null;
+    const rawForce = targetOverride.forceRefresh ?? forceRefresh;
+    return invokeCommand("get_steam_mini_profile", {
+      targetOverride:
+        typeof rawTarget === "string" && rawTarget.trim() ? rawTarget.trim() : null,
+      forceRefresh: Boolean(rawForce)
+    });
+  }
   return invokeCommand("get_steam_mini_profile", {
     targetOverride:
       typeof targetOverride === "string" && targetOverride.trim()
@@ -2274,10 +2325,38 @@ export async function getSteamMiniProfile(targetOverride = null, forceRefresh = 
   });
 }
 
+export async function quitApp() {
+  if (typeof window !== "undefined") {
+    window.__dukeUnloading = true;
+  }
+  return invokeCommand("quit_app");
+}
+
 export async function setSteamProfileOverride(targetOverride = null) {
   return invokeCommand("set_steam_profile_override", {
     targetOverride:
       typeof targetOverride === "string" ? targetOverride.trim() : ""
+  });
+}
+
+export async function saveSteamIdOverride(steamIdOverride = null) {
+  return invokeCommand("save_steam_id_override", {
+    steamIdOverride:
+      typeof steamIdOverride === "string" ? steamIdOverride.trim() : ""
+  });
+}
+
+export async function saveApiKey(slot, apiKey, username = null) {
+  return invokeCommand("save_api_key", {
+    slot: String(slot || ""),
+    apiKey: String(apiKey || ""),
+    username: username ? String(username) : null
+  });
+}
+
+export async function clearApiKey(slot) {
+  return invokeCommand("clear_api_key", {
+    slot: String(slot || "")
   });
 }
 

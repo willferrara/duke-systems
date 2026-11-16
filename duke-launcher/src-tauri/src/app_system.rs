@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+#[allow(unused_imports)]
 use tauri::{AppHandle, Emitter, Manager, Url};
 
 pub const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -346,18 +347,18 @@ pub fn install_full_launcher_tray(
         "duke_tray_updates" => {
             menu_state.ui_visible.store(true, Ordering::Release);
             restore_and_focus_main_window(app_handle);
-            let _ = app_handle.emit("tray-check-updates", serde_json::json!({ "force": true }));
+            crate::emit_if_alive(app_handle, "tray-check-updates", serde_json::json!({ "force": true }));
             let h = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 if let Ok(rep) = crate::updater::check_for_app_updates_internal().await {
-                    let _ = h.emit("app-update-available", &rep);
+                    crate::emit_if_alive(&h, "app-update-available", &rep);
                 }
             });
         }
         "duke_tray_exit" => {
-            menu_state.app_exiting.store(true, Ordering::Release);
+            crate::IS_SHUTTING_DOWN.store(true, Ordering::Release);
             crate::APP_SHUTDOWN.store(true, Ordering::Release);
-            capture_and_save_window_geometry(app_handle);
+            menu_state.app_exiting.store(true, Ordering::Release);
             on_exit();
             app_handle.exit(0);
         }
@@ -543,8 +544,8 @@ pub fn get_app_system_status_sync() -> AppSystemStatus {
     let protocol_registered = is_duke_protocol_registered();
     let last_diagnostics_path = last_diag_cell()
         .lock()
-        .ok()
-        .and_then(|g| g.clone());
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
 
     AppSystemStatus {
         launch_on_startup,
@@ -751,34 +752,58 @@ pub fn restore_saved_window_geometry_on_boot(
     }
 }
 
-pub fn capture_and_save_window_geometry(app: &AppHandle) {
-    let Some(win) = app.get_webview_window("main") else {
-        return;
-    };
+pub fn capture_window_geometry_snapshot(app: &AppHandle) -> Option<SavedWindowGeometry> {
+    let win = app.get_webview_window("main")?;
     if win.is_minimized().unwrap_or(false) {
-        return;
+        return None;
     }
     let maximized = win.is_maximized().unwrap_or(false);
     let size_opt = win.inner_size().ok();
     let pos_opt = win.outer_position().ok();
 
-    let mut settings = crate::load_settings_from_disk(app);
-    settings.window_maximized = maximized;
+    let mut snap = SavedWindowGeometry {
+        maximized,
+        ..SavedWindowGeometry::default()
+    };
     if !maximized {
         if let Some(sz) = size_opt {
             if sz.width >= 900 && sz.height >= 600 {
-                settings.window_width = Some(sz.width);
-                settings.window_height = Some(sz.height);
+                snap.width = sz.width;
+                snap.height = sz.height;
             }
         }
         if let Some(pos) = pos_opt {
             if pos.x > -16_000 && pos.y > -16_000 {
-                settings.window_x = Some(pos.x);
-                settings.window_y = Some(pos.y);
+                snap.x = Some(pos.x);
+                snap.y = Some(pos.y);
+            }
+        }
+    }
+    Some(snap)
+}
+
+pub fn flush_captured_window_geometry(app: &AppHandle, snap: SavedWindowGeometry) {
+    let mut settings = crate::load_settings_from_disk(app);
+    settings.window_maximized = snap.maximized;
+    if !snap.maximized {
+        if snap.width >= 900 && snap.height >= 600 {
+            settings.window_width = Some(snap.width);
+            settings.window_height = Some(snap.height);
+        }
+        if let (Some(px), Some(py)) = (snap.x, snap.y) {
+            if px > -16_000 && py > -16_000 {
+                settings.window_x = Some(px);
+                settings.window_y = Some(py);
             }
         }
     }
     let _ = crate::save_settings_to_disk(app, &settings);
+}
+
+pub fn capture_and_save_window_geometry(app: &AppHandle) {
+    if let Some(snap) = capture_window_geometry_snapshot(app) {
+        flush_captured_window_geometry(app, snap);
+    }
 }
 
 /// Redacts all `C:\Users\<name>` / `C:/Users/<name>` paths, current OS username, and secret keys
@@ -947,7 +972,8 @@ pub fn export_diagnostics_bundle_sync() -> Result<DiagnosticsExportReport, Strin
     let size_bytes = fs::metadata(&zip_path).map(|m| m.len()).unwrap_or(0);
     let zip_str = zip_path.to_string_lossy().to_string();
 
-    if let Ok(mut guard) = last_diag_cell().lock() {
+    {
+        let mut guard = last_diag_cell().lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(zip_str.clone());
     }
 

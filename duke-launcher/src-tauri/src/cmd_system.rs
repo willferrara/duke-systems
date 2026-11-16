@@ -192,6 +192,36 @@ pub(crate) static ACTIVE_JOBS: OnceLock<Mutex<HashMap<String, Arc<duke_core::win
 pub(crate) static TRAY_DAEMON: OnceLock<duke_core::tray_daemon::TrayDaemonState> = OnceLock::new();
 pub(crate) static HOTKEY_WATCHER_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub(crate) static APP_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+pub(crate) static IS_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+pub(crate) fn is_shutting_down() -> bool {
+    IS_SHUTTING_DOWN.load(Ordering::Acquire) || APP_SHUTDOWN.load(Ordering::Acquire)
+}
+
+#[inline]
+pub(crate) fn emit_if_alive<A, S>(app_handle: A, event: &str, payload: S)
+where
+    A: std::borrow::Borrow<AppHandle>,
+    S: serde::Serialize + Clone,
+{
+    if is_shutting_down() {
+        return;
+    }
+    if let Some(daemon) = TRAY_DAEMON.get() {
+        if daemon.app_exiting.load(Ordering::Acquire) {
+            return;
+        }
+    }
+    let handle = app_handle.borrow();
+    if handle.get_webview_window("main").is_none()
+        && handle.get_webview_window("overlay").is_none()
+    {
+        return;
+    }
+    let _ = handle.emit(event, payload);
+}
 
 pub(crate) fn get_active_jobs_map(
 ) -> &'static Mutex<HashMap<String, Arc<duke_core::win32_ffi::ProcessTreeJob>>> {
@@ -793,6 +823,13 @@ pub(crate) async fn update_launcher_settings(
 ) -> Result<LauncherSettings, String> {
     let app_for_save = app.clone();
     let autostart_change = start_minimized_with_windows;
+    let credentials_or_steam_dirty = steam_api_key.is_some()
+        || clear_steam_api_key.unwrap_or(false)
+        || steam_id_override.is_some()
+        || xbox_api_key.is_some()
+        || clear_xbox_api_key.unwrap_or(false)
+        || psn_npsso.is_some()
+        || clear_psn_npsso.unwrap_or(false);
     let updated = tokio::task::spawn_blocking(move || -> Result<LauncherSettings, String> {
         let mut current = load_settings_from_disk(&app_for_save);
         if let Some(flag) = auto_clean_completed {
@@ -1024,6 +1061,16 @@ pub(crate) async fn update_launcher_settings(
     .await
     .map_err(|e| format!("Failed to save settings: {}", e))??;
 
+    if credentials_or_steam_dirty {
+        crate::steam_profile::clear_steam_profile_cache();
+        crate::friends::clear_friends_cache();
+        emit_if_alive(
+            &app,
+            "steam-profile-updated",
+            serde_json::json!({ "action": "update_launcher_settings" }),
+        );
+    }
+
     if updated.swarm_enabled {
         swarm::start_swarm_background_services();
     }
@@ -1038,9 +1085,10 @@ pub(crate) async fn update_launcher_settings(
                 None
             }
         };
-        if let Some(remaining) = remaining_opt {
-            let _ = app.emit("download-queue-updated", &remaining);
-        }
+                let mut remaining = remaining_opt;
+                if let Some(remaining) = remaining.take() {
+                    emit_if_alive(&app, "download-queue-updated", &remaining);
+                }
     }
 
     Ok(updated)
@@ -1107,7 +1155,8 @@ pub(crate) fn enqueue_protocol_download_url(
             guard.push(clean_url.clone());
         }
     }
-    let _ = app.emit(
+    emit_if_alive(
+        &app,
         "duke-uri-download",
         serde_json::json!({ "url": clean_url.clone() }),
     );
@@ -1717,7 +1766,7 @@ pub(crate) async fn launch_game_internal(
                 }
                 matched_entry = Some(item.clone());
                 let _ = save_library_to_disk(&app_for_start, &library);
-                let _ = app_for_start.emit("library-updated", &library);
+                emit_if_alive(&app_for_start, "library-updated", &library);
             }
         }
         LaunchContext {
@@ -1835,7 +1884,8 @@ pub(crate) async fn launch_game_internal(
                     &game_root_dir,
                     &droot.join("wrappers"),
                 ) {
-                    let _ = app.emit(
+                    emit_if_alive(
+                        &app,
                         "duke-verified-applied",
                         serde_json::json!({ "gameId": gid_v, "message": applied_msg }),
                     );
@@ -1868,7 +1918,8 @@ pub(crate) async fn launch_game_internal(
             })
             .await
             {
-                let _ = app.emit(
+                emit_if_alive(
+                    &app,
                     "nvme-prefetch-report",
                     serde_json::json!({
                         "gameId": game_id.clone().unwrap_or_default(),
@@ -1902,14 +1953,14 @@ pub(crate) async fn launch_game_internal(
         .await
         {
             if sync_rep.injected_files > 0 || sync_rep.driver_purged_files > 0 {
-                let _ = app.emit("shader-swarm-report", &sync_rep);
+                emit_if_alive(&app, "shader-swarm-report", &sync_rep);
             }
         }
     }
 
     if launch_settings.frame_pacing_enabled {
         let fp = duke_core::win32_ffi::begin_frame_pacing_runtime();
-        let _ = app.emit("frame-pacing-state", &fp);
+        emit_if_alive(&app, "frame-pacing-state", &fp);
     }
 
     let mut parsed_args = if item_platform_id > 0 {
@@ -1950,7 +2001,8 @@ pub(crate) async fn launch_game_internal(
 
     if let Some(ref stage_gid) = game_id {
         if let Some(stage_msg) = vhdx_stage::ensure_game_hot_staged_before_launch(stage_gid, &game_root_dir) {
-            let _ = app.emit(
+            emit_if_alive(
+                &app,
                 "vhdx-hot-tier-staged",
                 serde_json::json!({ "gameId": stage_gid, "message": stage_msg }),
             );
@@ -1985,11 +2037,13 @@ pub(crate) async fn launch_game_internal(
                 let _ = w.show();
                 let _ = w.unminimize();
             }
-            let _ = app.emit(
+            emit_if_alive(
+                &app,
                 "game-running-state",
                 serde_json::json!({ "running": false, "exePath": trimmed }),
             );
-            let _ = app.emit(
+            emit_if_alive(
+                &app,
                 "game-session-state",
                 serde_json::json!({ "running": false, "exePath": trimmed }),
             );
@@ -2012,11 +2066,13 @@ pub(crate) async fn launch_game_internal(
                 let _ = w.show();
                 let _ = w.unminimize();
             }
-            let _ = app.emit(
+            emit_if_alive(
+                &app,
                 "game-running-state",
                 serde_json::json!({ "running": false, "exePath": trimmed }),
             );
-            let _ = app.emit(
+            emit_if_alive(
+                &app,
                 "game-session-state",
                 serde_json::json!({ "running": false, "exePath": trimmed }),
             );
@@ -2065,11 +2121,11 @@ pub(crate) async fn launch_game_internal(
             game_pid,
             item_platform_id as u32,
         );
-        let _ = app.emit("quick-resume-updated", quick_resume::build_summary_snapshot());
+        emit_if_alive(&app, "quick-resume-updated", quick_resume::build_summary_snapshot());
         if let Some(ref job_arc) = job_handle_opt {
-            if let Ok(mut jguard) = get_active_jobs_map().lock() {
-                jguard.insert(session_key.clone(), Arc::clone(job_arc));
-            }
+            let mut jguard = get_active_jobs_map().lock().unwrap_or_else(|e| e.into_inner());
+            jguard.insert(session_key.clone(), Arc::clone(job_arc));
+            drop(jguard);
             let pids = job_arc.active_pids();
             if should_boost_tree {
                 if pids.is_empty() {
@@ -2169,7 +2225,8 @@ pub(crate) async fn launch_game_internal(
             })
             .await
             {
-                let _ = app_warm.emit(
+                emit_if_alive(
+                    &app_warm,
                     "nvme-prefetch-report",
                     serde_json::json!({
                         "gameId": warm_gid,
@@ -2187,7 +2244,8 @@ pub(crate) async fn launch_game_internal(
         });
     }
 
-    let _ = app.emit(
+    emit_if_alive(
+        &app,
         "game-running-state",
         serde_json::json!({
             "running": true,
@@ -2198,7 +2256,8 @@ pub(crate) async fn launch_game_internal(
             "gameBoost": launch_settings.performance_boost_enabled
         }),
     );
-    let _ = app.emit(
+    emit_if_alive(
+        &app,
         "game-session-state",
         serde_json::json!({
             "running": true,
@@ -2218,7 +2277,8 @@ pub(crate) async fn launch_game_internal(
     } else if item_platform_id > 0 {
         trim_process_working_set();
     }
-    let _ = app.emit(
+    emit_if_alive(
+        &app,
         "memory-telemetry",
         serde_json::json!({
             "workingSetMb": get_process_working_set_mb(),
@@ -2300,14 +2360,15 @@ pub(crate) async fn launch_game_internal(
                         code,
                         raw_elapsed.as_millis() as u64,
                     );
-                    let _ = app_after.emit("game-crash-detected", &diag);
+                    emit_if_alive(&app_after, "game-crash-detected", &diag);
                 }
                 if let Some((nt_hex, nt_desc)) = self_heal::is_crash_ntstatus(code) {
                     if let Some(ref heal_gid) = gid_after {
                         if let Ok(fix_report) =
                             auto_fix_game(app_after.clone(), heal_gid.clone()).await
                         {
-                            let _ = app_after.emit(
+                            emit_if_alive(
+                                &app_after,
                                 "game-crash-healed",
                                 serde_json::json!({
                                     "gameId": heal_gid,
@@ -2326,14 +2387,16 @@ pub(crate) async fn launch_game_internal(
             }
         }
 
-        if let Ok(mut guard) = get_active_sessions().lock() {
+        {
+            let mut guard = get_active_sessions().lock().unwrap_or_else(|e| e.into_inner());
             guard.remove(&session_key_after);
         }
-        if let Ok(mut jguard) = get_active_jobs_map().lock() {
+        {
+            let mut jguard = get_active_jobs_map().lock().unwrap_or_else(|e| e.into_inner());
             jguard.remove(&session_key_after);
         }
         quick_resume::unregister_slot(&session_key_after);
-        let _ = app_after.emit("quick-resume-updated", quick_resume::build_summary_snapshot());
+        emit_if_alive(&app_after, "quick-resume-updated", quick_resume::build_summary_snapshot());
 
         duke_upscale::stop_game_upscale_runtime(&session_key_after);
         let scorecard_opt = etw_xray::stop_and_persist_scorecard(
@@ -2368,7 +2431,7 @@ pub(crate) async fn launch_game_internal(
 
         if frame_pacing_enabled_exit {
             let fp = duke_core::win32_ffi::end_frame_pacing_runtime();
-            let _ = app_after.emit("frame-pacing-state", &fp);
+            emit_if_alive(&app_after, "frame-pacing-state", &fp);
         }
 
         if shader_swarm_enabled_exit {
@@ -2504,24 +2567,29 @@ pub(crate) async fn launch_game_internal(
                     if !wal_ok {
                         let _ = save_library_to_disk(&app_disk, &library);
                     }
-                    let _ = app_disk.emit("library-updated", &library);
+                    emit_if_alive(&app_disk, "library-updated", &library);
                 }
             }
         })
         .await;
 
         playtime_sync::spawn_background_playtime_sync(app_after.clone());
-        focus_main_window(&app_after);
+        if !is_shutting_down() {
+            focus_main_window(&app_after);
+        }
         trim_process_working_set();
-        let _ = app_after.emit(
+        emit_if_alive(
+            &app_after,
             "game-running-state",
             serde_json::json!({ "running": false, "gameId": session_key_after, "isSuspended": false, "gameBoost": false }),
         );
-        let _ = app_after.emit(
+        emit_if_alive(
+            &app_after,
             "game-session-state",
             serde_json::json!({ "running": false, "gameId": session_key_after, "isSuspended": false, "gameBoost": false }),
         );
-        let _ = app_after.emit(
+        emit_if_alive(
+            &app_after,
             "memory-telemetry",
             serde_json::json!({
                 "workingSetMb": get_process_working_set_mb(),
@@ -2549,12 +2617,17 @@ pub(crate) fn spawn_hotkey_watcher_if_needed(app: AppHandle) {
         let mut auto_frozen_sessions: HashSet<String> = HashSet::new();
         loop {
             tokio::time::sleep(Duration::from_millis(120)).await;
+            if is_shutting_down() {
+                break;
+            }
             ticks_elapsed = ticks_elapsed.saturating_add(1);
             let sessions_snapshot: Vec<ActiveGameSession> = {
                 get_active_sessions()
                     .lock()
-                    .map(|g| g.values().cloned().collect())
-                    .unwrap_or_default()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .values()
+                    .cloned()
+                    .collect()
             };
             if sessions_snapshot.is_empty() {
                 break;
@@ -2562,8 +2635,8 @@ pub(crate) fn spawn_hotkey_watcher_if_needed(app: AppHandle) {
 
             let hk_str = get_active_hotkey_cell()
                 .lock()
-                .map(|s| s.clone())
-                .unwrap_or_else(|_| "Ctrl+Alt+P".to_string());
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
 
             let configured_pressed = duke_core::win32_ffi::parse_hotkey_spec(&hk_str)
                 .map(|spec| duke_core::win32_ffi::is_hotkey_pressed(&spec))
@@ -2690,7 +2763,7 @@ pub(crate) async fn suspend_or_resume_game(
         }
     }
     quick_resume::sync_slot_suspend_state(&session_key, want_suspend, None);
-    let _ = app.emit("quick-resume-updated", quick_resume::build_summary_snapshot());
+    emit_if_alive(&app, "quick-resume-updated", quick_resume::build_summary_snapshot());
 
     let result = SuspendStateResult {
         game_id: session_key.clone(),
@@ -2700,8 +2773,9 @@ pub(crate) async fn suspend_or_resume_game(
         freed_ram_mb,
     };
 
-    let _ = app.emit("game-suspend-state", &result);
-    let _ = app.emit(
+    emit_if_alive(&app, "game-suspend-state", &result);
+    emit_if_alive(
+        &app,
         "game-running-state",
         serde_json::json!({
             "running": true,
@@ -2711,7 +2785,8 @@ pub(crate) async fn suspend_or_resume_game(
             "gameBoost": !want_suspend
         }),
     );
-    let _ = app.emit(
+    emit_if_alive(
+        &app,
         "memory-telemetry",
         serde_json::json!({
             "workingSetMb": get_process_working_set_mb(),
@@ -2727,8 +2802,10 @@ pub(crate) async fn suspend_or_resume_game(
 pub(crate) async fn get_active_game_sessions() -> Vec<ActiveGameSession> {
     get_active_sessions()
         .lock()
-        .map(|g| g.values().cloned().collect())
-        .unwrap_or_default()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .cloned()
+        .collect()
 }
 
 #[tauri::command]
@@ -3035,7 +3112,7 @@ pub(crate) async fn trim_working_set(app: AppHandle) -> Result<Value, String> {
         }))
     })
     .await?;
-    let _ = app.emit("memory-telemetry", &payload);
+    emit_if_alive(&app, "memory-telemetry", &payload);
     Ok(payload)
 }
 
@@ -3448,7 +3525,7 @@ pub(crate) async fn set_game_update_config(
         entry.update_available = is_newer_version(&entry.version_tag, &entry.latest_version_tag);
     }
     save_library_to_disk(&app, &library)?;
-    let _ = app.emit("library-updated", &library);
+    emit_if_alive(&app, "library-updated", &library);
     Ok(library)
 }
 
@@ -3513,7 +3590,7 @@ pub(crate) async fn check_game_updates(
 
     if any_changed {
         save_library_to_disk(&app, &library)?;
-        let _ = app.emit("library-updated", &library);
+        emit_if_alive(&app, "library-updated", &library);
     }
     primary_result.games = library;
     Ok(primary_result)
@@ -3660,7 +3737,7 @@ pub(crate) async fn apply_game_update(
         entry.size_formatted = format_bytes(new_size);
     }
     save_library_to_disk(&app, &updated_lib)?;
-    let _ = app.emit("library-updated", &updated_lib);
+    emit_if_alive(&app, "library-updated", &updated_lib);
     trim_process_working_set();
 
     Ok(GameUpdateApplyReport {
@@ -3679,6 +3756,9 @@ pub(crate) async fn apply_game_update(
 
 #[tauri::command]
 pub(crate) async fn toggle_overlay_window(app: AppHandle, visible: Option<bool>) -> Result<bool, String> {
+    if is_shutting_down() {
+        return Ok(false);
+    }
     let overlay = app
         .get_webview_window("overlay")
         .ok_or_else(|| "Overlay window not registered".to_string())?;
@@ -3695,10 +3775,10 @@ pub(crate) async fn toggle_overlay_window(app: AppHandle, visible: Option<bool>)
         }
         let _ = overlay.show();
         let _ = overlay.set_focus();
-        let _ = app.emit("overlay-opened", serde_json::json!({ "visible": true }));
+        emit_if_alive(&app, "overlay-opened", serde_json::json!({ "visible": true }));
     } else {
         let _ = overlay.hide();
-        let _ = app.emit("overlay-opened", serde_json::json!({ "visible": false }));
+        emit_if_alive(&app, "overlay-opened", serde_json::json!({ "visible": false }));
         trim_process_working_set();
     }
     Ok(target_visible)
@@ -3779,7 +3859,7 @@ pub(crate) async fn purge_suite_ram_ipc(app: AppHandle) -> Result<Value, String>
         "freedMb": freed_mb,
         "status": "SUITE PURGED"
     });
-    let _ = app.emit("memory-telemetry", &payload);
+    emit_if_alive(&app, "memory-telemetry", &payload);
     Ok(payload)
 }
 
@@ -3823,7 +3903,7 @@ pub(crate) fn spawn_overlay_trigger_watcher(app: AppHandle) {
             let mut fse_chord_was_down = false;
             let mut guide_hold_start: Option<Instant> = None;
             let mut guide_combo_used = false;
-            while !APP_SHUTDOWN.load(Ordering::Acquire) {
+            while !APP_SHUTDOWN.load(Ordering::Acquire) && !is_shutting_down() {
                 let mut should_toggle_overlay = false;
                 let mut should_toggle_guide = false;
                 let mut should_toggle_radial = false;
@@ -4103,28 +4183,32 @@ pub(crate) async fn backup_game_saves(
 }
 
 pub(crate) fn shutdown_flush_downloads(app_handle: &AppHandle) {
-    if let Ok(pause_map) = get_pause_map().lock() {
+    {
+        let pause_map = get_pause_map().lock().unwrap_or_else(|e| e.into_inner());
         for flag in pause_map.values() {
             flag.store(true, Ordering::Relaxed);
         }
     }
     let auto_clean = load_settings_from_disk(app_handle).auto_clean_completed;
-    if let Ok(mut guard) = get_queue_store().lock() {
-        for job in guard.iter_mut() {
-            reconcile_job_bytes_from_disk(job);
-            if job.status == "DOWNLOADING" || job.status == "RESOLVING" {
-                job.status = "PAUSED".to_string();
-                job.speed_mbps = 0.0;
-                job.eta_secs = None;
-                job.message = format!(
-                    "Saved at {} - Click RESUME to continue",
-                    format_bytes(job.downloaded_bytes)
-                );
-            }
+    let mut guard = match get_queue_store().try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    for job in guard.iter_mut() {
+        reconcile_job_bytes_from_disk(job);
+        if job.status == "DOWNLOADING" || job.status == "RESOLVING" {
+            job.status = "PAUSED".to_string();
+            job.speed_mbps = 0.0;
+            job.eta_secs = None;
+            job.message = format!(
+                "Saved at {} - Click RESUME to continue",
+                format_bytes(job.downloaded_bytes)
+            );
         }
-        prune_auto_cleanable_jobs(&mut guard, auto_clean);
-        persist_queue_to_disk(app_handle, &guard);
     }
+    prune_auto_cleanable_jobs(&mut guard, auto_clean);
+    persist_queue_to_disk(app_handle, &guard);
 }
 
 pub(crate) mod crash_guard {
@@ -4418,10 +4502,11 @@ pub(crate) fn init_duke_bus(bus_app: AppHandle) {
 pub(crate) fn spawn_idle_ram_trim_watcher(app_handle: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_millis(900)).await;
-        if !APP_SHUTDOWN.load(Ordering::Acquire) {
+        if !is_shutting_down() {
             let ram_mb = get_process_working_set_mb();
             let doh_hosts = duke_core::net_doh::cached_doh_host_count();
-            let _ = app_handle.emit(
+            emit_if_alive(
+                &app_handle,
                 "memory-telemetry",
                 serde_json::json!({
                     "workingSetMb": ram_mb,
@@ -4436,7 +4521,7 @@ pub(crate) fn spawn_idle_ram_trim_watcher(app_handle: AppHandle) {
         let mut interval = tokio::time::interval(Duration::from_secs(15));
         loop {
             interval.tick().await;
-            if APP_SHUTDOWN.load(Ordering::Acquire) {
+            if is_shutting_down() {
                 break;
             }
             tick_count = tick_count.saturating_add(1);
@@ -4476,7 +4561,8 @@ pub(crate) fn spawn_idle_ram_trim_watcher(app_handle: AppHandle) {
                 ram_mb.to_bits(),
                 doh_hosts as u64,
             );
-            let _ = app_handle.emit(
+            emit_if_alive(
+                &app_handle,
                 "memory-telemetry",
                 serde_json::json!({
                     "workingSetMb": ram_mb,
@@ -4497,23 +4583,67 @@ pub(crate) fn spawn_idle_ram_trim_watcher(app_handle: AppHandle) {
 }
 
 pub(crate) fn shutdown_all_runtime_services(app_handle: &AppHandle) {
+    IS_SHUTTING_DOWN.store(true, Ordering::Release);
     APP_SHUTDOWN.store(true, Ordering::Release);
+    if let Some(daemon) = TRAY_DAEMON.get() {
+        daemon.app_exiting.store(true, Ordering::Release);
+    }
+    if SHUTDOWN_IN_PROGRESS.swap(true, Ordering::AcqRel) {
+        return;
+    }
+
+    let geom_snap = crate::app_system::capture_window_geometry_snapshot(app_handle);
+    if let Some(main_win) = app_handle.get_webview_window("main") {
+        let _ = main_win.hide();
+    }
+
     HOTKEY_WATCHER_ACTIVE.store(false, Ordering::Release);
     couch_mode::clear_transient_couch_state();
     save_watcher::stop_all_save_watchers();
     discord_ipc::clear_discord_presence();
+    etw_xray::stop_all_xray_sessions();
+    duke_link::shutdown_duke_link();
     desktop_chord::set_desktop_chord_enabled(false);
+
+    for label in ["overlay", "grabber", "stream-grabber", "directory-browser"] {
+        if let Some(sec_win) = app_handle.get_webview_window(label) {
+            let _ = sec_win.hide();
+            let _ = sec_win.destroy();
+        }
+    }
+
     if let Some(cell) = DUKE_SHM_BUS.get() {
-        if let Ok(guard) = cell.lock() {
+        if let Ok(guard) = cell.try_lock() {
             if let Some(ref bus) = *guard {
                 bus.unregister_app();
             }
         }
     }
-    shutdown_flush_downloads(app_handle);
-    if let Ok(data_dir) = resolve_data_root_dir(app_handle) {
-        self_heal::clear_session_lock_in_dir(&data_dir);
-    }
+
+    let app_for_flush = app_handle.clone();
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let _ = std::thread::Builder::new()
+        .name("duke-shutdown-flush".to_string())
+        .spawn(move || {
+            if let Ok(data_dir) = resolve_data_root_dir(&app_for_flush) {
+                let _ = crate::lib_store::flush_wal_on_shutdown(&data_dir);
+                self_heal::clear_session_lock_in_dir(&data_dir);
+            }
+            if let Some(snap) = geom_snap {
+                crate::app_system::flush_captured_window_geometry(&app_for_flush, snap);
+            }
+            shutdown_flush_downloads(&app_for_flush);
+            let _ = tx.send(());
+        });
+    let _ = rx.recv_timeout(Duration::from_millis(300));
+}
+
+#[tauri::command]
+pub(crate) fn quit_app(app: AppHandle) {
+    IS_SHUTTING_DOWN.store(true, Ordering::Release);
+    APP_SHUTDOWN.store(true, Ordering::Release);
+    shutdown_all_runtime_services(&app);
+    app.exit(0);
 }
 
 #[tauri::command]

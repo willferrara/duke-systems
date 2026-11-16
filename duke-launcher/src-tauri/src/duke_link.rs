@@ -20,7 +20,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tokio::sync::mpsc;
 
 pub const DUKE_LINK_DEFAULT_PORT: u16 = 47882;
@@ -1027,7 +1027,7 @@ fn spawn_quic_host_loop(
                 let mut last_frame_time = Instant::now() - Duration::from_millis(40);
                 let target_interval = Duration::from_millis(20);
 
-                while !stop_flag.load(Ordering::Acquire) {
+                while !stop_flag.load(Ordering::Acquire) && !crate::is_shutting_down() {
                     // Non-blocking accept of up to 4 concurrent QUIC players.
                     while peers.len() < MAX_VIRTUAL_GAMEPADS {
                         match tokio::time::timeout(Duration::from_millis(2), endpoint.accept()).await {
@@ -1042,7 +1042,7 @@ fn spawn_quic_host_loop(
                                     if let Ok(mut rt) = link_state().lock() {
                                         rt.peer_addr = Some(remote);
                                         let snap = snapshot_from_runtime(&rt);
-                                        let _ = app.emit("duke-link-state", &snap);
+                                        crate::emit_if_alive(&app, "duke-link-state", &snap);
                                     }
                                 }
                             }
@@ -1172,7 +1172,7 @@ fn spawn_quic_host_loop(
                         window_bytes = 0;
                         if let Ok(rt) = link_state().lock() {
                             let snap = snapshot_from_runtime(&rt);
-                            let _ = app.emit("duke-link-state", &snap);
+                            crate::emit_if_alive(&app, "duke-link-state", &snap);
                         }
                     }
                 }
@@ -1241,7 +1241,7 @@ fn spawn_quic_guest_loop(
                 let mut window_frames: u32 = 0;
                 let mut window_bytes: u64 = 0;
 
-                while !stop_flag.load(Ordering::Acquire) {
+                while !stop_flag.load(Ordering::Acquire) && !crate::is_shutting_down() {
                     if conn.close_reason().is_some() {
                         break;
                     }
@@ -1269,7 +1269,7 @@ fn spawn_quic_guest_loop(
                                     if let Ok(mut rt) = link_state().lock() {
                                         rt.codec = codec;
                                         let snap = snapshot_from_runtime(&rt);
-                                        let _ = app.emit("duke-link-state", &snap);
+                                        crate::emit_if_alive(&app, "duke-link-state", &snap);
                                     }
                                 }
                                 DukeLinkPacket::VideoFrameChunk {
@@ -1302,7 +1302,7 @@ fn spawn_quic_guest_loop(
                                             bitrate_kbps: bitrate_kbps.load(Ordering::Acquire),
                                             frame_b64: b64,
                                         };
-                                        let _ = app.emit("duke-link-frame", &ev);
+                                        crate::emit_if_alive(&app, "duke-link-frame", &ev);
                                     }
                                     if reassembler.stale_frames_dropped > before_drops {
                                         stale_drops.store(reassembler.stale_frames_dropped, Ordering::Release);
@@ -1338,7 +1338,7 @@ fn spawn_quic_guest_loop(
                         window_bytes = 0;
                         if let Ok(rt) = link_state().lock() {
                             let snap = snapshot_from_runtime(&rt);
-                            let _ = app.emit("duke-link-state", &snap);
+                            crate::emit_if_alive(&app, "duke-link-state", &snap);
                         }
                     }
                 }
@@ -1428,7 +1428,7 @@ fn start_host_internal(
             active_players,
         },
     );
-    let _ = app.emit("duke-link-state", &snap);
+    crate::emit_if_alive(app, "duke-link-state", &snap);
     Ok(snap)
 }
 
@@ -1439,6 +1439,10 @@ fn stop_session_internal() -> DukeLinkStatusSnapshot {
     rt.stop_flag.store(true, Ordering::Release);
     *rt = SessionRuntime::default();
     snapshot_from_runtime(&rt)
+}
+
+pub(crate) fn shutdown_duke_link() {
+    let _ = stop_session_internal();
 }
 
 #[tauri::command]
@@ -1471,7 +1475,7 @@ pub(crate) async fn start_coop_host(
 #[tauri::command]
 pub(crate) fn stop_coop_session(app: AppHandle) -> DukeLinkStatusSnapshot {
     let snap = stop_session_internal();
-    let _ = app.emit("duke-link-state", &snap);
+    crate::emit_if_alive(&app, "duke-link-state", &snap);
     snap
 }
 
@@ -1698,7 +1702,7 @@ pub(crate) async fn join_coop_stream(
                 input_rx,
             },
         );
-        let _ = app.emit("duke-link-state", &snap);
+        crate::emit_if_alive(&app, "duke-link-state", &snap);
         Ok(snap)
     })
     .await

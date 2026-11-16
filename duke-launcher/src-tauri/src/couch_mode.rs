@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 static COUCH_BOOT_ARG: OnceLock<bool> = OnceLock::new();
 static RADIAL_VISIBLE: AtomicBool = AtomicBool::new(false);
@@ -675,9 +675,7 @@ pub fn poll_universal_controller_state() -> UniversalPadState {
     let xpad = duke_core::win32_ffi::poll_xinput_state();
     let hid_ready = duke_core::win32_ffi::hid_dll_available();
 
-    let Ok(mut hub) = hid_hub().lock() else {
-        return UniversalPadState::disconnected_snapshot(0.14, hid_ready);
-    };
+    let mut hub = hid_hub().lock().unwrap_or_else(|e| e.into_inner());
 
     if xpad.connected {
         let lx_norm = (f32::from(xpad.thumb_lx) / 32768.0).clamp(-1.0, 1.0);
@@ -762,7 +760,7 @@ pub fn poll_universal_controller_state() -> UniversalPadState {
 
     if !read_failed && latest_len == 0 && hub.opened.is_some() {
         hub.idle_empty_reads = hub.idle_empty_reads.saturating_add(1);
-        if hub.idle_empty_reads % 15 == 0 {
+        if hub.idle_empty_reads.is_multiple_of(15) {
             if let Some(ref opened) = hub.opened {
                 if opened.device.get_product_string().is_err() {
                     read_failed = true;
@@ -961,19 +959,19 @@ pub fn handle_controller_guide_event(
             }
             let _ = crate::save_settings_to_disk(app, &settings);
             let status = current_couch_status(settings.couch_mode);
-            let _ = app.emit("couch-mode-toggled", &status);
+            crate::emit_if_alive(app, "couch-mode-toggled", &status);
         }
         "radial_open" | "radial_hover" => {
             RADIAL_VISIBLE.store(true, Ordering::Release);
             *radial_slot_lock().write().unwrap_or_else(|e| e.into_inner()) = radial_slot;
             let settings = crate::load_settings_from_disk(app);
-            let _ = app.emit("couch-radial-updated", &current_couch_status(settings.couch_mode));
+            crate::emit_if_alive(app, "couch-radial-updated", &current_couch_status(settings.couch_mode));
         }
         "radial_close" => {
             RADIAL_VISIBLE.store(false, Ordering::Release);
             *radial_slot_lock().write().unwrap_or_else(|e| e.into_inner()) = None;
             let settings = crate::load_settings_from_disk(app);
-            let _ = app.emit("couch-radial-updated", &current_couch_status(settings.couch_mode));
+            crate::emit_if_alive(app, "couch-radial-updated", &current_couch_status(settings.couch_mode));
         }
         "toggle_virtual_keyboard" => {
             RADIAL_VISIBLE.store(false, Ordering::Release);
@@ -981,8 +979,9 @@ pub fn handle_controller_guide_event(
             VIRTUAL_KEYBOARD_VISIBLE.store(next, Ordering::Release);
             let settings = crate::load_settings_from_disk(app);
             let status = current_couch_status(settings.couch_mode);
-            let _ = app.emit("couch-radial-updated", &status);
-            let _ = app.emit(
+            crate::emit_if_alive(app, "couch-radial-updated", &status);
+            crate::emit_if_alive(
+                app,
                 "couch-radial-action",
                 serde_json::json!({ "action": "toggle_virtual_keyboard", "slot": radial_slot }),
             );
@@ -1007,7 +1006,8 @@ pub fn handle_controller_guide_event(
         }
         other => {
             RADIAL_VISIBLE.store(false, Ordering::Release);
-            let _ = app.emit(
+            crate::emit_if_alive(
+                app,
                 "couch-radial-action",
                 serde_json::json!({ "action": other, "slot": radial_slot }),
             );
@@ -1025,9 +1025,8 @@ pub fn clear_transient_couch_state() {
     RADIAL_VISIBLE.store(false, Ordering::Release);
     VIRTUAL_KEYBOARD_VISIBLE.store(false, Ordering::Release);
     *radial_slot_lock().write().unwrap_or_else(|e| e.into_inner()) = None;
-    if let Ok(mut hub) = hid_hub().lock() {
-        hub.clear_transient_pad_inputs();
-    }
+    let mut hub = hid_hub().lock().unwrap_or_else(|e| e.into_inner());
+    hub.clear_transient_pad_inputs();
 }
 
 #[tauri::command]
@@ -1058,9 +1057,9 @@ pub async fn set_couch_mode_state(
     settings.couch_mode = enabled;
     crate::save_settings_to_disk(&app, &settings)?;
     let status = current_couch_status(enabled);
-    let _ = app.emit("couch-mode-toggled", &status);
+    crate::emit_if_alive(&app, "couch-mode-toggled", &status);
     if radial_open.is_some() {
-        let _ = app.emit("couch-radial-updated", &status);
+        crate::emit_if_alive(&app, "couch-radial-updated", &status);
     }
     Ok(status)
 }
@@ -1101,9 +1100,7 @@ pub async fn calibrate_controller_axes(
 ) -> Result<ControllerCalibrationStatus, String> {
     crate::run_blocking_timeout(15, "calibrate_controller_axes", move || {
         let pad = poll_universal_controller_state();
-        let Ok(mut hub) = hid_hub().lock() else {
-            return Err("Controller calibrator busy".to_string());
-        };
+        let mut hub = hid_hub().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(dz) = deadzone {
             hub.calibrator.set_deadzone(dz);
         }

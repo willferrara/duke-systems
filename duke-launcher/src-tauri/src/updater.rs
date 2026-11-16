@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tokio::io::{AsyncWriteExt, BufWriter};
 
 pub const GITHUB_LATEST_RELEASE_API: &str =
@@ -90,12 +90,12 @@ pub fn set_cached_update_report(report: UpdateCheckReport) {
 pub fn spawn_startup_update_check(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(4)).await;
-        if crate::APP_SHUTDOWN.load(Ordering::Acquire) {
+        if crate::is_shutting_down() {
             return;
         }
         if let Ok(report) = check_for_app_updates_internal().await {
-            if !crate::APP_SHUTDOWN.load(Ordering::Acquire) && report.update_available {
-                let _ = app.emit("app-update-available", &report);
+            if !crate::is_shutting_down() && report.update_available {
+                crate::emit_if_alive(&app, "app-update-available", &report);
             }
         }
     });
@@ -686,7 +686,8 @@ fn emit_update_progress(
     } else {
         0.0
     };
-    let _ = app.emit(
+    crate::emit_if_alive(
+        app,
         "app-update-progress",
         UpdateProgressPayload {
             stage: stage.to_string(),

@@ -101,24 +101,25 @@ pub(crate) use cmd_security::{
 };
 #[allow(unused_imports)]
 pub(crate) use cmd_system::{
-    active_shm_apps, apply_runtime_settings, crash_guard, crc32_ieee,
+    active_shm_apps, apply_runtime_settings, crash_guard, crc32_ieee, emit_if_alive,
     enqueue_protocol_download_url, find_active_session_pid, first_active_session_pid,
     get_active_hotkey_cell, get_active_jobs_map, get_active_sessions,
-    get_process_working_set_mb, init_duke_bus, launch_game_detached_headless, launch_game_headless,
-    load_settings_from_disk, load_settings_standalone, normalize_loaded_settings,
-    parse_duke_protocol_download_url, publish_pipe_event, publish_shm_event,
-    publish_shm_frame_direct, query_disk_free_space_sync, run_blocking_timeout,
+    get_process_working_set_mb, init_duke_bus, is_shutting_down, launch_game_detached_headless,
+    launch_game_headless, load_settings_from_disk, load_settings_standalone,
+    normalize_loaded_settings, parse_duke_protocol_download_url, publish_pipe_event,
+    publish_shm_event, publish_shm_frame_direct, query_disk_free_space_sync, run_blocking_timeout,
     save_settings_standalone, save_settings_to_disk, shutdown_all_runtime_services,
     shutdown_flush_downloads, spawn_idle_ram_trim_watcher, spawn_overlay_trigger_watcher,
     suspend_or_resume_game, suspend_or_resume_game_core, toggle_overlay_window,
     trim_process_working_set, win32_clipboard_protocol, write_pure_rust_zip_archive, APP_SHUTDOWN,
     COUCH_MODE_ACTIVE, CREATE_NO_WINDOW, DUKE_BUS, DUKE_SHM_BUS, HOTKEY_WATCHER_ACTIVE,
-    LauncherSettings, RAM_TRIM_MODE, TRAY_DAEMON,
+    IS_SHUTTING_DOWN, LauncherSettings, RAM_TRIM_MODE, TRAY_DAEMON,
 };
 
 use duke_core::shm_bus::{DukeShmBus, ShmSourceApp};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+#[allow(unused_imports)]
 use tauri::{Emitter, Manager};
 fn main() {
     crash_guard::install();
@@ -247,7 +248,8 @@ fn main() {
                     .await;
                 let (record_count, fetched_at, _) = catalog_mmap::catalog_mmap_header_meta();
                 if record_count > 0 {
-                    let _ = catalog_app.emit(
+                    emit_if_alive(
+                        &catalog_app,
                         "catalog-mmap-ready",
                         serde_json::json!({
                             "recordCount": record_count,
@@ -299,6 +301,33 @@ fn main() {
                 updater::spawn_startup_update_check(app.handle().clone());
             }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        let close_to_tray = cmd_system::TRAY_DAEMON
+                            .get()
+                            .map(|d| d.config.close_to_tray.load(Ordering::Relaxed))
+                            .unwrap_or(false);
+                        if !close_to_tray {
+                            IS_SHUTTING_DOWN.store(true, Ordering::Release);
+                            APP_SHUTDOWN.store(true, Ordering::Release);
+                            api.prevent_close();
+                            let app_handle = window.app_handle().clone();
+                            shutdown_all_runtime_services(&app_handle);
+                            app_handle.exit(0);
+                        }
+                    }
+                    tauri::WindowEvent::Destroyed => {
+                        IS_SHUTTING_DOWN.store(true, Ordering::Release);
+                        APP_SHUTDOWN.store(true, Ordering::Release);
+                        let app_handle = window.app_handle().clone();
+                        shutdown_all_runtime_services(&app_handle);
+                    }
+                    _ => {}
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             cmd_system::get_app_version,
@@ -586,6 +615,8 @@ fn main() {
             cmd_security::scan_redist_bloat,
             cmd_security::clean_redist_bloat,
             cmd_security::get_net_engine_stats_cmd,
+            cmd_security::save_api_key,
+            cmd_security::clear_api_key,
             cmd_system::get_self_heal_diagnostics,
             cmd_system::reset_self_heal_subsystem,
             cmd_system::get_discord_presence_status,
@@ -597,10 +628,12 @@ fn main() {
             cmd_system::set_desktop_chord_enabled,
             cmd_library::get_steam_mini_profile,
             cmd_library::set_steam_profile_override,
+            cmd_library::save_steam_id_override,
             cmd_system::get_app_system_status,
             cmd_system::configure_startup_and_tray,
             cmd_system::create_app_shortcuts_and_register_protocol,
             cmd_system::export_diagnostics_bundle,
+            cmd_system::quit_app,
             stress_harness::run_chaos_stress_harness
         ])
         .build(tauri::generate_context!())
@@ -616,34 +649,67 @@ fn main() {
     };
 
     app.run(move |app_handle, event| {
-        if let tauri::RunEvent::WindowEvent {
-            label,
-            event: tauri::WindowEvent::CloseRequested { api, .. },
-            ..
-        } = &event
-        {
-            if label == "overlay" {
-                api.prevent_close();
-                if let Some(overlay_win) = app_handle.get_webview_window("overlay") {
-                    let _ = overlay_win.hide();
-                }
-                return;
-            }
-            if label == "main" {
-                app_system::capture_and_save_window_geometry(app_handle);
-                if !daemon_state.config.close_to_tray.load(Ordering::Relaxed) {
-                    daemon_state.app_exiting.store(true, Ordering::Release);
-                    APP_SHUTDOWN.store(true, Ordering::Release);
-                    shutdown_all_runtime_services(app_handle);
+        match &event {
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } => {
+                if label == "overlay" {
+                    api.prevent_close();
                     if let Some(overlay_win) = app_handle.get_webview_window("overlay") {
-                        let _ = overlay_win.destroy();
+                        let _ = overlay_win.hide();
                     }
-                    app_handle.exit(0);
                     return;
                 }
+                if label == "main" {
+                    if !daemon_state.config.close_to_tray.load(Ordering::Relaxed) {
+                        IS_SHUTTING_DOWN.store(true, Ordering::Release);
+                        APP_SHUTDOWN.store(true, Ordering::Release);
+                        daemon_state.app_exiting.store(true, Ordering::Release);
+                        api.prevent_close();
+                        shutdown_all_runtime_services(app_handle);
+                        app_handle.exit(0);
+                        return;
+                    } else {
+                        api.prevent_close();
+                        app_system::capture_and_save_window_geometry(app_handle);
+                        daemon_state.ui_visible.store(false, Ordering::Release);
+                        if let Some(main_win) = app_handle.get_webview_window("main") {
+                            let _ = main_win.hide();
+                        }
+                        duke_core::tray_daemon::schedule_delayed_tray_trims();
+                        return;
+                    }
+                }
             }
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Destroyed,
+                ..
+            } if label == "main" => {
+                if !daemon_state.config.close_to_tray.load(Ordering::Relaxed) {
+                    IS_SHUTTING_DOWN.store(true, Ordering::Release);
+                    APP_SHUTDOWN.store(true, Ordering::Release);
+                    daemon_state.app_exiting.store(true, Ordering::Release);
+                    shutdown_all_runtime_services(app_handle);
+                }
+            }
+            tauri::RunEvent::ExitRequested { .. }
+                if (daemon_state.app_exiting.load(Ordering::Acquire)
+                    || IS_SHUTTING_DOWN.load(Ordering::Acquire)
+                    || APP_SHUTDOWN.load(Ordering::Acquire)) =>
+            {
+                IS_SHUTTING_DOWN.store(true, Ordering::Release);
+                APP_SHUTDOWN.store(true, Ordering::Release);
+                daemon_state.app_exiting.store(true, Ordering::Release);
+                shutdown_all_runtime_services(app_handle);
+            }
+            _ => {}
         }
         let exit_cb = || {
+            IS_SHUTTING_DOWN.store(true, Ordering::Release);
+            APP_SHUTDOWN.store(true, Ordering::Release);
             shutdown_all_runtime_services(app_handle);
         };
         duke_core::tray_daemon::handle_run_event(

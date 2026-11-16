@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tauri::Emitter;
 use walkdir::WalkDir;
 
 use crate::snapshots::{self, GameSnapshotManifest, CAS_DIR_NAME, PROFILE_DIR_NAME};
@@ -958,7 +957,7 @@ fn run_win32_watch_loop(
                             tree_hash,
                             cas_dir: ctx.cas_dir.to_string_lossy().into_owned(),
                         };
-                        let _ = handle.emit("save-watcher-snapshot", &payload);
+                        crate::emit_if_alive(handle, "save-watcher-snapshot", &payload);
                     }
                 }
                 Ok(None) => {

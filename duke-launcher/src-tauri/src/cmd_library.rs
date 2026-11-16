@@ -1529,8 +1529,8 @@ pub(crate) async fn auto_fix_all_covers(app: AppHandle) -> Result<Vec<GameEntry>
         })
         .await?;
     }
-    let _ = app.emit("library-updated", &lib);
-    let _ = app.emit("sidebar-icons-updated", ());
+    emit_if_alive(&app, "library-updated", &lib);
+    emit_if_alive(&app, "sidebar-icons-updated", ());
     trim_process_working_set();
     Ok(lib)
 }
@@ -1614,8 +1614,8 @@ pub(crate) async fn find_and_apply_cover(
             }
             sidebar_icons::invalidate_sidebar_icon(&app_save, &entry_id);
         }
-        let _ = app_save.emit("library-updated", &library);
-        let _ = app_save.emit("sidebar-icons-updated", ());
+        emit_if_alive(&app_save, "library-updated", &library);
+        emit_if_alive(&app_save, "sidebar-icons-updated", ());
         trim_process_working_set();
         Ok(library)
     })
@@ -1739,7 +1739,7 @@ pub(crate) fn spawn_startup_turbo_price_resolution(app: AppHandle) {
         })
         .await
         {
-            let _ = app.emit("library-updated", &updated_lib);
+            emit_if_alive(&app, "library-updated", &updated_lib);
         }
     });
 }
@@ -2116,7 +2116,7 @@ pub(crate) async fn set_game_launch_args(
         if !wal_ok {
             save_library_to_disk(&app_clone, &library)?;
         }
-        let _ = app_clone.emit("library-updated", &library);
+        emit_if_alive(&app_clone, "library-updated", &library);
         Ok(library)
     })
     .await
@@ -2171,7 +2171,7 @@ pub(crate) async fn set_game_launch_profile(
         if !wal_ok {
             save_library_to_disk(&app_clone, &library)?;
         }
-        let _ = app_clone.emit("library-updated", &library);
+        emit_if_alive(&app_clone, "library-updated", &library);
         Ok(library)
     })
     .await
@@ -2230,7 +2230,7 @@ pub(crate) async fn compress_game_folder(app: AppHandle, game_id: String) -> Res
             entry.size_formatted = after_formatted.clone();
         }
         save_library_to_disk(&app_clone, &library)?;
-        let _ = app_clone.emit("library-updated", &library);
+        emit_if_alive(&app_clone, "library-updated", &library);
         trim_process_working_set();
 
         Ok(serde_json::json!({
@@ -2336,7 +2336,7 @@ pub(crate) async fn change_game_exe(
         if let Some(gid) = updated_id {
             sidebar_icons::invalidate_sidebar_icon(&app_save, &gid);
         }
-        let _ = app_save.emit("library-updated", &library);
+        emit_if_alive(&app_save, "library-updated", &library);
         Ok(library)
     })
     .await
@@ -2815,7 +2815,7 @@ pub(crate) async fn get_game_steam_details(
                         entry.steam_price_cents = Some(retail_price_cents);
                         entry.steam_price_formatted = Some(fmt_clone);
                         let _ = save_library_to_disk(&app_clone, &lib);
-                        let _ = app_clone.emit("library-updated", &lib);
+                        emit_if_alive(&app_clone, "library-updated", &lib);
                     }
                 }
             }
@@ -2972,7 +2972,7 @@ pub(crate) async fn sync_library_steam_prices(app: AppHandle) -> Result<Vec<Game
         }
         if changed {
             save_library_to_disk(&app_for_save, &lib)?;
-            let _ = app_for_save.emit("library-updated", &lib);
+            emit_if_alive(&app_for_save, "library-updated", &lib);
         }
         Ok(lib)
     })
@@ -3565,9 +3565,7 @@ pub(crate) struct CatalogSyncActiveGuard;
 impl Drop for CatalogSyncActiveGuard {
     fn drop(&mut self) {
         if let Some(cell) = LIVE_CATALOG_UPSERTS.get() {
-            if let Ok(mut guard) = cell.lock() {
-                guard.clear();
-            }
+            cell.lock().unwrap_or_else(|e| e.into_inner()).clear();
         }
         CATALOG_SYNC_ACTIVE.store(false, Ordering::SeqCst);
     }
@@ -3576,18 +3574,17 @@ impl Drop for CatalogSyncActiveGuard {
 pub(crate) fn record_live_catalog_upsert(entry: &CatalogGameEntry) {
     if CATALOG_SYNC_ACTIVE.load(Ordering::Acquire) {
         let cell = LIVE_CATALOG_UPSERTS.get_or_init(|| Mutex::new(HashMap::new()));
-        if let Ok(mut guard) = cell.lock() {
-            guard.insert(entry.app_id, entry.clone());
-        }
+        cell.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(entry.app_id, entry.clone());
     }
 }
 
 pub(crate) fn drain_live_upserts_into(entries_by_id: &mut HashMap<u32, CatalogGameEntry>) {
     if let Some(cell) = LIVE_CATALOG_UPSERTS.get() {
-        if let Ok(mut guard) = cell.lock() {
-            for (id, entry) in guard.drain() {
-                entries_by_id.insert(id, entry);
-            }
+        let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+        for (id, entry) in guard.drain() {
+            entries_by_id.insert(id, entry);
         }
     }
 }
@@ -3795,7 +3792,7 @@ pub(crate) fn emit_catalog_sync_progress(app: &AppHandle, indexed_count: usize, 
         target_count: CATALOG_TARGET_COUNT.max(indexed_count),
         done,
     };
-    let _ = app.emit("catalog-sync-progress", &payload);
+    emit_if_alive(app, "catalog-sync-progress", &payload);
 }
 
 pub(crate) struct BackgroundHarvestJob {
@@ -4795,7 +4792,7 @@ pub(crate) async fn ingest_dropped_paths(
                         covers.push((entry.platform_id, entry.id, entry.title, hint));
                     }
                     save_library_to_disk(&app_for_roms, &lib)?;
-                    let _ = app_for_roms.emit("library-updated", &lib);
+                    emit_if_alive(&app_for_roms, "library-updated", &lib);
                     Ok(ScannedRomBatch { titles, covers })
                 })
                 .await
@@ -4840,7 +4837,7 @@ pub(crate) async fn ingest_dropped_paths(
         if ext == "dkpack" {
             match dkpack::ingest_dropped_dkpack_file(&app, &path, None).await {
                 Ok(report) => {
-                    let _ = app.emit("dkpack-applied", &report);
+                    emit_if_alive(&app, "dkpack-applied", &report);
                     added_titles.push(format!("Modpack: {}", report.pack_name));
                 }
                 Err(err) => skipped_reasons.push(err),
@@ -4965,7 +4962,7 @@ pub(crate) async fn ingest_dropped_paths(
                     },
                 );
                 save_library_to_disk(&app_for_rom, &lib)?;
-                let _ = app_for_rom.emit("library-updated", &lib);
+                emit_if_alive(&app_for_rom, "library-updated", &lib);
                 Ok(entry)
             })
             .await
@@ -4996,7 +4993,7 @@ pub(crate) async fn ingest_dropped_paths(
     })
     .await
     .map_err(|e| format!("Library reload failed: {}", e))??;
-    let _ = app.emit("library-updated", &library);
+    emit_if_alive(&app, "library-updated", &library);
 
     Ok(IngestPathsReport {
         added_count: added_titles.len(),
@@ -5277,7 +5274,7 @@ pub(crate) async fn scan_and_clean_desktop_shortcuts(app: AppHandle) -> Result<D
     })
     .await
     .map_err(|e| format!("Library reload failed: {}", e))??;
-    let _ = app.emit("library-updated", &library);
+    emit_if_alive(&app, "library-updated", &library);
 
     Ok(DesktopCleanupReport {
         scanned_shortcuts,
@@ -5319,7 +5316,19 @@ pub(crate) async fn set_steam_profile_override(
         save_settings_to_disk(&app_for_save, &settings)
     })
     .await;
-    crate::steam_profile::resolve_steam_mini_profile(clean, true).await
+    crate::steam_profile::clear_steam_profile_cache();
+    crate::friends::clear_friends_cache();
+    let profile = crate::steam_profile::resolve_steam_mini_profile(clean, true).await?;
+    emit_if_alive(&app, "steam-profile-updated", &profile);
+    Ok(profile)
+}
+
+#[tauri::command]
+pub(crate) async fn save_steam_id_override(
+    app: AppHandle,
+    steam_id_override: Option<String>,
+) -> Result<crate::steam_profile::SteamMiniProfile, String> {
+    set_steam_profile_override(app, steam_id_override).await
 }
 
 

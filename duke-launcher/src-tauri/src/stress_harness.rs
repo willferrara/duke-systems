@@ -726,7 +726,7 @@ fn case_minimize_settings_and_updater_sanity(root: &Path) -> Result<String, Stri
     }
 
     let sample_path = root.join("updater_sample.bin");
-    fs::write(&sample_path, b"duke-v2.3.0-binary-payload").map_err(|e| e.to_string())?;
+    fs::write(&sample_path, b"duke-v2.3.1-binary-payload").map_err(|e| e.to_string())?;
     let mismatch = crate::updater::verify_file_sha256_streaming(
         &sample_path,
         "0000000000000000000000000000000000000000000000000000000000000000",
@@ -734,26 +734,26 @@ fn case_minimize_settings_and_updater_sanity(root: &Path) -> Result<String, Stri
     if mismatch.is_ok() {
         return Err("Updater SHA-256 verification accepted a mismatched digest.".to_string());
     }
-    if !crate::updater::is_newer_version("2.2.1", "v2.3.0")
-        || crate::updater::is_newer_version("2.3.0", "v2.3.0")
+    if !crate::updater::is_newer_version("2.3.0", "v2.3.1")
+        || crate::updater::is_newer_version("2.3.1", "v2.3.1")
     {
-        return Err("Updater SemVer comparison failed v2.3.0 check.".to_string());
+        return Err("Updater SemVer comparison failed v2.3.1 check.".to_string());
     }
 
     Ok("Opt-in tray defaults (false/false), auto-check updates (true), SemVer, and SHA-256 rejection verified.".to_string())
 }
 
-fn case_steam_mini_profile_and_app_system(_root: &Path) -> Result<String, String> {
+fn case_steam_mini_profile_and_app_system(root: &Path) -> Result<String, String> {
     let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <profile>
     <steamID64>76561198012345678</steamID64>
-    <steamID><![CDATA[DukeCommander]]></steamID>
+    <steamID><![CDATA[DukeCommander &quot;King&quot; &#39;3D&#39; &amp; Co.]]></steamID>
     <onlineState>in-game</onlineState>
     <stateMessage><![CDATA[In-Game<br/>Cyberpunk 2077]]></stateMessage>
     <privacyState>public</privacyState>
     <avatarFull><![CDATA[https://avatars.steamstatic.com/abc_full.jpg]]></avatarFull>
     <memberSince>November 15, 2014</memberSince>
-    <summary><![CDATA[<b>Zero Bloat</b> Gamer]]></summary>
+    <summary><![CDATA[<b>Zero Bloat</b><br>Speed &amp; Stability]]></summary>
     <mostPlayedGames>
         <mostPlayedGame>
             <gameName><![CDATA[Cyberpunk 2077]]></gameName>
@@ -766,13 +766,44 @@ fn case_steam_mini_profile_and_app_system(_root: &Path) -> Result<String, String
 </profile>"#;
     let target = crate::steam_profile::SteamProfileTarget::SteamId64("76561198012345678".to_string());
     let prof = crate::steam_profile::parse_steam_community_xml(xml, &target)?;
-    if prof.persona_name != "DukeCommander"
+    if prof.persona_name != "DukeCommander \"King\" '3D' & Co."
+        || prof.summary_text != "Zero Bloat\nSpeed & Stability"
         || prof.privacy_state != "public"
         || prof.showcase_games.len() != 1
         || prof.showcase_games[0].app_id != Some(1091500)
     {
-        return Err("Steam XML profile parsing failed validation.".to_string());
+        return Err("Steam XML profile parsing or CDATA/entity decoding failed validation.".to_string());
     }
+
+    let v2_json = serde_json::json!({
+        "response": {
+            "players": [{
+                "steamid": "76561198012345678",
+                "personaname": "PrivateCommander",
+                "communityvisibilitystate": 1,
+                "personastate": 0
+            }]
+        }
+    });
+    let v2_prof = crate::steam_profile::parse_player_summaries_v2_json(&v2_json, &target)?;
+    if v2_prof.status_label != "Steam Profile Private" || v2_prof.privacy_state != "private" {
+        return Err("GetPlayerSummaries/v2 fallback did not classify private profile status.".to_string());
+    }
+    if crate::friends::classify_steam_friends_error("HTTP 401", true) != "Steam Profile Private"
+        || crate::friends::classify_steam_friends_error("HTTP 401", false) != "Invalid API Key"
+        || crate::friends::classify_steam_friends_error("No Local SteamID64", false) != "No Local SteamID64"
+        || crate::friends::classify_steam_friends_error("timeout", false) != "Network Unreachable"
+    {
+        return Err("Steam friends diagnostic classifier returned unexpected status badge.".to_string());
+    }
+
+    crate::steam_profile::clear_steam_profile_cache();
+    crate::friends::clear_friends_cache();
+
+    // Verify shutdown WAL flush helper works on an isolated temp dir without panicking
+    let wal_dir = root.join("shutdown_wal_flush");
+    fs::create_dir_all(&wal_dir).map_err(|e| e.to_string())?;
+    let _ = crate::lib_store::flush_wal_on_shutdown(&wal_dir)?;
 
     let exe = Path::new("C:\\Program Files\\Duke Launcher\\duke-launcher.exe");
     let run_tray = crate::app_system::format_startup_run_command(exe, true);
@@ -810,7 +841,7 @@ fn case_steam_mini_profile_and_app_system(_root: &Path) -> Result<String, String
         return Err("Diagnostics bundle (.zip) export failed.".to_string());
     }
 
-    Ok("Steam Community XML showcase parser, Startup Run formatter, multi-monitor clamp, and redacted diagnostics ZIP verified.".to_string())
+    Ok("Steam XML CDATA/entity parser, v2 API fallback, friends diagnostics, cache clear, WAL flush, Startup Run, and diagnostics ZIP verified.".to_string())
 }
 
 pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
@@ -833,8 +864,8 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
         .map_err(|e| format!("Failed reading tauri.conf.json: {e}"))?;
 
     // 1. Version & Window Safety Checks
-    if !index_html.contains("2.3.0") || !tauri_conf.contains("\"2.3.0\"") {
-        return Err("Expected v2.3.0 marker missing in index.html or tauri.conf.json.".to_string());
+    if !index_html.contains("2.3.1") || !tauri_conf.contains("\"2.3.1\"") {
+        return Err("Expected v2.3.1 marker missing in index.html or tauri.conf.json.".to_string());
     }
 
     let default_sites = crate::sites::default_search_sites();
@@ -973,6 +1004,10 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
         "gamepaddisconnected",
         "toggleCouchMode",
         "closeTopmostUiLayer",
+        "__dukeUnloading",
+        "modalGen",
+        "loadSteamMiniProfile",
+        "steam-profile-updated",
     ] {
         if !main_js.contains(required_hook) {
             return Err(format!(
@@ -980,9 +1015,12 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
             ));
         }
     }
+    if !api_js.contains("__dukeUnloading") {
+        return Err("api.js missing required window.__dukeUnloading shutdown guard.".to_string());
+    }
 
     Ok(format!(
-        "Verified v2.3.0: 6 views, 10 modals, 10 themes, VirtualCardGrid, {} SVG symbols, {} DOM IDs checked, {} IPC commands registered.",
+        "Verified v2.3.1: 6 views, 10 modals, 10 themes, VirtualCardGrid, {} SVG symbols, {} DOM IDs checked, {} IPC commands registered.",
         symbol_ids.len(),
         html_ids.len(),
         invoke_cmds.len()

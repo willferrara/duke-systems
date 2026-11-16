@@ -5,7 +5,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -437,11 +437,12 @@ pub(crate) async fn apply_custom_artwork(
         .await
         .unwrap_or_else(|_| Ok(Vec::new()))
     {
-        let _ = app.emit("library-updated", &full_lib);
+        crate::emit_if_alive(&app, "library-updated", &full_lib);
     }
 
     if cover_updated {
-        let _ = app.emit(
+        crate::emit_if_alive(
+            &app,
             "cover-updated",
             serde_json::json!({
                 "gameId": &updated_entry.id,
@@ -1716,7 +1717,8 @@ pub(crate) async fn resolve_catalog_cover(
     {
         let cover_path_str = outcome.cover_path.to_string_lossy().to_string();
         if outcome.source_tier != "cache" {
-            let _ = app.emit(
+            crate::emit_if_alive(
+                &app,
                 "cover-updated",
                 serde_json::json!({
                     "gameId": req.cache_id,

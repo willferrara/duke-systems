@@ -122,7 +122,7 @@ pub(crate) async fn install_detected_rom_to_library(
     }
 
     if let Ok(lib) = load_library_from_disk(app) {
-        let _ = app.emit("library-updated", &lib);
+        emit_if_alive(app, "library-updated", &lib);
     }
     Ok(entry)
 }
@@ -379,7 +379,7 @@ pub(crate) fn spawn_cache_retro_covers_batch(app: AppHandle, targets: Vec<CoverC
             })
             .await
             {
-                let _ = app.emit("library-updated", &lib);
+                emit_if_alive(&app, "library-updated", &lib);
             }
         }
     });
@@ -467,7 +467,7 @@ pub(crate) async fn add_retro_game_from_catalog(
             },
         );
         save_library_to_disk(&app_clone, &library)?;
-        let _ = app_clone.emit("library-updated", &library);
+        emit_if_alive(&app_clone, "library-updated", &library);
         Ok(entry)
     })
     .await
@@ -531,7 +531,7 @@ pub(crate) async fn link_game_rom(
             }
         }
         save_library_to_disk(&app_clone, &library)?;
-        let _ = app_clone.emit("library-updated", &library);
+        emit_if_alive(&app_clone, "library-updated", &library);
         Ok(library)
     })
     .await
@@ -597,7 +597,7 @@ pub(crate) async fn scan_rom_folder(app: AppHandle, folder_path: String) -> Resu
             covers.push((entry.platform_id, entry.id, entry.title, hint));
         }
         save_library_to_disk(&app_clone, &lib)?;
-        let _ = app_clone.emit("library-updated", &lib);
+        emit_if_alive(&app_clone, "library-updated", &lib);
         Ok((titles, covers, lib))
     })
     .await
@@ -636,7 +636,8 @@ pub(crate) async fn compress_retro_rom(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let delete_orig = delete_originals.unwrap_or(false);
-    let _ = app.emit(
+    emit_if_alive(
+        &app,
         "rom-shrink-progress",
         serde_json::json!({
             "status": "running",
@@ -653,7 +654,7 @@ pub(crate) async fn compress_retro_rom(
             rom_shrink::compress_retro_library_sync(&mut library, gid_work.as_deref(), delete_orig)?;
         if report.converted_count > 0 {
             save_library_to_disk(&app_work, &library)?;
-            let _ = app_work.emit("library-updated", &library);
+            emit_if_alive(&app_work, "library-updated", &library);
         }
         Ok(report)
     })
@@ -661,7 +662,8 @@ pub(crate) async fn compress_retro_rom(
 
     match &res {
         Ok(report) => {
-            let _ = app.emit(
+            emit_if_alive(
+                &app,
                 "rom-shrink-progress",
                 serde_json::json!({
                     "status": "completed",
@@ -674,7 +676,8 @@ pub(crate) async fn compress_retro_rom(
             );
         }
         Err(err) => {
-            let _ = app.emit(
+            emit_if_alive(
+                &app,
                 "rom-shrink-progress",
                 serde_json::json!({
                     "status": "error",

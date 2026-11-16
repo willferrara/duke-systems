@@ -307,11 +307,20 @@ import {
   listenAppUpdateProgress,
   getSteamMiniProfile,
   setSteamProfileOverride,
+  saveSteamIdOverride,
+  saveApiKey,
+  clearApiKey,
   getAppSystemStatus,
   configureStartupAndTray,
   createAppShortcutsAndRegisterProtocol,
-  exportDiagnosticsBundle
+  exportDiagnosticsBundle,
+  quitApp
 } from "./api.js";
+
+if (typeof window !== "undefined" && typeof window.__dukeUnloading !== "boolean") {
+  window.__dukeUnloading = false;
+}
+let modalGen = 0;
 
 const BOOKMARKLET_HREF =
   "javascript:location.href='duke://download?url='+encodeURIComponent(location.href)";
@@ -372,6 +381,7 @@ const state = {
   searchQuery: "",
   selectedDetailId: null,
   activeDetailRequestId: 0,
+  modalGen: 0,
   modalGameId: null,
   autoCleanCompleted: true,
   autoDetectClipboard: true,
@@ -707,6 +717,7 @@ function scheduleCatalogCoverResolve(entry, imgEl, mediaEl) {
 }
 
 function showToast(msg, tone = "info", durationMs = 3800) {
+  if (typeof window !== "undefined" && window.__dukeUnloading === true) return;
   const c = el("toast-container");
   if (!c) return;
   const t = document.createElement("div");
@@ -908,6 +919,15 @@ function abortAllScopedRequests() {
   state.pendingAbortControllers.clear();
 }
 
+function bumpModalGen(scope = null) {
+  modalGen += 1;
+  state.modalGen = modalGen;
+  if (scope) {
+    abortScopedRequests(scope);
+  }
+  return modalGen;
+}
+
 function clearControllerFocus(options = {}) {
   const disconnect = Boolean(options?.disconnect ?? !state.controllerConnected);
   const blurNonText = options?.blurNonText !== false;
@@ -967,6 +987,9 @@ function clearControllerFocus(options = {}) {
 }
 
 function closeCouchCalibratorPopover() {
+  modalGen++;
+  state.modalGen = modalGen;
+  abortScopedRequests("couch-calibrator");
   const pop = el("couch-calibrator-popover");
   if (!pop || pop.classList.contains("hidden")) return;
   pop.classList.add("hidden");
@@ -974,6 +997,8 @@ function closeCouchCalibratorPopover() {
 }
 
 function closeCatalogDetailModal() {
+  modalGen++;
+  state.modalGen = modalGen;
   state.catalog.modalRequestId += 1;
   abortScopedRequests("catalog-modal");
   const modal = el("catalog-detail-modal");
@@ -983,7 +1008,11 @@ function closeCatalogDetailModal() {
 }
 
 function closeDetailsModal() {
+  modalGen++;
+  state.modalGen = modalGen;
+  state.activeDetailRequestId += 1;
   abortScopedRequests("cover-search");
+  abortScopedRequests("details-modal");
   const modal = el("details-modal");
   if (!modal || modal.classList.contains("hidden")) return;
   modal.classList.add("hidden");
@@ -991,6 +1020,9 @@ function closeDetailsModal() {
 }
 
 function closeRestoreSaveModal() {
+  modalGen++;
+  state.modalGen = modalGen;
+  state.restoreSaveState.gameId = null;
   abortScopedRequests("restore-save");
   const modal = el("restore-save-modal");
   if (!modal || modal.classList.contains("hidden")) return;
@@ -999,6 +1031,9 @@ function closeRestoreSaveModal() {
 }
 
 function closeSnapshotsModal() {
+  modalGen++;
+  state.modalGen = modalGen;
+  state.snapshotModalState.gameId = null;
   abortScopedRequests("snapshots-modal");
   const modal = el("snapshots-modal");
   if (!modal || modal.classList.contains("hidden")) return;
@@ -1007,7 +1042,10 @@ function closeSnapshotsModal() {
 }
 
 function closePreflightModal() {
+  modalGen++;
+  state.modalGen = modalGen;
   abortScopedRequests("preflight-modal");
+  abortScopedRequests("shield-modal");
   const modal = el("preflight-modal");
   if (!modal || modal.classList.contains("hidden")) return;
   modal.classList.add("hidden");
@@ -1089,6 +1127,9 @@ function closeTopmostUiLayer() {
     return true;
   }
   if (state.selectedDetailId) {
+    modalGen++;
+    state.modalGen = modalGen;
+    state.activeDetailRequestId += 1;
     state.selectedDetailId = null;
     abortScopedRequests("detail");
     switchTab("library", false);
@@ -3982,6 +4023,8 @@ function toggleFriendsDrawer(forceOpen = null) {
       }
     }, 20000);
   } else {
+    modalGen++;
+    state.modalGen = modalGen;
     abortScopedRequests("friends-drawer");
     clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
   }
@@ -4153,6 +4196,8 @@ function openCoopStreamModal() {
 }
 
 function closeCoopStreamModal() {
+  modalGen++;
+  state.modalGen = modalGen;
   state.coopModalOpen = false;
   el("coop-stream-modal")?.classList.add("hidden");
   stopCoopP2InputPump();
@@ -4501,6 +4546,9 @@ async function initOverlayHudMode() {
   };
 
   el("btn-overlay-close")?.addEventListener("click", () => {
+    modalGen++;
+    state.modalGen = modalGen;
+    abortScopedRequests("overlay-hud");
     hideOverlayWindow().catch(() => {});
   });
 
@@ -4577,6 +4625,9 @@ async function initOverlayHudMode() {
 
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
+      modalGen++;
+      state.modalGen = modalGen;
+      abortScopedRequests("overlay-hud");
       hideOverlayWindow().catch(() => {});
     }
   });
@@ -5419,6 +5470,9 @@ function openAddSiteModal() {
 }
 
 function closeAddSiteModal() {
+  modalGen++;
+  state.modalGen = modalGen;
+  abortScopedRequests("add-site-modal");
   el("add-site-modal")?.classList.add("hidden");
   clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
 }
@@ -5432,6 +5486,9 @@ function openBulkImportModal() {
 }
 
 function closeBulkImportModal() {
+  modalGen++;
+  state.modalGen = modalGen;
+  abortScopedRequests("bulk-import-modal");
   el("bulk-import-modal")?.classList.add("hidden");
   clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
 }
@@ -7047,6 +7104,9 @@ function openEmulatorInstallModal({ game, consoleSlug, consoleName, emuDisplayNa
 }
 
 function closeEmulatorInstallModal() {
+  modalGen++;
+  state.modalGen = modalGen;
+  abortScopedRequests("emu-install-modal");
   el("emu-install-prompt-modal")?.classList.add("hidden");
   pendingEmuInstallPrompt = null;
   clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: true, resetRepeats: true });
@@ -7474,6 +7534,9 @@ function pilotIconName(raw) {
 }
 
 function closeDukePilotPopover() {
+  modalGen++;
+  state.modalGen = modalGen;
+  abortScopedRequests("duke-pilot");
   el("duke-pilot-popover")?.classList.add("hidden");
   state.pilotEverythingIdx = -1;
   clearControllerFocus({ disconnect: !state.controllerConnected, blurNonText: false, resetRepeats: true });
@@ -8202,6 +8265,9 @@ function openRadialHotbar(slots = null) {
 }
 
 function closeRadialHotbar() {
+  modalGen++;
+  state.modalGen = modalGen;
+  abortScopedRequests("radial-hotbar");
   const wasOpen = Boolean(state.radialOpen) || !el("radial-hotbar-overlay")?.classList.contains("hidden");
   state.radialOpen = false;
   el("radial-hotbar-overlay")?.classList.add("hidden");
@@ -8304,6 +8370,9 @@ function openVirtualKeyboard(targetEl = null) {
 }
 
 function closeVirtualKeyboard(applyText = false) {
+  modalGen++;
+  state.modalGen = modalGen;
+  abortScopedRequests("virtual-keyboard");
   const overlay = el("virtual-keyboard-overlay");
   const wasOpen = overlay && !overlay.classList.contains("hidden");
   const preview = el("vkb-preview");
@@ -8840,6 +8909,10 @@ function wireEvents() {
     }
   });
   window.addEventListener("beforeunload", () => {
+    window.__dukeUnloading = true;
+    modalGen++;
+    state.modalGen = modalGen;
+    clearSteamMiniHoverTimers();
     if (state.ramTelemetryTimer !== null) {
       clearInterval(state.ramTelemetryTimer);
       state.ramTelemetryTimer = null;
@@ -9908,6 +9981,9 @@ async function runModDropperInstall(game, sourceInput) {
 let pendingCleanUninstallGameId = null;
 
 function closeCleanUninstallModal() {
+  modalGen++;
+  state.modalGen = modalGen;
+  abortScopedRequests("clean-uninstall");
   el("clean-uninstall-modal")?.classList.add("hidden");
   pendingCleanUninstallGameId = null;
 }
@@ -10455,12 +10531,12 @@ async function openCleanUninstallModalForGame(game) {
       return;
     }
     try {
-      const updated = await updateLauncherSettings({ steamApiKey: val });
+      const updated = await saveApiKey("steam", val);
       syncSettingsUiFromBackend(updated);
       if (el("setting-steam-api-key")) el("setting-steam-api-key").value = "";
       showToast("Steam Web API key stored locally.", "success");
-      if (state.friendsDrawerOpen) refreshFriendsPanel(true);
-      refreshSteamMiniProfile(true).catch(() => {});
+      loadSteamMiniProfile(true).catch(() => {});
+      refreshFriendsPanel(true);
     } catch (err) {
       showToast(String(err), "error");
     }
@@ -10468,11 +10544,11 @@ async function openCleanUninstallModalForGame(game) {
 
   el("btn-clear-steam-api-key")?.addEventListener("click", async () => {
     try {
-      const updated = await updateLauncherSettings({ clearSteamApiKey: true });
+      const updated = await clearApiKey("steam");
       syncSettingsUiFromBackend(updated);
       showToast("Steam Web API key removed.", "info");
-      if (state.friendsDrawerOpen) refreshFriendsPanel(true);
-      refreshSteamMiniProfile(true).catch(() => {});
+      loadSteamMiniProfile(true).catch(() => {});
+      refreshFriendsPanel(true);
     } catch (err) {
       showToast(String(err), "error");
     }
@@ -10481,11 +10557,15 @@ async function openCleanUninstallModalForGame(game) {
   el("btn-save-steam-id-override")?.addEventListener("click", async () => {
     const val = (el("setting-steam-id-override")?.value || "").trim();
     try {
-      const updated = await updateLauncherSettings({ steamIdOverride: val });
-      syncSettingsUiFromBackend(updated);
+      state.steamIdOverride = val;
+      if (el("input-steam-mini-override")) el("input-steam-mini-override").value = val;
+      const prof = await saveSteamIdOverride(val);
+      if (prof) renderSteamMiniProfileUi(prof);
+      const updated = await getLauncherSettings().catch(() => null);
+      if (updated) syncSettingsUiFromBackend(updated);
       showToast(val ? "SteamID64 override saved." : "SteamID64 override cleared (auto-detect active).", "success");
-      if (state.friendsDrawerOpen) refreshFriendsPanel(true);
-      refreshSteamMiniProfile(true).catch(() => {});
+      loadSteamMiniProfile(true).catch(() => {});
+      refreshFriendsPanel(true);
     } catch (err) {
       showToast(String(err), "error");
     }
@@ -10498,11 +10578,11 @@ async function openCleanUninstallModalForGame(game) {
       return;
     }
     try {
-      const updated = await updateLauncherSettings({ xboxApiKey: val });
+      const updated = await saveApiKey("xbox", val);
       syncSettingsUiFromBackend(updated);
       if (el("setting-xbox-api-key")) el("setting-xbox-api-key").value = "";
       showToast("Xbox Live API key stored locally.", "success");
-      if (state.friendsDrawerOpen) refreshFriendsPanel(true);
+      refreshFriendsPanel(true);
     } catch (err) {
       showToast(String(err), "error");
     }
@@ -10510,10 +10590,10 @@ async function openCleanUninstallModalForGame(game) {
 
   el("btn-clear-xbox-api-key")?.addEventListener("click", async () => {
     try {
-      const updated = await updateLauncherSettings({ clearXboxApiKey: true });
+      const updated = await clearApiKey("xbox");
       syncSettingsUiFromBackend(updated);
       showToast("Xbox Live API key removed.", "info");
-      if (state.friendsDrawerOpen) refreshFriendsPanel(true);
+      refreshFriendsPanel(true);
     } catch (err) {
       showToast(String(err), "error");
     }
@@ -10526,11 +10606,11 @@ async function openCleanUninstallModalForGame(game) {
       return;
     }
     try {
-      const updated = await updateLauncherSettings({ psnNpsso: val });
+      const updated = await saveApiKey("psn", val);
       syncSettingsUiFromBackend(updated);
       if (el("setting-psn-npsso")) el("setting-psn-npsso").value = "";
       showToast("PSN NPSSO token stored locally.", "success");
-      if (state.friendsDrawerOpen) refreshFriendsPanel(true);
+      refreshFriendsPanel(true);
     } catch (err) {
       showToast(String(err), "error");
     }
@@ -10538,10 +10618,10 @@ async function openCleanUninstallModalForGame(game) {
 
   el("btn-clear-psn-npsso")?.addEventListener("click", async () => {
     try {
-      const updated = await updateLauncherSettings({ clearPsnNpsso: true });
+      const updated = await clearApiKey("psn");
       syncSettingsUiFromBackend(updated);
       showToast("PSN NPSSO token removed.", "info");
-      if (state.friendsDrawerOpen) refreshFriendsPanel(true);
+      refreshFriendsPanel(true);
     } catch (err) {
       showToast(String(err), "error");
     }
@@ -14169,6 +14249,14 @@ async function init() {
     .catch(() => {});
   try {
     initWindowControls({
+      shouldCloseToTray: () => Boolean(state.closeToTray),
+      onBeforeClose: () => {
+        window.__dukeUnloading = true;
+        modalGen++;
+        state.modalGen = modalGen;
+        clearSteamMiniHoverTimers();
+        abortAllScopedRequests();
+      },
       onCtrlK: () => {
         if (state.activeTab === "catalog" && document.activeElement === el("input-catalog-search")) {
           openEverythingCommandPalette();
@@ -14791,8 +14879,17 @@ async function init() {
     .catch(() => {});
 
   refreshV22SubsystemStatuses().catch(() => {});
-  refreshSteamMiniProfile(false).catch(() => {});
+  loadSteamMiniProfile(false).catch(() => {});
   refreshAppSystemStatusUi().catch(() => {});
+
+  listenEvent("steam-profile-updated", (payload) => {
+    if (payload && typeof payload === "object" && payload.personaName) {
+      renderSteamMiniProfileUi(payload);
+    } else {
+      loadSteamMiniProfile(true).catch(() => {});
+    }
+    refreshFriendsPanel(true);
+  }).catch(() => {});
 
   listenEvent("tray-check-updates", () => {
     switchTab("settings");
@@ -15148,6 +15245,18 @@ function clearSteamMiniHoverTimers() {
   }
 }
 
+function isSteamProfileDetectingState() {
+  if (!state.steamMiniProfile) return true;
+  const tbText = (el("titlebar-steam-name-label")?.textContent || "").trim().toLowerCase();
+  const cardText = (el("steam-mini-persona")?.textContent || "").trim().toLowerCase();
+  const pillText = (el("steam-mini-status-pill")?.textContent || "").trim().toLowerCase();
+  return (
+    tbText.startsWith("detecting") ||
+    cardText.startsWith("detecting") ||
+    pillText.startsWith("detecting")
+  );
+}
+
 function openSteamMiniProfilePopover(triggeredByKeyboardOrButton = false) {
   clearSteamMiniHoverTimers();
   const pop = el("steam-mini-profile-popover");
@@ -15156,8 +15265,10 @@ function openSteamMiniProfilePopover(triggeredByKeyboardOrButton = false) {
   const wasHidden = pop.classList.contains("hidden");
   pop.classList.remove("hidden");
   if (btn) btn.setAttribute("aria-expanded", "true");
-  if (wasHidden && !state.steamMiniProfile && !state.steamMiniProfileLoading) {
-    refreshSteamMiniProfile(false).catch(() => {});
+  if (isSteamProfileDetectingState() && !state.steamMiniProfileLoading) {
+    loadSteamMiniProfile(true).catch(() => {});
+  } else if (wasHidden && !state.steamMiniProfile && !state.steamMiniProfileLoading) {
+    loadSteamMiniProfile(false).catch(() => {});
   }
   if (triggeredByKeyboardOrButton) {
     el("btn-steam-mini-open-steam")?.focus();
@@ -15165,6 +15276,9 @@ function openSteamMiniProfilePopover(triggeredByKeyboardOrButton = false) {
 }
 
 function closeSteamMiniProfilePopover(restoreFocus = false) {
+  modalGen++;
+  state.modalGen = modalGen;
+  abortScopedRequests("steam-mini-profile");
   clearSteamMiniHoverTimers();
   const pop = el("steam-mini-profile-popover");
   const btn = el("btn-titlebar-steam-profile");
@@ -15184,6 +15298,9 @@ function wireSteamMiniProfileEvents() {
   if (!anchor || !pillBtn || !pop) return;
 
   const scheduleHoverOpen = () => {
+    if (isSteamProfileDetectingState() && !state.steamMiniProfileLoading) {
+      loadSteamMiniProfile(true).catch(() => {});
+    }
     if (steamMiniHoverCloseTimer !== null) {
       clearTimeout(steamMiniHoverCloseTimer);
       steamMiniHoverCloseTimer = null;
@@ -15308,22 +15425,40 @@ async function handleApplySteamMiniOverride(rawTarget) {
   }
 }
 
+async function loadSteamMiniProfile(forceRefresh = false) {
+  return refreshSteamMiniProfile(forceRefresh);
+}
+
 async function refreshSteamMiniProfile(forceRefresh = false) {
-  if (state.steamMiniProfileLoading) return state.steamMiniProfile || null;
+  if (window.__dukeUnloading) return state.steamMiniProfile || null;
+  if (state.steamMiniProfileLoading && !forceRefresh) return state.steamMiniProfile || null;
   state.steamMiniProfileLoading = true;
   const refreshBtn = el("btn-steam-mini-refresh");
   if (refreshBtn) refreshBtn.disabled = true;
   try {
     const overrideTarget = (el("input-steam-mini-override")?.value || state.steamIdOverride || "").trim() || null;
-    const prof = await getSteamMiniProfile({
-      overrideTarget,
-      forceRefresh: Boolean(forceRefresh)
-    });
+    const prof = await getSteamMiniProfile(overrideTarget, Boolean(forceRefresh));
     if (prof) {
       renderSteamMiniProfileUi(prof);
     }
     return prof;
-  } catch {
+  } catch (err) {
+    const errText = String(err || "");
+    const diagLabel = errText.includes("401") || errText.includes("403") || errText.includes("Invalid API Key")
+      ? "Invalid API Key"
+      : errText.toLowerCase().includes("private")
+        ? "Steam Profile Private"
+        : "Network Unreachable";
+    renderSteamMiniProfileUi({
+      configured: false,
+      personaName: diagLabel,
+      onlineState: "offline",
+      statusLabel: diagLabel,
+      privacyState: diagLabel === "Steam Profile Private" ? "private" : "public",
+      strangerVisibilityLabel: diagLabel,
+      statusNote: errText,
+      offlineFallback: true
+    });
     return state.steamMiniProfile || null;
   } finally {
     state.steamMiniProfileLoading = false;
@@ -15332,7 +15467,7 @@ async function refreshSteamMiniProfile(forceRefresh = false) {
 }
 
 function renderSteamMiniProfileUi(prof) {
-  if (!prof) return;
+  if (!prof || window.__dukeUnloading) return;
   state.steamMiniProfile = prof;
 
   const persona = String(prof.personaName || "Steam User");
@@ -15340,13 +15475,32 @@ function renderSteamMiniProfileUi(prof) {
   const dotClass =
     statusKind === "in-game" ? "in-game" : statusKind === "online" ? "online" : "offline";
   const avatarSrc = String(
-    prof.cosmetics?.animatedAvatarUrl || prof.avatarFullUrl || prof.avatarMediumUrl || ""
+    prof.animatedAvatarUrl ||
+      prof.avatarUrl ||
+      prof.cosmetics?.animatedAvatarUrl ||
+      prof.avatarFullUrl ||
+      prof.avatarMediumUrl ||
+      ""
   ).trim();
-  const frameSrc = String(prof.cosmetics?.avatarFrameUrl || "").trim();
-  const bgSrc = String(prof.cosmetics?.profileBackgroundUrl || "").trim();
-  const statusMsg = prof.inGameTitle
-    ? `Playing ${prof.inGameTitle}`
-    : String(prof.stateMessage || (statusKind === "online" ? "Online" : "Offline"));
+  const frameSrc = String(
+    prof.avatarFrameUrl || prof.cosmetics?.avatarFrameUrl || ""
+  ).trim();
+  const bgSrc = String(
+    prof.profileBackgroundUrl || prof.cosmetics?.profileBackgroundUrl || ""
+  ).trim();
+  const statusMsg = String(
+    prof.statusLabel ||
+      (prof.inGameTitle
+        ? `Playing ${prof.inGameTitle}`
+        : prof.stateMessage || (statusKind === "online" ? "Online" : "Offline"))
+  );
+  const visibilityText = String(
+    prof.strangerVisibilityLabel ||
+      prof.visibilityLabel ||
+      (String(prof.privacyState || "public").toLowerCase() === "public"
+        ? "What Strangers See: Public"
+        : "What Strangers See: Friends Only / Private")
+  );
 
   // 1. Titlebar Avatar Pill
   const tbImg = el("titlebar-steam-avatar-img");
@@ -15371,9 +15525,19 @@ function renderSteamMiniProfileUi(prof) {
   const bgEl = el("steam-mini-bg");
   if (bgEl) {
     if (bgSrc && isValidHttpUrl(bgSrc)) {
-      bgEl.style.backgroundImage = `url(${encodeURI(bgSrc)})`;
+      if (bgEl.tagName === "IMG") {
+        bgEl.src = bgSrc;
+        bgEl.classList.remove("hidden");
+      } else {
+        bgEl.style.backgroundImage = `url(${encodeURI(bgSrc)})`;
+      }
     } else {
-      bgEl.style.backgroundImage = "";
+      if (bgEl.tagName === "IMG") {
+        bgEl.removeAttribute("src");
+        bgEl.classList.add("hidden");
+      } else {
+        bgEl.style.backgroundImage = "";
+      }
     }
   }
 
@@ -15429,7 +15593,7 @@ function renderSteamMiniProfileUi(prof) {
   const visBadge = el("steam-mini-visibility-badge");
   if (visBadge) {
     const isPublic = String(prof.privacyState || "public").toLowerCase() === "public";
-    visBadge.textContent = prof.visibilityLabel || (isPublic ? "What Strangers See: Public" : "What Strangers See: Friends Only / Private");
+    visBadge.textContent = visibilityText;
     visBadge.className = `pill mono-num ${isPublic ? "emerald" : "amber"}`;
   }
 
@@ -15446,11 +15610,12 @@ function renderSteamMiniProfileUi(prof) {
   const bioEl = el("steam-mini-bio");
   if (bioEl) {
     const summary = String(prof.summaryText || "").trim();
+    const noteText = String(prof.statusNote || prof.errorMessage || "").trim();
     if (summary) {
       bioEl.textContent = summary;
       bioEl.classList.remove("hidden");
-    } else if (prof.offlineFallback && prof.errorMessage) {
-      bioEl.textContent = prof.errorMessage;
+    } else if (noteText) {
+      bioEl.textContent = noteText;
       bioEl.classList.remove("hidden");
     } else {
       bioEl.textContent = "No public Steam bio set.";
@@ -15461,8 +15626,8 @@ function renderSteamMiniProfileUi(prof) {
   const srcBadge = el("steam-mini-source-badge");
   if (srcBadge) {
     if (prof.offlineFallback) {
-      srcBadge.textContent = prof.fromCache ? "Offline Cache" : "Offline";
-    } else if (prof.webApiEnriched) {
+      srcBadge.textContent = prof.fromCache ? "Offline Cache" : statusMsg;
+    } else if (prof.enrichedViaApiKey || prof.webApiEnriched) {
       srcBadge.textContent = "XML + Web API Cosmetics";
     } else {
       srcBadge.textContent = "Zero-Key Public XML";
@@ -15475,24 +15640,26 @@ function renderSteamMiniProfileUi(prof) {
     if (games.length === 0) {
       const msg =
         String(prof.privacyState || "public").toLowerCase() !== "public"
-          ? "Game details are hidden by this profile's Steam privacy settings."
+          ? "Steam Profile Private — game details are hidden by Steam privacy settings."
           : "No recent showcase games listed on public Steam Community feed.";
       showcaseEl.innerHTML = `<div class="muted small">${escapeHtml(msg)}</div>`;
     } else {
       showcaseEl.innerHTML = games
         .map((g) => {
-          const hrsTotal = Number(g.hoursOnRecord || 0);
-          const hrsRecent = Number(g.hoursLast2Weeks || 0);
+          const hrsTotal = Number(g.hoursTotal ?? g.hoursOnRecord ?? 0);
+          const hrsRecent = Number(g.hoursTwoWeeks ?? g.hoursLast2Weeks ?? 0);
           const hrsText =
             hrsRecent > 0
               ? `${hrsRecent.toFixed(1)}h past 2w · ${hrsTotal.toFixed(1)}h total`
               : `${hrsTotal.toFixed(1)}h on record`;
-          const art = String(g.headerImageUrl || g.iconUrl || "").trim();
+          const art = String(g.headerUrl || g.headerImageUrl || g.iconUrl || "").trim();
           const thumbHtml =
             art && isValidHttpUrl(art)
               ? `<img class="steam-mini-showcase-thumb" src="${escapeHtml(art)}" alt="" loading="lazy" />`
               : `<div class="steam-mini-showcase-thumb"></div>`;
-          const linkUrl = String(g.storeLink || `https://store.steampowered.com/app/${Number(g.appId || 0)}`);
+          const linkUrl = String(
+            g.storeUrl || g.storeLink || `https://store.steampowered.com/app/${Number(g.appId || 0)}`
+          );
           return `
             <div class="steam-mini-showcase-card" data-steam-store-url="${escapeHtml(linkUrl)}">
               ${thumbHtml}
@@ -15528,7 +15695,7 @@ function renderSteamMiniProfileUi(prof) {
 
     if (fbPersona) fbPersona.textContent = persona;
     if (fbDot) fbDot.className = `steam-mini-status-dot ${dotClass}`;
-    if (fbStatus) fbStatus.textContent = `${statusMsg} · ${prof.visibilityLabel || "Public View"}`;
+    if (fbStatus) fbStatus.textContent = `${statusMsg} · ${visibilityText}`;
     if (fbLevel) {
       if (typeof prof.steamLevel === "number" && prof.steamLevel >= 0) {
         fbLevel.textContent = `Lv. ${prof.steamLevel}`;

@@ -4,7 +4,6 @@ use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::Emitter;
 
 use duke_core::win32_ffi::ProcessTreeJob;
 
@@ -1319,9 +1318,9 @@ pub fn start_session_xray(
     let started = Instant::now();
     std::thread::spawn(move || {
         let mut prev_spikes = 0u32;
-        while !stop_tick.load(Ordering::Relaxed) {
+        while !stop_tick.load(Ordering::Relaxed) && !crate::is_shutting_down() {
             std::thread::sleep(Duration::from_millis(1000));
-            if stop_tick.load(Ordering::Relaxed) {
+            if stop_tick.load(Ordering::Relaxed) || crate::is_shutting_down() {
                 break;
             }
             if let Some(ref j) = job {
@@ -1343,8 +1342,8 @@ pub fn start_session_xray(
             let (gpu_reset_events, spike_correlations) = state_tick.snapshot_extras();
             let source_label = src_tick
                 .lock()
-                .map(|s| s.clone())
-                .unwrap_or_else(|_| "ETW Active".to_string());
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let tick = LiveXrayTick {
                 game_id: gid_tick.clone(),
                 pid: root_pid,
@@ -1364,11 +1363,14 @@ pub fn start_session_xray(
                 spike_correlations,
                 telemetry_source: source_label,
             };
-            let _ = app_tick.emit("etw-xray-tick", &tick);
+            crate::emit_if_alive(&app_tick, "etw-xray-tick", &tick);
         }
     });
 
-    if let Ok(mut sessions) = active_xray_sessions().lock() {
+    {
+        let mut sessions = active_xray_sessions()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(mut old) = sessions.remove(game_id) {
             old.stop.store(true, Ordering::Relaxed);
             if let Some(h) = old.join.take() {
@@ -1388,13 +1390,25 @@ pub fn start_session_xray(
     }
 }
 
+pub fn stop_all_xray_sessions() {
+    let mut sessions = active_xray_sessions()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for (_, handle) in sessions.drain() {
+        handle.stop.store(true, Ordering::Release);
+    }
+}
+
 pub fn stop_and_persist_scorecard(
     app: &tauri::AppHandle,
     game_id: &str,
     game_title: &str,
     elapsed_sec: f64,
 ) -> Option<SessionPerformanceScorecard> {
-    let mut handle = active_xray_sessions().lock().ok()?.remove(game_id)?;
+    let mut handle = active_xray_sessions()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(game_id)?;
     handle.stop.store(true, Ordering::Relaxed);
     if let Some(join) = handle.join.take() {
         let _ = join.join();
@@ -1422,8 +1436,8 @@ pub fn stop_and_persist_scorecard(
     let source = handle
         .telemetry_source
         .lock()
-        .map(|s| s.clone())
-        .unwrap_or_else(|_| "Pure-Rust ETW".to_string());
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
 
     let card = SessionPerformanceScorecard {
         session_id: format!("{}_{}", game_id, now),
@@ -1465,7 +1479,7 @@ pub fn stop_and_persist_scorecard(
     entry.history.truncate(MAX_HISTORY_PER_GAME);
     let _ = save_scorecard_store(&store);
 
-    let _ = app.emit("etw-xray-scorecard", &card);
+    crate::emit_if_alive(app, "etw-xray-scorecard", &card);
     Some(card)
 }
 

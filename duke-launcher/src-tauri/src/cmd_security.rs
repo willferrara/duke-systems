@@ -513,7 +513,7 @@ pub(crate) async fn auto_install_downloaded_file(
         )
         .await?;
         if let Ok(lib) = load_library_from_disk(app) {
-            let _ = app.emit("library-updated", &lib);
+            emit_if_alive(app, "library-updated", &lib);
         }
         return Ok(added);
     }
@@ -577,7 +577,7 @@ pub(crate) async fn auto_install_downloaded_file(
         .await?;
 
         if let Ok(lib) = load_library_from_disk(app) {
-            let _ = app.emit("library-updated", &lib);
+            emit_if_alive(app, "library-updated", &lib);
         }
 
         trim_process_working_set();
@@ -631,9 +631,8 @@ pub(crate) fn reload_queue_store_from_disk(app: &AppHandle) {
         for j in &mut parsed {
             reconcile_job_bytes_from_disk(j);
         }
-        if let Ok(mut guard) = get_queue_store().lock() {
-            *guard = parsed;
-        }
+        let mut guard = get_queue_store().lock().unwrap_or_else(|e| e.into_inner());
+        *guard = parsed;
     }
 }
 
@@ -748,8 +747,9 @@ pub(crate) fn schedule_auto_clean_completed_job(app: AppHandle, download_id: Str
         };
 
         if let Some(updated_queue) = remaining {
-            let _ = app.emit("download-queue-updated", &updated_queue);
-            let _ = app.emit(
+            emit_if_alive(&app, "download-queue-updated", &updated_queue);
+            emit_if_alive(
+                &app,
                 "download-auto-cleaned",
                 serde_json::json!({
                     "downloadId": download_id,
@@ -1731,7 +1731,8 @@ pub(crate) async fn capture_stream_via_webview(
                     });
                 }
             }
-            let _ = app_for_dl.emit(
+            emit_if_alive(
+                &app_for_dl,
                 "grabber-download-redirect",
                 DirectoryDownloadInterceptPayload {
                     url: dl_url,
@@ -1774,7 +1775,8 @@ pub(crate) async fn capture_stream_via_webview(
                         user_agent: WIN11_EDGE_USER_AGENT.to_string(),
                         suggested_filename: None,
                     });
-                    let _ = app_for_nav.emit(
+                    emit_if_alive(
+                        &app_for_nav,
                         "grabber-download-redirect",
                         DirectoryDownloadInterceptPayload {
                             url: nav_str.to_string(),
@@ -1895,7 +1897,8 @@ pub(crate) fn spawn_intercepted_directory_download(
         .await
         .is_ok()
         {
-            let _ = app.emit(
+            emit_if_alive(
+                &app,
                 "directory-download-intercepted",
                 DirectoryDownloadInterceptPayload {
                     url,
@@ -2264,7 +2267,7 @@ pub(crate) async fn execute_resumable_matrix_job(
                 "Resolving direct CDN stream via Pure-Rust DoH Resolver...".to_string()
             };
             update_job_in_memory_and_disk(&app, &job, true);
-            let _ = app.emit("download-progress", &job);
+            emit_if_alive(&app, "download-progress", &job);
 
             match resolve_stream_info(&app, &job.original_url).await {
                 Ok(info) => {
@@ -2272,7 +2275,7 @@ pub(crate) async fn execute_resumable_matrix_job(
                         job.status = "PAUSED".to_string();
                         job.message = "Paused - Click RESUME to start".to_string();
                         update_job_in_memory_and_disk(&app, &job, true);
-                        let _ = app.emit("download-progress", &job);
+                        emit_if_alive(&app, "download-progress", &job);
                         get_pause_map()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2314,7 +2317,7 @@ pub(crate) async fn execute_resumable_matrix_job(
                             job.message =
                                 "CDN stream probe paused - Click RESUME to retry".to_string();
                             update_job_in_memory_and_disk(&app, &job, true);
-                            let _ = app.emit("download-progress", &job);
+                            emit_if_alive(&app, "download-progress", &job);
                             get_pause_map()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2327,7 +2330,7 @@ pub(crate) async fn execute_resumable_matrix_job(
                     job.status = "PAUSED".to_string();
                     job.message = format!("Paused ({}) - Click RESUME to continue", e);
                     update_job_in_memory_and_disk(&app, &job, true);
-                    let _ = app.emit("download-progress", &job);
+                    emit_if_alive(&app, "download-progress", &job);
                     get_pause_map()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2579,7 +2582,7 @@ pub(crate) async fn execute_resumable_matrix_job(
         format_bytes(job.total_bytes)
     );
     update_job_in_memory_and_disk(&app, &job, true);
-    let _ = app.emit("download-progress", &job);
+    emit_if_alive(&app, "download-progress", &job);
 
     let prio_coord = projfs_stream::register_job_coordinator(&job.download_id, job.total_bytes);
     let prio_coord_rep = Arc::clone(&prio_coord);
@@ -2599,9 +2602,9 @@ pub(crate) async fn execute_resumable_matrix_job(
         let mut last_disk_persist = Instant::now();
         let mut ema_speed_mbps: f64 = 0.0;
 
-        while !is_fin_rep.load(Ordering::Relaxed) {
+        while !is_fin_rep.load(Ordering::Relaxed) && !is_shutting_down() {
             tokio::time::sleep(Duration::from_millis(250)).await;
-            if is_fin_rep.load(Ordering::Relaxed) {
+            if is_fin_rep.load(Ordering::Relaxed) || is_shutting_down() {
                 break;
             }
 
@@ -2688,7 +2691,8 @@ pub(crate) async fn execute_resumable_matrix_job(
                 last_disk_persist = Instant::now();
             }
             if prio_coord_rep.update_progress(total_downloaded) {
-                let _ = app_rep.emit(
+                emit_if_alive(
+                    &app_rep,
                     "projfs-stream-ready",
                     serde_json::json!({
                         "downloadId": job_state.download_id,
@@ -2699,7 +2703,7 @@ pub(crate) async fn execute_resumable_matrix_job(
                 );
             }
             update_job_in_memory_and_disk(&app_rep, &job_state, write_disk);
-            let _ = app_rep.emit("download-progress", &job_state);
+            emit_if_alive(&app_rep, "download-progress", &job_state);
         }
     });
 
@@ -3212,7 +3216,7 @@ pub(crate) async fn execute_resumable_matrix_job(
             format_bytes(job.downloaded_bytes)
         );
         update_job_in_memory_and_disk(&app, &job, true);
-        let _ = app.emit("download-progress", &job);
+        emit_if_alive(&app, "download-progress", &job);
         trim_process_working_set();
         return Ok(job);
     }
@@ -3229,7 +3233,7 @@ pub(crate) async fn execute_resumable_matrix_job(
             err_msg
         );
         update_job_in_memory_and_disk(&app, &job, true);
-        let _ = app.emit("download-progress", &job);
+        emit_if_alive(&app, "download-progress", &job);
         trim_process_working_set();
         return Ok(job);
     }
@@ -3244,7 +3248,7 @@ pub(crate) async fn execute_resumable_matrix_job(
         job.status = "SCANNING".to_string();
         job.message = "Finalizing in-flight zstd stream & running Security Shield...".to_string();
         update_job_in_memory_and_disk(&app, &job, true);
-        let _ = app.emit("download-progress", &job);
+        emit_if_alive(&app, "download-progress", &job);
 
         let stream_stats = tokio::task::spawn_blocking(move || pipe.finish())
             .await
@@ -3296,7 +3300,7 @@ pub(crate) async fn execute_resumable_matrix_job(
                 .await
                 {
                     if let Ok(lib) = load_library_from_disk(&app) {
-                        let _ = app.emit("library-updated", &lib);
+                        emit_if_alive(&app, "library-updated", &lib);
                     }
                     job.status = "COMPLETED".to_string();
                     job.registered_in_library = true;
@@ -3321,7 +3325,7 @@ pub(crate) async fn execute_resumable_matrix_job(
         }
 
         update_job_in_memory_and_disk(&app, &job, true);
-        let _ = app.emit("download-progress", &job);
+        emit_if_alive(&app, "download-progress", &job);
         if should_auto_clean {
             schedule_auto_clean_completed_job(app.clone(), job.download_id.clone());
         }
@@ -3332,7 +3336,7 @@ pub(crate) async fn execute_resumable_matrix_job(
     job.status = "SCANNING".to_string();
     job.message = "Finalizing archive & running Entropy/PE Malware Shield...".to_string();
     update_job_in_memory_and_disk(&app, &job, true);
-    let _ = app.emit("download-progress", &job);
+    emit_if_alive(&app, "download-progress", &job);
 
     let final_dest = PathBuf::from(&job.final_path);
     if final_dest.exists() {
@@ -3394,7 +3398,7 @@ pub(crate) async fn execute_resumable_matrix_job(
         job.message =
             "Clean file! Extracting archive & adding game to MY GAMES automatically...".to_string();
         update_job_in_memory_and_disk(&app, &job, true);
-        let _ = app.emit("download-progress", &job);
+        emit_if_alive(&app, "download-progress", &job);
 
         match auto_install_downloaded_file(&app, &job.final_path).await {
             Ok(added_game) => {
@@ -3423,7 +3427,7 @@ pub(crate) async fn execute_resumable_matrix_job(
     }
 
     update_job_in_memory_and_disk(&app, &job, true);
-    let _ = app.emit("download-progress", &job);
+    emit_if_alive(&app, "download-progress", &job);
     if should_auto_clean {
         schedule_auto_clean_completed_job(app.clone(), job.download_id.clone());
     }
@@ -3550,7 +3554,7 @@ pub(crate) async fn enqueue_download_internal(
     };
 
     update_job_in_memory_and_disk(&app, &job, true);
-    let _ = app.emit("download-progress", &job);
+    emit_if_alive(&app, "download-progress", &job);
 
     spawn_queue_scheduler(app.clone());
 
@@ -3597,7 +3601,7 @@ pub(crate) async fn install_downloaded_job(app: AppHandle, download_id: String) 
     target_job.status = "INSTALLING".to_string();
     target_job.message = "Extracting archive & adding game to MY GAMES...".to_string();
     update_job_in_memory_and_disk(&app, &target_job, true);
-    let _ = app.emit("download-progress", &target_job);
+    emit_if_alive(&app, "download-progress", &target_job);
 
     match auto_install_downloaded_file(&app, &target_job.final_path).await {
         Ok(added) => {
@@ -3608,7 +3612,7 @@ pub(crate) async fn install_downloaded_job(app: AppHandle, download_id: String) 
                 added.title, added.size_formatted
             );
             update_job_in_memory_and_disk(&app, &target_job, true);
-            let _ = app.emit("download-progress", &target_job);
+            emit_if_alive(&app, "download-progress", &target_job);
             schedule_auto_clean_completed_job(app.clone(), target_job.download_id.clone());
             Ok(added)
         }
@@ -3617,7 +3621,7 @@ pub(crate) async fn install_downloaded_job(app: AppHandle, download_id: String) 
             target_job.registered_in_library = false;
             target_job.message = format!("Install note: {}", e);
             update_job_in_memory_and_disk(&app, &target_job, true);
-            let _ = app.emit("download-progress", &target_job);
+            emit_if_alive(&app, "download-progress", &target_job);
             Err(e)
         }
     }
@@ -3632,7 +3636,7 @@ pub(crate) async fn clear_completed_downloads(app: AppHandle) -> Result<Vec<Down
         persist_queue_to_disk(&app, &guard);
         guard.clone()
     };
-    let _ = app.emit("download-queue-updated", &remaining);
+    emit_if_alive(&app, "download-queue-updated", &remaining);
     Ok(remaining)
 }
 
@@ -4590,7 +4594,7 @@ pub(crate) async fn auto_fix_game(app: AppHandle, game_id: String) -> Result<Aut
     .await
     .map_err(|e| format!("Auto-Fix worker failed: {}", e))??;
 
-    let _ = app.emit("library-updated", &updated_library);
+    emit_if_alive(&app, "library-updated", &updated_library);
     Ok(report)
 }
 
@@ -4627,7 +4631,7 @@ pub(crate) async fn clean_redist_bloat(
             redist_cleaner::clean_redist_bloat_with_cas(&mut library, clean_gid.as_deref())?;
         if report.bytes_reclaimed > 0 || report.entries_removed > 0 {
             save_library_to_disk(&app, &library)?;
-            let _ = app.emit("library-updated", &library);
+            emit_if_alive(&app, "library-updated", &library);
         }
         Ok(report)
     })
@@ -4640,5 +4644,97 @@ pub(crate) async fn get_net_engine_stats_cmd() -> Result<net_engine::NetEngineSt
         Ok(net_engine::get_net_engine_stats())
     })
     .await
+}
+
+#[tauri::command]
+pub(crate) async fn save_api_key(
+    app: AppHandle,
+    slot: String,
+    api_key: String,
+    username: Option<String>,
+) -> Result<LauncherSettings, String> {
+    let trimmed_key = api_key.trim().to_string();
+    if trimmed_key.is_empty() {
+        return Err("API key cannot be empty.".to_string());
+    }
+    let norm = slot.trim().to_ascii_lowercase();
+    let app_for_save = app.clone();
+    let updated = tokio::task::spawn_blocking(move || -> Result<LauncherSettings, String> {
+        let mut current = load_settings_from_disk(&app_for_save);
+        match norm.as_str() {
+            "steam" => current.steam_api_key = Some(trimmed_key),
+            "xbox" | "xbl" | "xbl.io" => current.xbox_api_key = Some(trimmed_key),
+            "psn" => current.psn_npsso = Some(trimmed_key),
+            "steamgriddb" => current.steamgriddb_api_key = Some(trimmed_key),
+            "retroachievements" | "retro_achievements" | "ra" => {
+                let _ = privacy_vault::set_vault_api_key_sync(
+                    "retroAchievements",
+                    Some(&trimmed_key),
+                    username.as_deref(),
+                )?;
+            }
+            other => return Err(format!("Unsupported API key slot '{other}'")),
+        }
+        save_settings_to_disk(&app_for_save, &current)?;
+        Ok(current.to_ipc_safe())
+    })
+    .await
+    .map_err(|e| format!("Failed saving API key: {e}"))??;
+
+    crate::steam_profile::clear_steam_profile_cache();
+    crate::friends::clear_friends_cache();
+    emit_if_alive(
+        &app,
+        "steam-profile-updated",
+        serde_json::json!({ "action": "save_api_key", "slot": slot }),
+    );
+    Ok(updated)
+}
+
+#[tauri::command]
+pub(crate) async fn clear_api_key(
+    app: AppHandle,
+    slot: String,
+) -> Result<LauncherSettings, String> {
+    let norm = slot.trim().to_ascii_lowercase();
+    let app_for_save = app.clone();
+    let updated = tokio::task::spawn_blocking(move || -> Result<LauncherSettings, String> {
+        let mut current = load_settings_from_disk(&app_for_save);
+        match norm.as_str() {
+            "steam" => {
+                current.steam_api_key = None;
+                privacy_vault::clear_slot_by_name("steam");
+            }
+            "xbox" | "xbl" | "xbl.io" => {
+                current.xbox_api_key = None;
+                privacy_vault::clear_slot_by_name("xbox");
+            }
+            "psn" => {
+                current.psn_npsso = None;
+                privacy_vault::clear_slot_by_name("psn");
+            }
+            "steamgriddb" => {
+                current.steamgriddb_api_key = None;
+                privacy_vault::clear_slot_by_name("steamgriddb");
+            }
+            "retroachievements" | "retro_achievements" | "ra" => {
+                privacy_vault::clear_slot_by_name("retro_achievements");
+            }
+            other => return Err(format!("Unsupported API key slot '{other}'")),
+        }
+        save_settings_to_disk(&app_for_save, &current)?;
+        Ok(current.to_ipc_safe())
+    })
+    .await
+    .map_err(|e| format!("Failed clearing API key: {e}"))??;
+
+    crate::steam_profile::clear_steam_profile_cache();
+    crate::friends::clear_friends_cache();
+    emit_if_alive(
+        &app,
+        "steam-profile-updated",
+        serde_json::json!({ "action": "clear_api_key", "slot": slot }),
+    );
+    Ok(updated)
 }
 

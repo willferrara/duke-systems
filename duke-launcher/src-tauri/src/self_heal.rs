@@ -1610,7 +1610,6 @@ pub(crate) fn run_startup_self_heal_in_dir(data_dir: &Path) -> StartupSelfHealRe
 
 /// Non-blocking startup self-heal pass scheduled from `.setup()`.
 pub(crate) fn spawn_startup_self_heal(app: tauri::AppHandle) {
-    use tauri::Emitter;
     tauri::async_runtime::spawn(async move {
         let Ok(data_dir) = crate::resolve_data_root_dir(&app) else {
             return;
@@ -1636,7 +1635,7 @@ pub(crate) fn spawn_startup_self_heal(app: tauri::AppHandle) {
             || report.cas_blobs_quarantined > 0
             || report.webview_locks_cleared > 0
         {
-            let _ = app.emit("startup-self-heal-report", &report);
+            crate::emit_if_alive(&app, "startup-self-heal-report", &report);
         }
         crate::trim_process_working_set();
     });

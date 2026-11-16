@@ -22,6 +22,20 @@ struct PsnTokenCache {
 }
 
 static PSN_TOKEN_CACHE: OnceLock<Mutex<Option<PsnTokenCache>>> = OnceLock::new();
+static FRIENDS_MEM_CACHE: OnceLock<Mutex<Option<(u64, UnifiedFriendsSnapshot)>>> = OnceLock::new();
+const FRIENDS_CACHE_TTL_SECS: u64 = 12;
+
+fn friends_mem_cache() -> &'static Mutex<Option<(u64, UnifiedFriendsSnapshot)>> {
+    FRIENDS_MEM_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+pub fn clear_friends_cache() {
+    *friends_mem_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+    let slot = PSN_TOKEN_CACHE.get_or_init(|| Mutex::new(None));
+    *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -177,8 +191,11 @@ pub(crate) fn resolve_effective_steam_id64(settings: &crate::LauncherSettings) -
         .steam_id_override
         .as_deref()
         .map(str::trim)
-        .filter(|s| is_valid_steam_id64(s))
-        .map(ToString::to_string)
+        .and_then(|s| match crate::steam_profile::parse_steam_profile_target(s) {
+            Some(crate::steam_profile::SteamProfileTarget::SteamId64(id)) => Some(id),
+            _ if is_valid_steam_id64(s) => Some(s.to_string()),
+            _ => None,
+        })
         .or_else(detect_local_steam_id64)
 }
 
@@ -259,6 +276,147 @@ fn steam_personastate_label(state: u64, has_game: bool) -> (&'static str, &'stat
     }
 }
 
+pub fn classify_steam_friends_error(err: &str, api_key_verified_valid: bool) -> &'static str {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("no local steamid64") {
+        "No Local SteamID64"
+    } else if lower.contains("invalid api key") || lower.contains("http 403") {
+        "Invalid API Key"
+    } else if lower.contains("http 401") {
+        if api_key_verified_valid {
+            "Steam Profile Private"
+        } else {
+            "Invalid API Key"
+        }
+    } else if lower.contains("private") || lower.contains("unavailable") {
+        "Steam Profile Private"
+    } else {
+        "Network Unreachable"
+    }
+}
+
+pub fn parse_friend_list_v1_json(list_json: &Value) -> Result<Vec<String>, String> {
+    let friends_arr = list_json
+        .get("friendslist")
+        .and_then(|v| v.get("friends"))
+        .or_else(|| list_json.get("response").and_then(|v| v.get("friends")))
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "Steam Profile Private".to_string())?;
+
+    let mut steam_ids: Vec<String> = friends_arr
+        .iter()
+        .filter_map(|item| item.get("steamid").and_then(|s| s.as_str()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    steam_ids.truncate(300);
+    Ok(steam_ids)
+}
+
+pub fn parse_player_summaries_friends_v2_json(
+    sum_json: &Value,
+    library: &[crate::GameEntry],
+) -> Vec<UnifiedFriend> {
+    let Some(players) = sum_json
+        .get("response")
+        .and_then(|r| r.get("players"))
+        .or_else(|| sum_json.get("players").and_then(|p| p.get("player")))
+        .and_then(|p| p.as_array())
+    else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::with_capacity(players.len());
+    for player in players {
+        let friend_sid = player
+            .get("steamid")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if friend_sid.is_empty() {
+            continue;
+        }
+        let name = player
+            .get("personaname")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Steam User")
+            .trim()
+            .to_string();
+        let avatar = player
+            .get("avatarfull")
+            .or_else(|| player.get("avatarmedium"))
+            .or_else(|| player.get("avatar"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let personastate = player
+            .get("personastate")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let game_title = player
+            .get("gameextrainfo")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let game_id = player
+            .get("gameid")
+            .and_then(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .or_else(|| v.as_u64().map(|n| n.to_string()))
+            })
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != "0");
+        let lobby_steam_id = player
+            .get("lobbysteamid")
+            .and_then(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .or_else(|| v.as_u64().map(|n| n.to_string()))
+            })
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != "0");
+        let game_server_ip = player
+            .get("gameserverip")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != "0.0.0.0:0");
+
+        let has_game = personastate != 0 && (game_title.is_some() || game_id.is_some());
+        let (status, status_label) = steam_personastate_label(personastate, has_game);
+        let presence_text = match (&game_title, status) {
+            (Some(gt), "in_game") => format!("Playing {gt}"),
+            (_, "offline") => "Offline".to_string(),
+            _ => status_label.to_string(),
+        };
+        let can_join_lobby =
+            (lobby_steam_id.is_some() && game_id.is_some()) || game_server_ip.is_some();
+        let matched_library_game_id =
+            match_library_game(library, game_id.as_deref(), game_title.as_deref());
+
+        out.push(UnifiedFriend {
+            id: format!("steam:{friend_sid}"),
+            platform: "Steam".to_string(),
+            display_name: name,
+            avatar_url: avatar,
+            hardware_badge: None,
+            status: status.to_string(),
+            status_label: status_label.to_string(),
+            presence_text,
+            game_title,
+            game_id,
+            lobby_steam_id,
+            game_server_ip,
+            can_join_lobby,
+            matched_library_game_id,
+            swarm_peer_addr: None,
+            swarm_apps: Vec::new(),
+        });
+    }
+    out
+}
+
 async fn fetch_steam_friends(
     api_key: &str,
     steam_id64: &str,
@@ -267,23 +425,35 @@ async fn fetch_steam_friends(
     let key_enc = urlencoding::encode(api_key.trim());
     let sid_enc = urlencoding::encode(steam_id64.trim());
     let list_url = format!(
-        "https://api.steampowered.com/ISteamUser/GetFriendList/v0001/?key={key_enc}&steamid={sid_enc}&relationship=friend"
+        "https://api.steampowered.com/ISteamUser/GetFriendList/v1/?key={key_enc}&steamid={sid_enc}&relationship=friend"
     );
-    let list_json = fetch_doh_json_redacted(&list_url, &[], "Steam Friends List").await?;
-    let friends_arr = list_json
-        .get("friendslist")
-        .and_then(|v| v.get("friends"))
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| "Steam Friends List unavailable (profile may be private)".to_string())?;
+    let self_sum_url = format!(
+        "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key={key_enc}&steamids={sid_enc}"
+    );
 
-    let mut steam_ids: Vec<String> = friends_arr
-        .iter()
-        .filter_map(|item| item.get("steamid").and_then(|s| s.as_str()))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let list_json = match fetch_doh_json_redacted(&list_url, &[], "Steam Friends List").await {
+        Ok(json) => json,
+        Err(err) => {
+            if err.contains("HTTP 401") || err.contains("HTTP 403") {
+                let key_ok = fetch_doh_json_redacted(&self_sum_url, &[], "Steam Key Probe")
+                    .await
+                    .is_ok();
+                return Err(classify_steam_friends_error(&err, key_ok).to_string());
+            }
+            return Err(classify_steam_friends_error(&err, false).to_string());
+        }
+    };
 
-    steam_ids.truncate(300);
+    let steam_ids = match parse_friend_list_v1_json(&list_json) {
+        Ok(ids) => ids,
+        Err(parse_err) => {
+            let key_ok = fetch_doh_json_redacted(&self_sum_url, &[], "Steam Key Probe")
+                .await
+                .is_ok();
+            return Err(classify_steam_friends_error(&parse_err, key_ok).to_string());
+        }
+    };
+
     if steam_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -292,95 +462,13 @@ async fn fetch_steam_friends(
     for chunk in steam_ids.chunks(100) {
         let joined = chunk.join(",");
         let sum_url = format!(
-            "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key={key_enc}&steamids={}",
+            "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key={key_enc}&steamids={}",
             urlencoding::encode(&joined)
         );
-        let sum_json = fetch_doh_json_redacted(&sum_url, &[], "Steam Player Summaries").await?;
-        let Some(players) = sum_json
-            .get("response")
-            .and_then(|r| r.get("players"))
-            .and_then(|p| p.as_array())
-        else {
-            continue;
-        };
-
-        for player in players {
-            let friend_sid = player
-                .get("steamid")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            if friend_sid.is_empty() {
-                continue;
-            }
-            let name = player
-                .get("personaname")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Steam User")
-                .trim()
-                .to_string();
-            let avatar = player
-                .get("avatarfull")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            let personastate = player
-                .get("personastate")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let game_title = player
-                .get("gameextrainfo")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            let game_id = player
-                .get("gameid")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty() && s != "0");
-            let lobby_steam_id = player
-                .get("lobbysteamid")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty() && s != "0");
-            let game_server_ip = player
-                .get("gameserverip")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty() && s != "0.0.0.0:0");
-
-            let has_game = personastate != 0 && (game_title.is_some() || game_id.is_some());
-            let (status, status_label) = steam_personastate_label(personastate, has_game);
-            let presence_text = match (&game_title, status) {
-                (Some(gt), "in_game") => format!("Playing {gt}"),
-                (_, "offline") => "Offline".to_string(),
-                _ => status_label.to_string(),
-            };
-            let can_join_lobby =
-                (lobby_steam_id.is_some() && game_id.is_some()) || game_server_ip.is_some();
-            let matched_library_game_id =
-                match_library_game(library, game_id.as_deref(), game_title.as_deref());
-
-            out.push(UnifiedFriend {
-                id: format!("steam:{friend_sid}"),
-                platform: "Steam".to_string(),
-                display_name: name,
-                avatar_url: avatar,
-                hardware_badge: None,
-                status: status.to_string(),
-                status_label: status_label.to_string(),
-                presence_text,
-                game_title,
-                game_id,
-                lobby_steam_id,
-                game_server_ip,
-                can_join_lobby,
-                matched_library_game_id,
-                swarm_peer_addr: None,
-                swarm_apps: Vec::new(),
-            });
-        }
+        let sum_json = fetch_doh_json_redacted(&sum_url, &[], "Steam Player Summaries")
+            .await
+            .map_err(|e| classify_steam_friends_error(&e, false).to_string())?;
+        out.extend(parse_player_summaries_friends_v2_json(&sum_json, library));
     }
 
     Ok(out)
@@ -524,11 +612,10 @@ pub(crate) async fn fetch_psn_access_token(npsso: &str) -> Result<String, String
 
     {
         let slot = PSN_TOKEN_CACHE.get_or_init(|| Mutex::new(None));
-        if let Ok(guard) = slot.lock() {
-            if let Some(ref cached) = *guard {
-                if cached.npsso_blake3 == npsso_hash && cached.expires_at_unix > now + 60 {
-                    return Ok(cached.access_token.clone());
-                }
+        let guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref cached) = *guard {
+            if cached.npsso_blake3 == npsso_hash && cached.expires_at_unix > now + 60 {
+                return Ok(cached.access_token.clone());
             }
         }
     }
@@ -612,7 +699,8 @@ pub(crate) async fn fetch_psn_access_token(npsso: &str) -> Result<String, String
         .unwrap_or(3600);
 
     let slot = PSN_TOKEN_CACHE.get_or_init(|| Mutex::new(None));
-    if let Ok(mut guard) = slot.lock() {
+    {
+        let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(PsnTokenCache {
             npsso_blake3: npsso_hash,
             access_token: access_token.clone(),
@@ -917,17 +1005,21 @@ pub fn build_steam_join_uri(
 
 #[tauri::command]
 pub async fn get_unified_friends(app: AppHandle) -> Result<UnifiedFriendsSnapshot, String> {
+    let now = now_unix_secs();
+    {
+        let guard = friends_mem_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((cached_at, ref snap)) = *guard {
+            if now.saturating_sub(cached_at) < FRIENDS_CACHE_TTL_SECS {
+                return Ok(snap.clone());
+            }
+        }
+    }
+
     let settings = crate::load_settings_standalone();
     let library = crate::load_library_from_disk(&app).unwrap_or_default();
 
     let detected_steam_id = detect_local_steam_id64();
-    let resolved_steam_id = settings
-        .steam_id_override
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToString::to_string)
-        .or_else(|| detected_steam_id.clone());
+    let resolved_steam_id = resolve_effective_steam_id64(&settings);
 
     let steam_key = settings
         .steam_api_key
@@ -958,11 +1050,8 @@ pub async fn get_unified_friends(app: AppHandle) -> Result<UnifiedFriendsSnapsho
                 Ok(list) => (list, "Connected".to_string()),
                 Err(e) => (Vec::new(), e),
             },
-            (None, _) => (Vec::new(), "No Steam Web API key".to_string()),
-            (Some(_), None) => (
-                Vec::new(),
-                "SteamID64 not found (set override in Settings)".to_string(),
-            ),
+            (_, None) => (Vec::new(), "No Local SteamID64".to_string()),
+            (None, Some(_)) => (Vec::new(), "No Steam Web API key".to_string()),
         }
     };
 
@@ -1021,7 +1110,7 @@ pub async fn get_unified_friends(app: AppHandle) -> Result<UnifiedFriendsSnapsho
         total: in_game.len() + online.len() + offline.len(),
     };
 
-    Ok(UnifiedFriendsSnapshot {
+    let snapshot = UnifiedFriendsSnapshot {
         in_game,
         online,
         offline,
@@ -1034,7 +1123,14 @@ pub async fn get_unified_friends(app: AppHandle) -> Result<UnifiedFriendsSnapsho
         },
         detected_steam_id,
         fetched_at: now_unix_secs(),
-    })
+    };
+
+    {
+        let mut guard = friends_mem_cache().lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some((snapshot.fetched_at, snapshot.clone()));
+    }
+
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -1120,5 +1216,46 @@ mod tests {
         );
 
         assert!(build_steam_join_uri(None, None, None, Some("bad host;calc")).is_err());
+    }
+
+    #[test]
+    fn parses_friend_list_v1_and_player_summaries_v2_and_classifies_diagnostics() {
+        let list_json = serde_json::json!({
+            "friendslist": {
+                "friends": [
+                    { "steamid": "76561198000000011", "relationship": "friend" },
+                    { "steamid": "76561198000000022", "relationship": "friend" }
+                ]
+            }
+        });
+        let ids = parse_friend_list_v1_json(&list_json).expect("valid friendlist");
+        assert_eq!(ids, vec!["76561198000000011", "76561198000000022"]);
+
+        let sum_json = serde_json::json!({
+            "response": {
+                "players": [{
+                    "steamid": "76561198000000011",
+                    "personaname": "CoopBuddy",
+                    "avatarfull": "https://avatars.steamstatic.com/cb.jpg",
+                    "personastate": 1,
+                    "gameextrainfo": "Helldivers 2",
+                    "gameid": "553850"
+                }]
+            }
+        });
+        let friends = parse_player_summaries_friends_v2_json(&sum_json, &[]);
+        assert_eq!(friends.len(), 1);
+        assert_eq!(friends[0].display_name, "CoopBuddy");
+        assert_eq!(friends[0].status, "in_game");
+        assert_eq!(friends[0].presence_text, "Playing Helldivers 2");
+
+        assert_eq!(classify_steam_friends_error("Steam Friends List: HTTP 401", true), "Steam Profile Private");
+        assert_eq!(classify_steam_friends_error("Steam Friends List: HTTP 401", false), "Invalid API Key");
+        assert_eq!(classify_steam_friends_error("Steam Friends List: HTTP 403", true), "Invalid API Key");
+        assert_eq!(classify_steam_friends_error("No Local SteamID64", false), "No Local SteamID64");
+        assert_eq!(classify_steam_friends_error("network request failed", false), "Network Unreachable");
+
+        clear_friends_cache();
+        assert!(friends_mem_cache().lock().unwrap_or_else(|e| e.into_inner()).is_none());
     }
 }

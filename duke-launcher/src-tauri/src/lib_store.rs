@@ -920,6 +920,31 @@ pub(crate) fn compact_dklib_if_needed(data_dir: &Path, force: bool) -> Result<bo
     Ok(true)
 }
 
+pub(crate) fn flush_wal_on_shutdown(data_dir: &Path) -> Result<bool, String> {
+    let dir_lock = dir_state_lock(data_dir);
+    let mut state = match dir_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            return Ok(false);
+        }
+    };
+    if let Some(mut wal_file) = state.wal_file.take() {
+        let _ = wal_file.flush();
+        let _ = wal_file.sync_data();
+    }
+    let wal_path = dklib_wal_path(data_dir);
+    if wal_path.is_file() {
+        if let Ok(wal) = parse_wal_file(&wal_path) {
+            if !wal.ops.is_empty() || wal.truncated_tail {
+                let _ = compact_locked(data_dir, &mut state, None);
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn export_library_json(data_dir: &Path, out_path: &Path) -> Result<usize, String> {
     let entries = load_library_dklib(data_dir)?;

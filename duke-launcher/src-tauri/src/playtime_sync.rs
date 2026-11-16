@@ -20,7 +20,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 const MAX_SCAN_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PLAYTIME_SECS_SANE: u64 = 100_000 * 3600;
@@ -1096,8 +1096,9 @@ pub async fn run_external_playtime_sync_once(
 
     if updated_games > 0 {
         crate::save_library_to_disk(app, &library)?;
-        let _ = app.emit("library-updated", &library);
-        let _ = app.emit(
+        crate::emit_if_alive(app, "library-updated", &library);
+        crate::emit_if_alive(
+            app,
             "playtime-synced",
             serde_json::json!({
                 "updatedGames": updated_games,
