@@ -1189,7 +1189,7 @@ dependencies = [
 
 [[package]]
 name = "duke-launcher"
-version = "2.3.2"
+version = "2.3.3"
 dependencies = [
  "base64 0.22.1",
  "blake3",

@@ -743,7 +743,7 @@ fn case_minimize_settings_and_updater_sanity(root: &Path) -> Result<String, Stri
     }
 
     let sample_path = root.join("updater_sample.bin");
-    fs::write(&sample_path, b"duke-v2.3.2-binary-payload").map_err(|e| e.to_string())?;
+    fs::write(&sample_path, b"duke-v2.3.3-binary-payload").map_err(|e| e.to_string())?;
     let mismatch = crate::updater::verify_file_sha256_streaming(
         &sample_path,
         "0000000000000000000000000000000000000000000000000000000000000000",
@@ -751,10 +751,10 @@ fn case_minimize_settings_and_updater_sanity(root: &Path) -> Result<String, Stri
     if mismatch.is_ok() {
         return Err("Updater SHA-256 verification accepted a mismatched digest.".to_string());
     }
-    if !crate::updater::is_newer_version("2.3.1", "v2.3.2")
-        || crate::updater::is_newer_version("2.3.2", "v2.3.2")
+    if !crate::updater::is_newer_version("2.3.1", "v2.3.3")
+        || crate::updater::is_newer_version("2.3.3", "v2.3.3")
     {
-        return Err("Updater SemVer comparison failed v2.3.2 check.".to_string());
+        return Err("Updater SemVer comparison failed v2.3.3 check.".to_string());
     }
 
     Ok("Opt-in tray defaults (false/false), auto-check updates (true), SemVer, and SHA-256 rejection verified.".to_string())
@@ -881,8 +881,8 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
         .map_err(|e| format!("Failed reading tauri.conf.json: {e}"))?;
 
     // 1. Version & Window Safety Checks
-    if !index_html.contains("2.3.2") || !tauri_conf.contains("\"2.3.2\"") {
-        return Err("Expected v2.3.2 marker missing in index.html or tauri.conf.json.".to_string());
+    if !index_html.contains("2.3.3") || !tauri_conf.contains("\"2.3.3\"") {
+        return Err("Expected v2.3.3 marker missing in index.html or tauri.conf.json.".to_string());
     }
 
     let default_sites = crate::sites::default_search_sites();
@@ -1037,7 +1037,7 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
     }
 
     Ok(format!(
-        "Verified v2.3.2: 6 views, 10 modals, 10 themes, VirtualCardGrid, {} SVG symbols, {} DOM IDs checked, {} IPC commands registered.",
+        "Verified v2.3.3: 6 views, 10 modals, 10 themes, VirtualCardGrid, {} SVG symbols, {} DOM IDs checked, {} IPC commands registered.",
         symbol_ids.len(),
         html_ids.len(),
         invoke_cmds.len()

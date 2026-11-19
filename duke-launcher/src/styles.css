@@ -1136,7 +1136,17 @@ body[data-theme="light"] .btn-secondary:hover:not(:disabled) {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  object-position: center;
   display: block;
+}
+
+#btn-auto-covers.is-loading .icon {
+  animation: duke-spin 0.9s linear infinite;
+}
+
+@keyframes duke-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 /* Styled Procedural Platform-Tinted Cover Fallback (Zero Blank/Broken Boxes) */

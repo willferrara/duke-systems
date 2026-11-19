@@ -1248,6 +1248,7 @@ pub(crate) async fn fetch_steam_app_cover_verified(app_id: u64) -> (Option<Strin
     (None, None)
 }
 
+#[allow(dead_code)]
 pub(crate) fn extract_exe_icon_data_uri(exe_path: &str) -> Option<String> {
     let escaped = exe_path.replace('\'', "''");
     let ps_script = format!(
@@ -1434,15 +1435,15 @@ pub(crate) async fn smart_find_game_cover(
         }
     }
 
-    if let Some(exe_ico) = extract_exe_icon_data_uri(exe_path) {
-        return (exe_ico, None, None);
-    }
-
     (String::new(), detected_app_id, None)
 }
 
 #[tauri::command]
-pub(crate) async fn auto_fix_all_covers(app: AppHandle) -> Result<Vec<GameEntry>, String> {
+pub(crate) async fn auto_fix_all_covers(
+    app: AppHandle,
+    force_all: Option<bool>,
+) -> Result<Vec<GameEntry>, String> {
+    let force_refresh_all = force_all.unwrap_or(false);
     let mut lib = tokio::task::spawn_blocking({
         let app_c = app.clone();
         move || load_library_from_disk(&app_c)
@@ -1467,6 +1468,16 @@ pub(crate) async fn auto_fix_all_covers(app: AppHandle) -> Result<Vec<GameEntry>
 
         join_set.spawn(async move {
             let _permit = sem_c.acquire_owned().await.ok()?;
+            if crate::is_shutting_down() {
+                return None;
+            }
+            let has_valid_local = artwork::has_local_cover_file(&entry_c, &covers_c);
+            if !force_refresh_all && has_valid_local {
+                let src = sidebar_icons::SidebarIconSource::from(&entry_c);
+                let _ = sidebar_icons::resolve_sidebar_icon_in_dirs(&src, &icons_c, &covers_c);
+                return None;
+            }
+
             let (inferred_pid, plat_hint) = artwork::infer_game_platform_hint(
                 &entry_c.title,
                 &entry_c.exe_path,
@@ -1478,9 +1489,15 @@ pub(crate) async fn auto_fix_all_covers(app: AppHandle) -> Result<Vec<GameEntry>
                 .or(inferred_pid);
             let steam_aid = entry_c
                 .app_id
-                .or_else(|| entry_c.steam_app_id.and_then(|v| u32::try_from(v).ok()));
+                .or_else(|| entry_c.steam_app_id.and_then(|v| u32::try_from(v).ok()))
+                .or_else(|| {
+                    let p = Path::new(&entry_c.install_dir);
+                    p.exists()
+                        .then(|| detect_steam_appid_in_folder(p))
+                        .flatten()
+                        .and_then(|v| u32::try_from(v).ok())
+                });
 
-            // Verify existing local cover file or resolve via cascading 4-tier pipeline + 32x32 sidebar icon
             let req = artwork::CoverResolveRequest {
                 cache_id: entry_c.id.clone(),
                 title: artwork::clean_cover_query(&entry_c.title),
@@ -1493,39 +1510,68 @@ pub(crate) async fn auto_fix_all_covers(app: AppHandle) -> Result<Vec<GameEntry>
                 steamgriddb_api_key: key_c,
                 sidebar_icon_id: Some(entry_c.id.clone()),
             };
-            let outcome = artwork::resolve_and_cache_cover_in_dirs(&req, &covers_c, &icons_c).await;
+            let outcome = artwork::resolve_and_cache_cover_in_dirs_with_options(
+                &req,
+                &covers_c,
+                &icons_c,
+                true,
+            )
+            .await;
             if let Some(ref out) = outcome {
-                return Some((entry_c.id, out.cover_path.to_string_lossy().to_string()));
+                return Some((entry_c.id, Some(out.cover_path.to_string_lossy().to_string())));
             }
             // Even when no remote cover image was found, still extract/generate 32x32 sidebar icon from .exe
             let src = sidebar_icons::SidebarIconSource::from(&entry_c);
             let _ = sidebar_icons::resolve_sidebar_icon_in_dirs(&src, &icons_c, &covers_c);
+            // Clear corrupt/tiny/data-URI cover paths so the clean procedural fallback renders instead of a 32x32 icon.
+            let trimmed = entry_c.cover_url.trim();
+            if !has_valid_local
+                && !trimmed.is_empty()
+                && !trimmed.starts_with("http://")
+                && !trimmed.starts_with("https://")
+            {
+                return Some((entry_c.id, None));
+            }
             None
         });
     }
 
-    let mut updated_map: HashMap<String, String> = HashMap::new();
+    let data_root_opt = crate::resolve_data_root_dir(&app).ok();
+    let mut updated_map: HashMap<String, Option<String>> = HashMap::new();
     while let Some(res) = join_set.join_next().await {
-        if let Ok(Some((gid, cover_path))) = res {
-            emit_if_alive(
-                &app,
-                "cover-updated",
-                serde_json::json!({
-                    "id": &gid,
-                    "coverPath": &cover_path,
-                    "gameId": &gid,
-                    "coverUrl": &cover_path,
-                }),
-            );
-            updated_map.insert(gid, cover_path);
+        if let Ok(Some((gid, cover_opt))) = res {
+            if let Some(ref cover_path) = cover_opt {
+                if let Some(ref data_root) = data_root_opt {
+                    let existing = lib.iter().find(|g| g.id == gid);
+                    let _ = crate::lib_store::append_cover_wal(
+                        data_root,
+                        &gid,
+                        cover_path,
+                        existing.and_then(|g| g.hero_url.as_deref()),
+                        existing.and_then(|g| g.icon_path.as_deref()),
+                    );
+                }
+                emit_if_alive(
+                    &app,
+                    "cover-updated",
+                    serde_json::json!({
+                        "id": &gid,
+                        "coverPath": cover_path,
+                        "gameId": &gid,
+                        "coverUrl": cover_path,
+                    }),
+                );
+            }
+            updated_map.insert(gid, cover_opt);
         }
     }
 
     let mut changed = false;
     for entry in &mut lib {
-        if let Some(new_cover) = updated_map.get(&entry.id) {
-            if entry.cover_url != *new_cover {
-                entry.cover_url = new_cover.clone();
+        if let Some(new_cover_opt) = updated_map.get(&entry.id) {
+            let next_cover = new_cover_opt.as_deref().unwrap_or("");
+            if entry.cover_url != next_cover {
+                entry.cover_url = next_cover.to_string();
                 changed = true;
             }
         }

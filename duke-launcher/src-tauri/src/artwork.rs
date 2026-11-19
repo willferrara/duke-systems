@@ -579,6 +579,7 @@ const COVER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const COVER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_COVER_DOWNLOAD_BYTES: usize = 8 * 1024 * 1024;
 const MIN_VALID_COVER_BYTES: usize = 512;
+const MIN_COVER_DIMENSION_PX: u32 = 200;
 const MIN_WEB_FALLBACK_IMAGE_BYTES: usize = 2048;
 
 static COVER_HTTP_SEMAPHORE: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
@@ -592,6 +593,7 @@ pub(crate) fn get_cover_http_semaphore() -> &'static std::sync::Arc<tokio::sync:
 pub(crate) struct CoverResolveRequest {
     pub cache_id: String,
     pub title: String,
+    #[allow(dead_code)]
     pub exe_path: Option<String>,
     pub platform_id: Option<u16>,
     pub platform_hint: Option<String>,
@@ -624,21 +626,113 @@ pub(crate) fn verify_image_bytes(bytes: &[u8]) -> Option<(&'static str, image::I
     Some((ext, fmt))
 }
 
-/// Validates web fallback cover art dimensions (`>= 200x200`) and box-art aspect ratio (`0.55..=1.15`).
-pub(crate) fn verify_web_cover_dimensions(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
+/// Validates raw cover image bytes: JPEG/PNG/WebP magic header, `>= 200x200` pixels,
+/// and non-degenerate aspect ratio (`0.40..=2.60`) to reject tiny icons, corrupt files,
+/// HTML error pages, and thin banner strips.
+pub(crate) fn verify_cover_image_bytes(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
     let (ext, _) = verify_image_bytes(bytes)?;
     let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
     let (w, h) = reader.into_dimensions().ok()?;
-    if w < 200 || h < 200 {
+    if w < MIN_COVER_DIMENSION_PX || h < MIN_COVER_DIMENSION_PX {
         return None;
     }
+    let ratio = w as f32 / h as f32;
+    if !(0.40..=2.60).contains(&ratio) {
+        return None;
+    }
+    Some((ext, w, h))
+}
+
+/// Validates web fallback cover art dimensions (`>= 200x200`) and box-art aspect ratio (`0.55..=1.15`).
+pub(crate) fn verify_web_cover_dimensions(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
+    let (ext, w, h) = verify_cover_image_bytes(bytes)?;
     let ratio = w as f32 / h as f32;
     if !(0.55..=1.15).contains(&ratio) {
         return None;
     }
     Some((ext, w, h))
+}
+
+/// Rejects generic placeholder, icon, sprite, filmstrip, document, or avatar image URLs.
+pub(crate) fn is_placeholder_or_icon_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return true;
+    }
+    let path_and_query = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+        .unwrap_or(&lower);
+    const BAD_TOKENS: &[&str] = &[
+        "favicon",
+        ".ico",
+        ".svg",
+        "placeholder",
+        "no-image",
+        "no_image",
+        "noimage",
+        "no-cover",
+        "no_cover",
+        "nocover",
+        "default-cover",
+        "default_cover",
+        "default-avatar",
+        "default_avatar",
+        "missing-cover",
+        "missing_cover",
+        "filmstrip",
+        "document-icon",
+        "file-icon",
+        "generic-icon",
+        "blank.png",
+        "blank.jpg",
+        "spacer.gif",
+        "1x1.",
+        "/icons/",
+        "/icon/",
+        "/sprites/",
+        "doubleclick",
+        "bing.com/th?",
+    ];
+    BAD_TOKENS.iter().any(|tok| path_and_query.contains(tok))
+}
+
+/// Header-only validation of a local cover image file on disk (`>= 200x200` JPEG/PNG/WebP).
+pub(crate) fn is_valid_local_cover_file(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file()
+        || meta.len() < MIN_VALID_COVER_BYTES as u64
+        || meta.len() > MAX_COVER_DOWNLOAD_BYTES as u64
+    {
+        return false;
+    }
+    let Ok(reader) = image::ImageReader::open(path) else {
+        return false;
+    };
+    let Ok(reader) = reader.with_guessed_format() else {
+        return false;
+    };
+    let Some(fmt) = reader.format() else {
+        return false;
+    };
+    if !matches!(
+        fmt,
+        image::ImageFormat::Jpeg | image::ImageFormat::Png | image::ImageFormat::WebP
+    ) {
+        return false;
+    }
+    let Ok((w, h)) = reader.into_dimensions() else {
+        return false;
+    };
+    if w < MIN_COVER_DIMENSION_PX || h < MIN_COVER_DIMENSION_PX {
+        return false;
+    }
+    let ratio = w as f32 / h as f32;
+    (0.40..=2.60).contains(&ratio)
 }
 
 /// Strips region/revision tags like `(USA)`, `(Europe)`, `(Japan)`, `(Rev 1)`, `[!]` from a title.
@@ -948,16 +1042,10 @@ fn find_cached_cover_on_disk(covers_dir: &Path, keys: &[String]) -> Option<PathB
             let Ok(meta) = std::fs::metadata(&candidate) else {
                 continue;
             };
-            if !meta.is_file()
-                || meta.len() < MIN_VALID_COVER_BYTES as u64
-                || meta.len() > MAX_COVER_DOWNLOAD_BYTES as u64
-            {
-                continue;
+            if is_valid_local_cover_file(&candidate) {
+                return Some(candidate);
             }
-            if let Ok(bytes) = std::fs::read(&candidate) {
-                if verify_image_bytes(&bytes).is_some() {
-                    return Some(candidate);
-                }
+            if meta.is_file() {
                 let _ = std::fs::remove_file(&candidate);
             }
         }
@@ -1017,7 +1105,9 @@ async fn download_verified_image_doh(
     min_bytes: usize,
 ) -> Option<(Vec<u8>, &'static str)> {
     let trimmed = url.trim();
-    if !trimmed.starts_with("https://") && !trimmed.starts_with("http://") {
+    if (!trimmed.starts_with("https://") && !trimmed.starts_with("http://"))
+        || is_placeholder_or_icon_url(trimmed)
+    {
         return None;
     }
     let _permit = get_cover_http_semaphore().clone().acquire_owned().await.ok()?;
@@ -1052,7 +1142,7 @@ async fn download_verified_image_doh(
     if out.len() < min_bytes {
         return None;
     }
-    let (ext, _) = verify_image_bytes(&out)?;
+    let (ext, _, _) = verify_cover_image_bytes(&out)?;
     Some((out, ext))
 }
 
@@ -1232,12 +1322,7 @@ pub(crate) fn extract_ddg_image_urls_from_html(html: &str) -> Vec<String> {
         {
             return;
         }
-        if lower.contains("favicon")
-            || lower.contains(".ico")
-            || lower.contains(".svg")
-            || lower.contains("doubleclick")
-            || lower.contains("bing.com/th?")
-        {
+        if is_placeholder_or_icon_url(&clean) {
             return;
         }
         let path_part = lower.split('?').next().unwrap_or(&lower);
@@ -1442,38 +1527,6 @@ async fn search_web_cover_fallback_doh(
     None
 }
 
-async fn extract_exe_highres_png_bytes(exe_path: &str) -> Option<Vec<u8>> {
-    let trimmed = exe_path.trim().to_string();
-    if trimmed.is_empty() || !trimmed.to_ascii_lowercase().ends_with(".exe") {
-        return None;
-    }
-    if !Path::new(&trimmed).is_file() {
-        return None;
-    }
-    tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
-        let escaped = trimmed.replace('\'', "''");
-        let ps_script = format!(
-            "Add-Type -AssemblyName System.Drawing; $ico = [System.Drawing.Icon]::ExtractAssociatedIcon('{}'); if ($ico) {{ $bmp = $ico.ToBitmap(); $ms = New-Object System.IO.MemoryStream; $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); [Convert]::ToBase64String($ms.ToArray()) }}",
-            escaped
-        );
-        let output = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
-            .creation_flags(crate::CREATE_NO_WINDOW)
-            .output()
-            .ok()?;
-        let b64 = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if b64.len() < 100 || b64.len() > 1024 * 1024 {
-            return None;
-        }
-        use base64::Engine;
-        let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
-        verify_image_bytes(&bytes)?;
-        Some(bytes)
-    })
-    .await
-    .ok()?
-}
-
 async fn search_steamgriddb_grid_doh(api_key: &str, clean_title: &str) -> Option<(Vec<u8>, &'static str)> {
     if api_key.trim().is_empty() || clean_title.trim().is_empty() {
         return None;
@@ -1501,11 +1554,20 @@ async fn search_steamgriddb_grid_doh(api_key: &str, clean_title: &str) -> Option
 }
 
 /// Resolves and caches a game cover into `<covers_dir>/<cache_id>.<ext>` + 32x32 PNG into `<sidebar_icons_dir>/<icon_id>.png`
-/// using the 4-tier cascading pipeline: Disk Cache -> Steam Multi-CDN -> Libretro Fuzzy -> SteamGridDB / Web Search.
+/// using the cascading pipeline: Disk Cache (when `!force_refresh`) -> Steam Multi-CDN -> SteamGridDB -> Libretro Boxarts -> strict DoH Web Search.
 pub(crate) async fn resolve_and_cache_cover_in_dirs(
     req: &CoverResolveRequest,
     covers_dir: &Path,
     sidebar_icons_dir: &Path,
+) -> Option<CoverResolveOutcome> {
+    resolve_and_cache_cover_in_dirs_with_options(req, covers_dir, sidebar_icons_dir, false).await
+}
+
+pub(crate) async fn resolve_and_cache_cover_in_dirs_with_options(
+    req: &CoverResolveRequest,
+    covers_dir: &Path,
+    sidebar_icons_dir: &Path,
+    force_refresh: bool,
 ) -> Option<CoverResolveOutcome> {
     let _ = std::fs::create_dir_all(covers_dir);
     let _ = std::fs::create_dir_all(sidebar_icons_dir);
@@ -1516,20 +1578,22 @@ pub(crate) async fn resolve_and_cache_cover_in_dirs(
     }
     let icon_id = req.sidebar_icon_id.as_deref().unwrap_or(&req.cache_id);
 
-    // 1. Local Disk Cache
+    // 1. Local Disk Cache (validated >= 200x200 JPEG/PNG/WebP; skipped when explicit force_refresh is requested)
     let mut cache_keys = vec![req.cache_id.clone()];
     if let Some(aid) = req.steam_app_id {
         cache_keys.push(aid.to_string());
     }
-    if let Some(cached_path) = find_cached_cover_on_disk(covers_dir, &cache_keys) {
-        let sidebar_icon_path = std::fs::read(&cached_path).ok().and_then(|bytes| {
-            ensure_sidebar_icon_for_cover_bytes(sidebar_icons_dir, icon_id, &bytes, false)
-        });
-        return Some(CoverResolveOutcome {
-            cover_path: cached_path,
-            sidebar_icon_path,
-            source_tier: "cache",
-        });
+    if !force_refresh {
+        if let Some(cached_path) = find_cached_cover_on_disk(covers_dir, &cache_keys) {
+            let sidebar_icon_path = std::fs::read(&cached_path).ok().and_then(|bytes| {
+                ensure_sidebar_icon_for_cover_bytes(sidebar_icons_dir, icon_id, &bytes, false)
+            });
+            return Some(CoverResolveOutcome {
+                cover_path: cached_path,
+                sidebar_icon_path,
+                source_tier: "cache",
+            });
+        }
     }
 
     // Trim freed download/decode heap buffers once the remote cascade returns (or fails).
@@ -1544,7 +1608,7 @@ pub(crate) async fn resolve_and_cache_cover_in_dirs(
     let clean_title = clean_cover_query(&req.title);
     let mut resolved: Option<(Vec<u8>, &'static str, &'static str)> = None;
 
-    // 2. Steam Store Search & Multi-CDN (Jaro-Winkler >= 0.78 -> library_600x900_2x / library_600x900 / header)
+    // 2. Steam Store Search & Multi-CDN (clean_cover_query + Jaro-Winkler >= 0.78 -> library_600x900_2x / library_600x900 / header)
     let mut steam_ids = Vec::new();
     if let Some(aid) = req.steam_app_id {
         if aid > 0 {
@@ -1565,7 +1629,16 @@ pub(crate) async fn resolve_and_cache_cover_in_dirs(
         }
     }
 
-    // 3. Libretro Boxarts CDN (Named_Boxarts across (USA)/(World)/(Europe)/(Japan) for all 24 consoles)
+    // 3. SteamGridDB 600x900 Vertical Grids (when API key configured)
+    if resolved.is_none() && !req.steamgriddb_api_key.trim().is_empty() {
+        if let Some((bytes, ext)) =
+            search_steamgriddb_grid_doh(&req.steamgriddb_api_key, &clean_title).await
+        {
+            resolved = Some((bytes, ext, "steamgriddb"));
+        }
+    }
+
+    // 4. Libretro Boxarts CDN (Named_Boxarts across (USA)/(World)/(Europe)/(Japan) for all 24 consoles)
     if resolved.is_none() {
         if let Some(spec) = resolve_target_platform_spec(req.platform_id, req.platform_hint.as_deref()) {
             let candidates = build_libretro_fuzzy_candidate_urls(spec, &req.title);
@@ -1580,16 +1653,7 @@ pub(crate) async fn resolve_and_cache_cover_in_dirs(
         }
     }
 
-    // 4. SteamGridDB 600x900 Vertical Grids (when API key configured)
-    if resolved.is_none() && !req.steamgriddb_api_key.trim().is_empty() {
-        if let Some((bytes, ext)) =
-            search_steamgriddb_grid_doh(&req.steamgriddb_api_key, &clean_title).await
-        {
-            resolved = Some((bytes, ext, "steamgriddb"));
-        }
-    }
-
-    // 5. Privacy-Routed DoH Web Image Search Fallback (>= 200x200 px, 0.55..=1.15 aspect ratio)
+    // 5. Strict Privacy-Routed DoH Web Image Search Fallback (>= 200x200 px, 0.55..=1.15 aspect ratio, non-placeholder)
     if resolved.is_none() {
         if let Some((bytes, ext)) =
             search_web_cover_fallback_doh(&clean_title, req.platform_hint.as_deref()).await
@@ -1597,6 +1661,8 @@ pub(crate) async fn resolve_and_cache_cover_in_dirs(
             resolved = Some((bytes, ext, "web"));
         }
     }
+
+    // 6. Verified Existing Remote Cover URL (only if >= 200x200 high-res cover image)
     if resolved.is_none() {
         if let Some(ref raw_existing) = req.existing_cover_url {
             let trimmed = raw_existing.trim();
@@ -1610,16 +1676,10 @@ pub(crate) async fn resolve_and_cache_cover_in_dirs(
         }
     }
 
-    // Stage 1b/6 Local Embedded .EXE Resource Art Fallback (if Stages 2-5 missed)
-    if resolved.is_none() {
-        if let Some(ref exe) = req.exe_path {
-            if let Some(png_bytes) = extract_exe_highres_png_bytes(exe).await {
-                resolved = Some((png_bytes, "png", "exe_icon"));
-            }
-        }
-    }
-
     let (bytes, ext, source_tier) = resolved?;
+    if force_refresh {
+        clear_cached_cover_for_id(covers_dir, &req.cache_id);
+    }
     let dest_path = covers_dir.join(format!("{}.{}", safe_cache_stem, ext));
     crate::atomic_write_bytes(&dest_path, &bytes).ok()?;
     let sidebar_icon_path =
@@ -1808,8 +1868,7 @@ pub(crate) fn has_local_cover_file(entry: &crate::GameEntry, _covers_dir: &Path)
     {
         return false;
     }
-    let p = Path::new(trimmed);
-    p.is_file() && std::fs::metadata(p).map(|m| m.len() >= 512).unwrap_or(false)
+    is_valid_local_cover_file(Path::new(trimmed))
 }
 
 /// Spawns a non-blocking 4-worker concurrent background cover resolver over the pooled `net_engine`
@@ -1883,9 +1942,6 @@ pub(crate) fn spawn_background_cover_worker_pool(
                 if crate::is_shutting_down() {
                     return (gid, None);
                 }
-                if force_refetch {
-                    clear_cached_cover_for_id(&covers_c, &gid);
-                }
                 let (inferred_pid, plat_hint) = infer_game_platform_hint(
                     &entry_c.title,
                     &entry_c.exe_path,
@@ -1920,7 +1976,13 @@ pub(crate) fn spawn_background_cover_worker_pool(
                     sidebar_icon_id: Some(gid.clone()),
                 };
 
-                let outcome = resolve_and_cache_cover_in_dirs(&req, &covers_c, &icons_c).await;
+                let outcome = resolve_and_cache_cover_in_dirs_with_options(
+                    &req,
+                    &covers_c,
+                    &icons_c,
+                    force_refetch,
+                )
+                .await;
                 if let Some(out) = outcome {
                     return (gid, Some(out.cover_path.to_string_lossy().to_string()));
                 }
@@ -2065,13 +2127,21 @@ mod tests {
         }
         let png_bytes = crate::sidebar_icons::encode_rgba_png(&rgba, 64, 64).unwrap();
         assert_eq!(verify_image_bytes(&png_bytes).map(|x| x.0), Some("png"));
+        assert!(verify_cover_image_bytes(&png_bytes).is_none());
+
+        let cover_rgba = vec![0xA0u8; 240 * 360 * 4];
+        let cover_png_bytes = crate::sidebar_icons::encode_rgba_png(&cover_rgba, 240, 360).unwrap();
+        assert_eq!(
+            verify_cover_image_bytes(&cover_png_bytes),
+            Some(("png", 240, 360))
+        );
 
         let tmp = std::env::temp_dir().join(format!("duke_cover_cache_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let covers_dir = tmp.join("covers");
         let icons_dir = tmp.join("sidebar_icons");
         std::fs::create_dir_all(&covers_dir).unwrap();
-        std::fs::write(covers_dir.join("steam_250820.png"), &png_bytes).unwrap();
+        std::fs::write(covers_dir.join("steam_250820.png"), &cover_png_bytes).unwrap();
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -2130,5 +2200,88 @@ mod tests {
         let bing_html_esc = r#"&quot;murl&quot;:&quot;https://img.example.org/boxart/metroid_prime.jpg&quot;"#;
         let found = extract_ddg_image_urls_from_html(&format!("{bing_html} {bing_html_esc}"));
         assert!(found.iter().any(|u| u.ends_with("metroid_prime.jpg")));
+    }
+
+    #[test]
+    fn rejects_tiny_corrupt_placeholder_covers_and_preserves_valid_local_covers() {
+        // 1. Reject corrupt / HTML / empty payloads
+        assert!(verify_cover_image_bytes(b"").is_none());
+        assert!(verify_cover_image_bytes(b"<!DOCTYPE html><html><body>404</body></html>").is_none());
+        assert!(verify_cover_image_bytes(&vec![0xABu8; 4096]).is_none());
+
+        // 2. Reject tiny 32x32 icon (e.g. generic shell icon) and sub-200px thumbnails
+        let tiny_icon = crate::sidebar_icons::encode_rgba_png(&vec![0xCCu8; 32 * 32 * 4], 32, 32).unwrap();
+        assert!(verify_cover_image_bytes(&tiny_icon).is_none());
+
+        let sub_200 = crate::sidebar_icons::encode_rgba_png(&vec![0xCCu8; 199 * 300 * 4], 199, 300).unwrap();
+        assert!(verify_cover_image_bytes(&sub_200).is_none());
+
+        // 3. Reject generic placeholder / filmstrip / document / icon URLs
+        assert!(is_placeholder_or_icon_url("https://cdn.example.org/assets/placeholder_cover.png"));
+        assert!(is_placeholder_or_icon_url("https://cdn.example.org/icons/filmstrip.png"));
+        assert!(is_placeholder_or_icon_url("https://cdn.example.org/document-icon.jpg"));
+        assert!(is_placeholder_or_icon_url("https://cdn.example.org/no-cover.webp"));
+        assert!(!is_placeholder_or_icon_url("https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/367520/library_600x900.jpg"));
+
+        let placeholder_html = r#"
+            <img src="https://cdn.example.org/icons/filmstrip.png"/>
+            <img src="https://cdn.example.org/no-image.jpg"/>
+            <img src="https://cdn.example.org/boxart/hollow_knight_600x900.jpg"/>
+        "#;
+        let extracted = extract_ddg_image_urls_from_html(placeholder_html);
+        assert_eq!(
+            extracted,
+            vec!["https://cdn.example.org/boxart/hollow_knight_600x900.jpg".to_string()]
+        );
+
+        // 4. Verify local cover preservation vs eviction of corrupt/tiny covers
+        let tmp = std::env::temp_dir().join(format!("duke_cover_preserve_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let covers_dir = tmp.join("covers");
+        std::fs::create_dir_all(&covers_dir).unwrap();
+
+        let valid_path = covers_dir.join("game_valid.png");
+        let valid_png = crate::sidebar_icons::encode_rgba_png(&vec![0x77u8; 300 * 450 * 4], 300, 450).unwrap();
+        std::fs::write(&valid_path, &valid_png).unwrap();
+
+        let tiny_path = covers_dir.join("game_tiny.png");
+        std::fs::write(&tiny_path, &tiny_icon).unwrap();
+
+        let corrupt_path = covers_dir.join("game_corrupt.jpg");
+        std::fs::write(&corrupt_path, b"<html>not an image</html>".repeat(40)).unwrap();
+
+        let valid_entry = crate::GameEntry {
+            id: "game_valid".to_string(),
+            cover_url: valid_path.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        assert!(has_local_cover_file(&valid_entry, &covers_dir));
+
+        let tiny_entry = crate::GameEntry {
+            id: "game_tiny".to_string(),
+            cover_url: tiny_path.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        assert!(!has_local_cover_file(&tiny_entry, &covers_dir));
+
+        let corrupt_entry = crate::GameEntry {
+            id: "game_corrupt".to_string(),
+            cover_url: corrupt_path.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        assert!(!has_local_cover_file(&corrupt_entry, &covers_dir));
+
+        // Cache lookup keeps valid cover and evicts tiny/corrupt cached covers
+        assert_eq!(
+            find_cached_cover_on_disk(&covers_dir, &["game_valid".to_string()]),
+            Some(valid_path.clone())
+        );
+        assert!(find_cached_cover_on_disk(&covers_dir, &["game_tiny".to_string()]).is_none());
+        assert!(!tiny_path.exists());
+        assert!(find_cached_cover_on_disk(&covers_dir, &["game_corrupt".to_string()]).is_none());
+        assert!(!corrupt_path.exists());
+        assert!(valid_path.exists());
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

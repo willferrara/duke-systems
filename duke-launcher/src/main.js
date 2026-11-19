@@ -594,6 +594,25 @@ function resolveMediaUrl(rawUrl) {
   return s;
 }
 
+const LIVE_COVER_BUST = new Map();
+let activeCoverRefreshTracker = null;
+
+function resolveGameCoverUrl(game) {
+  if (!game) return "";
+  const gid = String(game.id || "");
+  const raw = String(game.coverUrl || "").trim();
+  if (gid && raw) {
+    const bust = LIVE_COVER_BUST.get(gid);
+    if (bust && bust.rawPath === raw && bust.liveSrc) {
+      return bust.liveSrc;
+    }
+  }
+  if (game._coverBustUrl && game._coverBustRaw === game.coverUrl) {
+    return game._coverBustUrl;
+  }
+  return resolveMediaUrl(game.coverUrl) || resolveMediaUrl(game.coverDataUrl);
+}
+
 function buildLiveCoverSrc(rawCoverPath) {
   const s = String(rawCoverPath || "").trim();
   if (!s) return "";
@@ -613,6 +632,11 @@ function applyLiveCoverUpdate(gameId, coverPath) {
   if (!gid || !rawPath) return;
   const liveSrc = buildLiveCoverSrc(rawPath);
   if (!liveSrc) return;
+
+  LIVE_COVER_BUST.set(gid, { rawPath, liveSrc });
+  if (activeCoverRefreshTracker instanceof Set) {
+    activeCoverRefreshTracker.add(gid);
+  }
 
   for (const list of [state.library, state.libraryFiltered, state.pendingLibraryPayload]) {
     if (!Array.isArray(list)) continue;
@@ -635,17 +659,30 @@ function applyLiveCoverUpdate(gameId, coverPath) {
   const grid = el("library-grid");
   if (grid) {
     grid.querySelectorAll(".game-card").forEach((cardEl) => {
-      if (cardEl.dataset.gameId === gid) {
+      if (String(cardEl.dataset.gameId || "") === gid) {
+        cardEl.classList.remove("has-cover-fallback", "is-placeholder");
+        const mediaEl = cardEl.querySelector(".game-card-media");
+        mediaEl?.classList.remove("has-cover-fallback", "is-placeholder");
         cardEl.querySelector(".cover-fallback-card")?.remove();
         cardEl._vgProcKey = "";
         const imgEl = cardEl.querySelector("img.game-card-img, img");
         if (imgEl) {
+          imgEl.classList.remove("hidden", "is-placeholder");
           imgEl.style.display = "";
           imgEl.dataset.coverSrc = liveSrc;
           imgEl.src = liveSrc;
         }
       }
     });
+  }
+
+  if (state.selectedDetailId && String(state.selectedDetailId) === gid) {
+    const detailImg = el("detail-hero-img");
+    if (detailImg) {
+      detailImg.classList.remove("hidden");
+      detailImg.style.display = "";
+      detailImg.src = liveSrc;
+    }
   }
 }
 
@@ -1634,9 +1671,12 @@ function createLibraryCardElement() {
   imgEl.addEventListener("error", () => {
     const g = card._vgCurrentGame;
     if (!g) return;
-    const expectedCover = resolveMediaUrl(g.coverUrl) || resolveMediaUrl(g.coverDataUrl);
+    if (String(card.dataset.gameId || "") !== String(g.id || "")) return;
+    const expectedCover = resolveGameCoverUrl(g);
     if (!expectedCover || imgEl.dataset.coverSrc !== expectedCover) return;
     imgEl.style.display = "none";
+    card.classList.add("has-cover-fallback");
+    mediaEl.classList.add("has-cover-fallback");
     const sourceLabel = resolveGameSourceLabel(g);
     const procKey = `${g.title || ""}|${sourceLabel}|${g.source || ""}`;
     if (!mediaEl.querySelector(".cover-fallback-card") || card._vgProcKey !== procKey) {
@@ -1718,13 +1758,13 @@ function updateLibraryCardElement(cardEl, game) {
     }
   }
 
-  const cover =
-    (game._coverBustUrl && game._coverBustRaw === game.coverUrl
-      ? game._coverBustUrl
-      : resolveMediaUrl(game.coverUrl)) || resolveMediaUrl(game.coverDataUrl);
+  const cover = resolveGameCoverUrl(game);
   if (cover) {
+    cardEl.classList.remove("has-cover-fallback", "is-placeholder");
+    refs.mediaEl.classList.remove("has-cover-fallback", "is-placeholder");
     refs.mediaEl.querySelector(".cover-fallback-card")?.remove();
     cardEl._vgProcKey = "";
+    refs.imgEl.classList.remove("hidden", "is-placeholder");
     refs.imgEl.style.display = "";
     refs.imgEl.alt = title;
     if (refs.imgEl.dataset.coverSrc !== cover) {
@@ -1735,6 +1775,8 @@ function updateLibraryCardElement(cardEl, game) {
     refs.imgEl.dataset.coverSrc = "";
     refs.imgEl.removeAttribute("src");
     refs.imgEl.style.display = "none";
+    cardEl.classList.add("has-cover-fallback");
+    refs.mediaEl.classList.add("has-cover-fallback");
     const procKey = `${title}|${sourceLabel}|${game.source || ""}`;
     if (!refs.mediaEl.querySelector(".cover-fallback-card") || cardEl._vgProcKey !== procKey) {
       refs.mediaEl.querySelector(".cover-fallback-card")?.remove();
@@ -11153,16 +11195,80 @@ async function openCleanUninstallModalForGame(game) {
     toggleGameSuspendFlow(gid, null);
   });
 
-  el("btn-auto-covers")?.addEventListener("click", async () => {
-    showToast("Refreshing covers...", "info");
+  el("btn-auto-covers")?.addEventListener("click", async (e) => {
+    const btn = el("btn-auto-covers");
+    if (state.autoCoversRunning) return;
+    state.autoCoversRunning = true;
+    const labelEl = btn?.querySelector("span");
+    const prevLabel = labelEl?.textContent || "Covers";
+    const forceAll = Boolean(e?.shiftKey);
+    const beforeCoverById = new Map(
+      (state.library || []).map((g) => [String(g.id), String(g.coverUrl || "").trim()])
+    );
+    const fetchedTracker = new Set();
+    activeCoverRefreshTracker = fetchedTracker;
+    if (btn) {
+      btn.disabled = true;
+      btn.classList.add("is-loading");
+      btn.setAttribute("aria-busy", "true");
+    }
+    if (labelEl) {
+      labelEl.textContent = forceAll ? "Refreshing..." : "Fetching...";
+    }
+    showToast(
+      forceAll ? "Force-refreshing all game covers..." : "Fetching missing and broken covers...",
+      "info",
+      2400
+    );
     try {
-      state.library = await invokeCommand("auto_fix_all_covers");
+      const updatedLib = await invokeCommand("auto_fix_all_covers", { forceAll });
+      if (window.__dukeUnloading) return;
+      if (Array.isArray(updatedLib)) {
+        for (const g of updatedLib) {
+          const gid = String(g.id);
+          const nextCover = String(g.coverUrl || "").trim();
+          const prevCover = beforeCoverById.get(gid) || "";
+          if (nextCover && (nextCover !== prevCover || fetchedTracker.has(gid))) {
+            fetchedTracker.add(gid);
+            if (!LIVE_COVER_BUST.has(gid) || LIVE_COVER_BUST.get(gid)?.rawPath !== nextCover) {
+              LIVE_COVER_BUST.set(gid, { rawPath: nextCover, liveSrc: buildLiveCoverSrc(nextCover) });
+            }
+          }
+        }
+        state.library = updatedLib;
+      }
       invalidateSidebarIcons();
       renderSidebarGameList();
       renderLibraryGrid();
-      showToast("Cover cache updated.", "success");
+      const fetchedCount = fetchedTracker.size;
+      if (fetchedCount > 0) {
+        showToast(
+          `Fetched ${fetchedCount} ${fetchedCount === 1 ? "cover" : "covers"}.`,
+          "success",
+          3600
+        );
+      } else {
+        showToast(
+          "All covers are up to date. Shift+Click Covers to force-refresh all.",
+          "info",
+          3400
+        );
+      }
     } catch (err) {
-      showToast(String(err), "error");
+      if (!window.__dukeUnloading) {
+        showToast(String(err || "Cover refresh failed."), "error", 4200);
+      }
+    } finally {
+      activeCoverRefreshTracker = null;
+      state.autoCoversRunning = false;
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove("is-loading");
+        btn.removeAttribute("aria-busy");
+      }
+      if (labelEl) {
+        labelEl.textContent = prevLabel;
+      }
     }
   });
 

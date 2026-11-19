@@ -154,21 +154,31 @@ export class VirtualCardGrid {
     let patched = 0;
     const idStr = String(gameId);
     for (const [idx, cardEl] of this._mounted.entries()) {
+      // Strictly verify the mounted DOM node's dataset.gameId matches before patching
+      // so virtual-grid node recycling can never apply a cover to the wrong card.
+      const domGid = String(cardEl.dataset?.gameId || "");
+      if (!domGid || domGid !== idStr) continue;
       const item = this.getItem(idx) || cardEl._vgItem;
-      const cardGid = String(cardEl.dataset?.gameId || item?.id || item?.appId || "");
-      if (cardGid !== idStr && `retro_${item?.appId || ""}` !== idStr) continue;
-      if (item && rawCoverPath) {
+      const itemMatches =
+        item &&
+        (String(item.id || "") === idStr ||
+          String(item.appId || "") === idStr ||
+          (item.appId != null && item.appId !== "" && `retro_${item.appId}` === idStr));
+      if (itemMatches && rawCoverPath) {
         item.coverUrl = rawCoverPath;
         item._coverBustRaw = rawCoverPath;
         item._coverBustUrl = liveCoverSrc;
       }
       const imgEl = cardEl._vgRefs?.imgEl || cardEl.querySelector("img.game-card-img, img");
       const mediaEl = cardEl._vgRefs?.mediaEl || cardEl.querySelector(".game-card-media");
+      cardEl.classList.remove("has-cover-fallback", "is-placeholder");
       if (mediaEl) {
+        mediaEl.classList.remove("has-cover-fallback", "is-placeholder");
         mediaEl.querySelector(".cover-fallback-card")?.remove();
       }
       cardEl._vgProcKey = "";
       if (imgEl) {
+        imgEl.classList.remove("hidden", "is-placeholder");
         imgEl.style.display = "";
         imgEl.dataset.coverSrc = liveCoverSrc;
         imgEl.src = liveCoverSrc;
