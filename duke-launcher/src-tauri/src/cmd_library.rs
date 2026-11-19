@@ -1483,7 +1483,7 @@ pub(crate) async fn auto_fix_all_covers(app: AppHandle) -> Result<Vec<GameEntry>
             // Verify existing local cover file or resolve via cascading 4-tier pipeline + 32x32 sidebar icon
             let req = artwork::CoverResolveRequest {
                 cache_id: entry_c.id.clone(),
-                title: entry_c.title.clone(),
+                title: artwork::clean_cover_query(&entry_c.title),
                 exe_path: (!entry_c.exe_path.trim().is_empty()).then(|| entry_c.exe_path.clone()),
                 platform_id: eff_pid,
                 platform_hint: plat_hint,
@@ -1507,6 +1507,16 @@ pub(crate) async fn auto_fix_all_covers(app: AppHandle) -> Result<Vec<GameEntry>
     let mut updated_map: HashMap<String, String> = HashMap::new();
     while let Some(res) = join_set.join_next().await {
         if let Ok(Some((gid, cover_path))) = res {
+            emit_if_alive(
+                &app,
+                "cover-updated",
+                serde_json::json!({
+                    "id": &gid,
+                    "coverPath": &cover_path,
+                    "gameId": &gid,
+                    "coverUrl": &cover_path,
+                }),
+            );
             updated_map.insert(gid, cover_path);
         }
     }
@@ -1592,6 +1602,7 @@ pub(crate) async fn find_and_apply_cover(
 
     let app_save = app.clone();
     let updated_lib = run_blocking_timeout(20, "find_and_apply_cover_save", move || {
+        let disk_cover_for_emit = cover.clone();
         if let Some(entry) = library.iter_mut().find(|g| g.id == entry_id) {
             entry.cover_url = cover;
             if let Some(sid) = app_id {
@@ -1614,6 +1625,16 @@ pub(crate) async fn find_and_apply_cover(
             }
             sidebar_icons::invalidate_sidebar_icon(&app_save, &entry_id);
         }
+        emit_if_alive(
+            &app_save,
+            "cover-updated",
+            serde_json::json!({
+                "id": &entry_id,
+                "coverPath": &disk_cover_for_emit,
+                "gameId": &entry_id,
+                "coverUrl": &disk_cover_for_emit,
+            }),
+        );
         emit_if_alive(&app_save, "library-updated", &library);
         emit_if_alive(&app_save, "sidebar-icons-updated", ());
         trim_process_working_set();
@@ -4994,6 +5015,9 @@ pub(crate) async fn ingest_dropped_paths(
     .await
     .map_err(|e| format!("Library reload failed: {}", e))??;
     emit_if_alive(&app, "library-updated", &library);
+    if !added_titles.is_empty() {
+        spawn_background_missing_covers_resolver(app.clone());
+    }
 
     Ok(IngestPathsReport {
         added_count: added_titles.len(),
@@ -5004,6 +5028,7 @@ pub(crate) async fn ingest_dropped_paths(
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn is_likely_non_game_shortcut(lnk_path: &Path, target_exe: &Path) -> bool {
     let lnk_stem = lnk_path
         .file_stem()
@@ -5076,15 +5101,23 @@ pub(crate) fn is_likely_non_game_shortcut(lnk_path: &Path, target_exe: &Path) ->
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct DesktopShortcutCandidate {
     pub(crate) lnk_path: PathBuf,
     pub(crate) title: String,
     pub(crate) resolved: ResolvedShortcut,
 }
 
+#[allow(dead_code)]
 pub(crate) fn move_file_with_unique_name(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+    if let Some(reason) = crate::uninstaller::protected_path_refusal_reason(src) {
+        return Err(format!("Refused moving protected file: {reason}"));
+    }
+    if let Some(reason) = crate::uninstaller::protected_path_refusal_reason(dest_dir) {
+        return Err(format!("Refused writing into protected folder: {reason}"));
+    }
     fs::create_dir_all(dest_dir)
-        .map_err(|e| format!("Failed creating shortcut backup folder: {}", e))?;
+        .map_err(|e| format!("Failed creating backup folder: {}", e))?;
     let stem = src
         .file_stem()
         .and_then(|s| s.to_str())
@@ -5098,12 +5131,15 @@ pub(crate) fn move_file_with_unique_name(src: &Path, dest_dir: &Path) -> Result<
     }
     if fs::rename(src, &candidate).is_err() {
         fs::copy(src, &candidate)
-            .map_err(|e| format!("Failed copying shortcut '{}': {}", src.display(), e))?;
-        let _ = fs::remove_file(src);
+            .map_err(|e| format!("Failed copying file '{}': {}", src.display(), e))?;
+        if !crate::uninstaller::is_protected_user_or_system_path(src) {
+            let _ = fs::remove_file(src);
+        }
     }
     Ok(candidate)
 }
 
+#[allow(dead_code)]
 pub(crate) fn collect_desktop_game_shortcuts_sync(
     desktop_dirs: &[PathBuf],
 ) -> (usize, usize, Vec<DesktopShortcutCandidate>) {
@@ -5174,6 +5210,7 @@ pub(crate) fn collect_desktop_game_shortcuts_sync(
     (scanned, skipped_non_game, candidates)
 }
 
+#[allow(dead_code)]
 pub(crate) fn resolve_user_and_public_desktop_dirs() -> Result<(PathBuf, Vec<PathBuf>), String> {
     let mut dirs = Vec::new();
     let user_desktop = std::env::var("USERPROFILE")
@@ -5202,88 +5239,25 @@ pub(crate) fn resolve_user_and_public_desktop_dirs() -> Result<(PathBuf, Vec<Pat
     Ok((primary_desktop.join("Duke Shortcut Backup"), dirs))
 }
 
-/// Scans `%USERPROFILE%\Desktop` and Public Desktop for `.lnk` game shortcuts using Win32
-/// `IShellLinkW`, imports them into `library.json`, and moves processed `.lnk` files into
-/// `%USERPROFILE%\Desktop\Duke Shortcut Backup\`.
+/// Neutered for filesystem safety: Duke Launcher never moves, modifies, or deletes `.lnk`
+/// shortcuts, folders, or files on the user's Desktop or Public Desktop.
 #[tauri::command]
 pub(crate) async fn scan_and_clean_desktop_shortcuts(app: AppHandle) -> Result<DesktopCleanupReport, String> {
-    let (backup_dir, desktop_dirs) = resolve_user_and_public_desktop_dirs()?;
-    let dirs_for_scan = desktop_dirs.clone();
-    let (scanned_shortcuts, skipped_non_game, candidates) =
-        tokio::task::spawn_blocking(move || collect_desktop_game_shortcuts_sync(&dirs_for_scan))
-            .await
-            .map_err(|e| format!("Desktop shortcut scanner failed: {}", e))?;
-
-    let existing_library = tokio::task::spawn_blocking({
-        let app_clone = app.clone();
-        move || load_library_from_disk(&app_clone)
-    })
-    .await
-    .map_err(|e| format!("Library read failed: {}", e))??;
-
-    let existing_paths: HashSet<String> = existing_library
-        .iter()
-        .map(|g| g.exe_path.trim().to_ascii_lowercase())
-        .collect();
-
-    let mut imported_count = 0usize;
-    let mut moved_to_backup = 0usize;
-    let mut already_in_library = 0usize;
-    let mut imported_titles = Vec::new();
-
-    for cand in candidates {
-        let exe_key = cand.resolved.target_exe.trim().to_ascii_lowercase();
-        if existing_paths.contains(&exe_key) {
-            already_in_library += 1;
-            if move_file_with_unique_name(&cand.lnk_path, &backup_dir).is_ok() {
-                moved_to_backup += 1;
-            }
-            continue;
-        }
-
-        let target_exe = PathBuf::from(&cand.resolved.target_exe);
-        let game_root = resolve_game_root_dir(&target_exe);
-        let app_id = read_steam_appid_from_folder(&game_root)
-            .or_else(|| match_catalog_appid_for_title(&cand.title));
-
-        if let Ok(entry) = add_local_game_with_origin(
-            app.clone(),
-            cand.resolved.target_exe.clone(),
-            Some(cand.title.clone()),
-            None,
-            None,
-            app_id,
-            Some("desktop_shortcut"),
-        )
-        .await
-        {
-            apply_shortcut_launch_args_if_empty(&app, &entry.id, cand.resolved.arguments.clone())
-                .await;
-            let _ = sidebar_icons::get_sidebar_icons(app.clone(), vec![entry.id.clone()]).await;
-            imported_count += 1;
-            imported_titles.push(entry.title);
-            if move_file_with_unique_name(&cand.lnk_path, &backup_dir).is_ok() {
-                moved_to_backup += 1;
-            }
-        }
-    }
-
     let library = tokio::task::spawn_blocking({
         let app_clone = app.clone();
         move || load_library_from_disk(&app_clone)
     })
     .await
     .map_err(|e| format!("Library reload failed: {}", e))??;
-    emit_if_alive(&app, "library-updated", &library);
 
     Ok(DesktopCleanupReport {
-        scanned_shortcuts,
-        imported_count,
-        moved_to_backup,
-        already_in_library,
-        skipped_non_game,
-        backup_dir: backup_dir.to_string_lossy().to_string(),
-        imported_titles,
+        scanned_shortcuts: 0,
+        imported_count: 0,
+        moved_to_backup: 0,
+        already_in_library: 0,
+        skipped_non_game: 0,
+        backup_dir: String::new(),
+        imported_titles: Vec::new(),
         library,
     })
 }
@@ -5330,5 +5304,318 @@ pub(crate) async fn save_steam_id_override(
 ) -> Result<crate::steam_profile::SteamMiniProfile, String> {
     set_steam_profile_override(app, steam_id_override).await
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PurgeNonGamesResult {
+    pub removed_count: usize,
+    pub removed_titles: Vec<String>,
+    pub remaining_count: usize,
+    pub games: Vec<GameEntry>,
+}
+
+pub(crate) fn purge_non_game_entries_from_vec(
+    library: &mut Vec<GameEntry>,
+) -> Vec<(String, String)> {
+    let mut removed = Vec::new();
+    library.retain(|g| {
+        let is_rom = g.platform_id > 0
+            || !g.rom_id.trim().is_empty()
+            || !g.emulator_id.trim().is_empty()
+            || g.source.eq_ignore_ascii_case("RetroArch");
+        let check_exe = if is_rom && !g.exe_path.trim().is_empty() {
+            "retro_rom_entry.exe"
+        } else {
+            g.exe_path.as_str()
+        };
+        let aid = g
+            .app_id
+            .or_else(|| g.steam_app_id.and_then(|v| u32::try_from(v).ok()));
+        let is_bad = importers::is_non_game_or_dlc_entry(&g.title, aid, &g.install_dir, check_exe);
+        if is_bad {
+            removed.push((g.id.clone(), g.title.clone()));
+            false
+        } else {
+            true
+        }
+    });
+    removed
+}
+
+#[tauri::command]
+pub(crate) async fn purge_non_game_entries(app: AppHandle) -> Result<PurgeNonGamesResult, String> {
+    let app_for_work = app.clone();
+    let res = tokio::task::spawn_blocking(move || -> Result<PurgeNonGamesResult, String> {
+        let mut library = load_library_from_disk(&app_for_work)?;
+        let removed_pairs = purge_non_game_entries_from_vec(&mut library);
+        let removed_count = removed_pairs.len();
+        let removed_titles: Vec<String> = removed_pairs.iter().map(|(_, t)| t.clone()).collect();
+        if removed_count > 0 {
+            save_library_to_disk(&app_for_work, &library)?;
+            for (gid, _) in &removed_pairs {
+                sidebar_icons::invalidate_sidebar_icon(&app_for_work, gid);
+            }
+        }
+        let remaining_count = library.len();
+        Ok(PurgeNonGamesResult {
+            removed_count,
+            removed_titles,
+            remaining_count,
+            games: library,
+        })
+    })
+    .await
+    .map_err(|e| format!("Failed purging non-game entries: {}", e))??;
+
+    if res.removed_count > 0 {
+        emit_if_alive(&app, "library-updated", &res.games);
+    }
+    Ok(res)
+}
+
+pub(crate) fn spawn_background_missing_covers_resolver(app: AppHandle) {
+    artwork::spawn_background_cover_worker_pool(app, None);
+}
+
+pub(crate) fn spawn_initial_library_auto_scan_if_needed(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(650)).await;
+        if is_shutting_down() {
+            return;
+        }
+        let app_check = app.clone();
+        let should_scan = tokio::task::spawn_blocking(move || -> bool {
+            let settings = load_settings_from_disk(&app_check);
+            if settings.auto_initial_scan_done {
+                return false;
+            }
+            let lib = load_library_lightweight(&app_check).unwrap_or_default();
+            let mut updated = settings;
+            updated.auto_initial_scan_done = true;
+            let _ = save_settings_to_disk(&app_check, &updated);
+            lib.is_empty()
+        })
+        .await
+        .unwrap_or(false);
+
+        if !should_scan || is_shutting_down() {
+            return;
+        }
+
+        if let Ok(res) = importers::import_existing_libraries_core().await {
+            if !is_shutting_down() {
+                emit_if_alive(&app, "library-updated", &res.games);
+                emit_if_alive(&app, "initial-library-scan-complete", &res);
+                if !res.games.is_empty() {
+                    spawn_background_missing_covers_resolver(app.clone());
+                }
+            }
+        }
+    });
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BatchRemoveResult {
+    pub removed_count: usize,
+    pub deleted_files_count: usize,
+    pub save_backups_created: usize,
+    pub games: Vec<GameEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BatchBackupResult {
+    pub backed_up_count: usize,
+    pub skipped_count: usize,
+    pub backup_paths: Vec<String>,
+}
+
+#[tauri::command]
+pub(crate) async fn batch_remove_games(
+    app: AppHandle,
+    game_ids: Vec<String>,
+    delete_files: Option<bool>,
+) -> Result<BatchRemoveResult, String> {
+    let target_set: HashSet<String> = game_ids
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if target_set.is_empty() {
+        let lib = load_library_from_disk(&app)?;
+        return Ok(BatchRemoveResult {
+            removed_count: 0,
+            deleted_files_count: 0,
+            save_backups_created: 0,
+            games: lib,
+        });
+    }
+
+    let mut deleted_files_count = 0usize;
+    let mut save_backups_created = 0usize;
+    let mut removed_count = 0usize;
+
+    if delete_files.unwrap_or(false) {
+        for gid in &target_set {
+            match uninstaller::execute_clean_uninstall(app.clone(), gid.clone(), true, Some(false))
+                .await
+            {
+                Ok(report) => {
+                    removed_count += 1;
+                    deleted_files_count += 1;
+                    if report.save_archive_path.is_some() {
+                        save_backups_created += 1;
+                    }
+                }
+                Err(_) => {
+                    // Fallback to removing the launcher entry if directory was already missing
+                    let _ = remove_local_game(app.clone(), gid.clone()).await;
+                    removed_count += 1;
+                }
+            }
+        }
+        let final_lib = tokio::task::spawn_blocking({
+            let app_c = app.clone();
+            move || load_library_from_disk(&app_c)
+        })
+        .await
+        .map_err(|e| format!("Failed reloading library: {e}"))??;
+        emit_if_alive(&app, "library-updated", &final_lib);
+        return Ok(BatchRemoveResult {
+            removed_count,
+            deleted_files_count,
+            save_backups_created,
+            games: final_lib,
+        });
+    }
+
+    let app_work = app.clone();
+    let final_lib = tokio::task::spawn_blocking(move || -> Result<(usize, Vec<GameEntry>), String> {
+        let mut library = load_library_from_disk(&app_work)?;
+        let before = library.len();
+        let mut removed_ids = Vec::new();
+        library.retain(|g| {
+            let hit = target_set.contains(&g.id)
+                || target_set.iter().any(|k| g.exe_path.eq_ignore_ascii_case(k));
+            if hit {
+                removed_ids.push(g.id.clone());
+                false
+            } else {
+                true
+            }
+        });
+        let removed = before.saturating_sub(library.len());
+        if removed > 0 {
+            save_library_to_disk(&app_work, &library)?;
+            for gid in &removed_ids {
+                sidebar_icons::invalidate_sidebar_icon(&app_work, gid);
+            }
+        }
+        Ok((removed, library))
+    })
+    .await
+    .map_err(|e| format!("Batch remove worker failed: {e}"))??;
+
+    emit_if_alive(&app, "library-updated", &final_lib.1);
+    Ok(BatchRemoveResult {
+        removed_count: final_lib.0,
+        deleted_files_count: 0,
+        save_backups_created: 0,
+        games: final_lib.1,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn batch_fetch_covers(
+    app: AppHandle,
+    game_ids: Vec<String>,
+) -> Result<usize, String> {
+    let clean_ids: Vec<String> = game_ids
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let count = clean_ids.len();
+    if count > 0 {
+        artwork::spawn_background_cover_worker_pool(app, Some(clean_ids));
+    }
+    Ok(count)
+}
+
+#[tauri::command]
+pub(crate) async fn batch_backup_saves(
+    game_ids: Vec<String>,
+) -> Result<BatchBackupResult, String> {
+    let mut backed_up_count = 0usize;
+    let mut skipped_count = 0usize;
+    let mut backup_paths = Vec::new();
+
+    for raw_id in game_ids {
+        let gid = raw_id.trim().to_string();
+        if gid.is_empty() {
+            continue;
+        }
+        match ludusavi::backup_game_saves_core(Some(gid), None, None, None).await {
+            Ok(path) => {
+                backed_up_count += 1;
+                backup_paths.push(path);
+            }
+            Err(_) => {
+                skipped_count += 1;
+            }
+        }
+    }
+
+    Ok(BatchBackupResult {
+        backed_up_count,
+        skipped_count,
+        backup_paths,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn batch_toggle_favorite(
+    app: AppHandle,
+    game_ids: Vec<String>,
+    favorite: Option<bool>,
+) -> Result<Vec<GameEntry>, String> {
+    let target_set: HashSet<String> = game_ids
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let app_work = app.clone();
+    let updated_lib = tokio::task::spawn_blocking(move || -> Result<Vec<GameEntry>, String> {
+        let mut library = load_library_from_disk(&app_work)?;
+        if target_set.is_empty() {
+            return Ok(library);
+        }
+        let target_fav = favorite.unwrap_or_else(|| {
+            library
+                .iter()
+                .filter(|g| target_set.contains(&g.id))
+                .any(|g| !g.is_favorite)
+        });
+        let mut changed = false;
+        for entry in &mut library {
+            if target_set.contains(&entry.id) && entry.is_favorite != target_fav {
+                entry.is_favorite = target_fav;
+                changed = true;
+            }
+        }
+        if changed {
+            save_library_to_disk(&app_work, &library)?;
+        }
+        Ok(library)
+    })
+    .await
+    .map_err(|e| format!("Batch favorite worker failed: {e}"))??;
+
+    emit_if_alive(&app, "library-updated", &updated_lib);
+    Ok(updated_lib)
+}
+
+
 
 

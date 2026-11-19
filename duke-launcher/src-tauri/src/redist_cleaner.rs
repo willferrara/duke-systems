@@ -693,6 +693,12 @@ fn remove_dir_safely_within_root(
     let mut files_removed = 0usize;
     let mut bytes_reclaimed = 0u64;
     for (file_path, sz) in files_to_delete {
+        if crate::uninstaller::is_protected_user_or_system_path(&file_path) {
+            return Err(format!(
+                "Refused removing protected path: {}",
+                file_path.display()
+            ));
+        }
         clear_readonly_if_present(&file_path);
         fs::remove_file(&file_path)
             .map_err(|e| format!("Failed removing {}: {}", file_path.display(), e))?;
@@ -702,6 +708,12 @@ fn remove_dir_safely_within_root(
 
     dirs_to_delete.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
     for sub_dir in dirs_to_delete {
+        if crate::uninstaller::is_protected_user_or_system_path(&sub_dir) {
+            return Err(format!(
+                "Refused removing protected directory: {}",
+                sub_dir.display()
+            ));
+        }
         clear_readonly_if_present(&sub_dir);
         fs::remove_dir(&sub_dir)
             .map_err(|e| format!("Failed removing directory {}: {}", sub_dir.display(), e))?;
@@ -816,6 +828,13 @@ pub(crate) fn clean_redist_bloat_with_cas(
                     }
                 }
             } else {
+                if crate::uninstaller::is_protected_user_or_system_path(&canon_cand) {
+                    errors.push(format!(
+                        "{}: refused removing protected path '{}'",
+                        entry.title, cand.rel_path
+                    ));
+                    continue;
+                }
                 clear_readonly_if_present(&canon_cand);
                 match fs::remove_file(&canon_cand) {
                     Ok(()) => {
@@ -876,7 +895,9 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis())
                 .unwrap_or(0);
-            let path = std::env::temp_dir().join(format!(
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join(format!(
                 "duke_redist_cleaner_{}_{}_{}_{}",
                 tag,
                 std::process::id(),

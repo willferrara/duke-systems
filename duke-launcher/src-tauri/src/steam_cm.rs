@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -583,9 +583,13 @@ pub async fn connect_steam_cm(
 
         let mut heartbeat = tokio::time::interval(Duration::from_secs(20));
         let _ = heartbeat.tick().await;
-        let _ = app_ev.emit("steam-cm-state", current_status_snapshot());
+        crate::emit_if_alive(&app_ev, "steam-cm-state", current_status_snapshot());
 
         loop {
+            if crate::is_shutting_down() {
+                let _ = ws_write.send(Message::Close(None)).await;
+                break;
+            }
             tokio::select! {
                 _ = shutdown_rx.recv() => {
                     let _ = ws_write.send(Message::Close(None)).await;
@@ -597,6 +601,10 @@ pub async fn connect_steam_cm(
                     }
                 }
                 _ = heartbeat.tick() => {
+                    if crate::is_shutting_down() {
+                        let _ = ws_write.send(Message::Close(None)).await;
+                        break;
+                    }
                     let hb = encode_cm_proto_packet(EMSG_CLIENT_HEARTBEAT, &hdr, &[]);
                     if ws_write.send(Message::Binary(hb.into())).await.is_err() {
                         CM_RECONNECT_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -626,7 +634,7 @@ pub async fn connect_steam_cm(
                                             if let Ok(mut g) = pending_invites().lock() {
                                                 g.push(inv.clone());
                                             }
-                                            let _ = app_ev.emit("steam-game-invite", &inv);
+                                            crate::emit_if_alive(&app_ev, "steam-game-invite", &inv);
                                         }
                                     }
                                 }
@@ -638,7 +646,7 @@ pub async fn connect_steam_cm(
                                     if let Ok(mut g) = pending_invites().lock() {
                                         g.push(inv.clone());
                                     }
-                                    let _ = app_ev.emit("steam-game-invite", &inv);
+                                    crate::emit_if_alive(&app_ev, "steam-game-invite", &inv);
                                 }
                             }
                         }
@@ -660,7 +668,7 @@ pub async fn connect_steam_cm(
             s.connecting = false;
             s.outgoing_tx = None;
         }
-        let _ = app_ev.emit("steam-cm-state", current_status_snapshot());
+        crate::emit_if_alive(&app_ev, "steam-cm-state", current_status_snapshot());
     });
 
     Ok(current_status_snapshot())
@@ -684,7 +692,7 @@ pub async fn disconnect_steam_cm(app: AppHandle) -> SteamCmSessionStatus {
         st.outgoing_tx = None;
     }
     let snap = current_status_snapshot();
-    let _ = app.emit("steam-cm-state", &snap);
+    crate::emit_if_alive(&app, "steam-cm-state", &snap);
     snap
 }
 
@@ -762,7 +770,7 @@ pub async fn send_steam_chat_message(
             g.drain(..excess);
         }
     }
-    let _ = app.emit("steam-chat-message", &entry);
+    crate::emit_if_alive(&app, "steam-chat-message", &entry);
     Ok(entry)
 }
 
@@ -805,7 +813,7 @@ pub async fn respond_steam_game_invite(
     let Some(invite) = invite_opt else {
         return Ok(None);
     };
-    let _ = app.emit("steam-invites-updated", get_steam_pending_invites().await);
+    crate::emit_if_alive(&app, "steam-invites-updated", get_steam_pending_invites().await);
     if !accept {
         return Ok(None);
     }

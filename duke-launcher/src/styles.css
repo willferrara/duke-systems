@@ -6521,6 +6521,158 @@ body.couch-mode .catalog-grid.virtual-grid-host {
   color: var(--text-primary);
 }
 
+/* ==========================================================================
+   MULTI-SELECT CARDS, FLOATING ACTION BAR & BATCH DELETE MODAL (v2.3.2)
+   ========================================================================== */
+
+.card-select-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1.5px solid rgba(255, 255, 255, 0.28);
+  background: rgba(14, 17, 22, 0.78);
+  color: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.14s ease, background 0.14s ease, border-color 0.14s ease, transform 0.12s ease;
+  z-index: 6;
+}
+
+.card-select-btn .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.game-card:hover .card-select-btn,
+.game-card.is-selected .card-select-btn,
+#library-grid.select-mode-active .game-card .card-select-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.card-select-btn:hover {
+  border-color: var(--accent);
+  background: rgba(24, 29, 39, 0.92);
+}
+
+.game-card.is-selected {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 2px var(--accent), 0 10px 24px rgba(0, 0, 0, 0.42);
+}
+
+.game-card.is-selected .card-select-btn {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+#btn-toggle-select-mode.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.library-multiselect-bar {
+  position: fixed;
+  left: calc(var(--sidebar-width, 232px) + 24px);
+  right: 24px;
+  bottom: 18px;
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 10px 16px;
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--accent);
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.58);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  z-index: 960;
+}
+
+.app-shell.sidebar-collapsed .library-multiselect-bar {
+  left: 24px;
+}
+
+.multiselect-bar-left,
+.multiselect-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.multiselect-count-pill {
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.batch-delete-modal-card {
+  max-width: 560px;
+  width: 92vw;
+}
+
+.batch-delete-preview-list {
+  max-height: 120px;
+  overflow-y: auto;
+  margin: 10px 0 14px 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-hairline);
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.batch-delete-options-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.batch-delete-option-card {
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-hairline);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.batch-delete-option-card h4 {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--text-primary);
+}
+
+.batch-delete-option-card p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.batch-delete-option-danger {
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+
 
 
 

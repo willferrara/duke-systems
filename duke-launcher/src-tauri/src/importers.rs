@@ -219,6 +219,31 @@ pub fn parse_steam_appmanifest_acf(acf_text: &str) -> Option<SteamAcfManifest> {
     if name.is_empty() || install_dir_name.is_empty() {
         return None;
     }
+
+    // Reject Steam .acf manifests explicitly marked as DLC, Tool, Config, Music, Driver, or Application
+    for type_candidate in [
+        state.get_str("type"),
+        state.get_node("UserConfig").and_then(|n| n.get_str("type")),
+        state
+            .get_node("MountedConfig")
+            .and_then(|n| n.get_str("type")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let t_lower = type_candidate.trim().to_ascii_lowercase();
+        if matches!(
+            t_lower.as_str(),
+            "dlc" | "tool" | "config" | "music" | "driver" | "application" | "video" | "series"
+        ) {
+            return None;
+        }
+    }
+
+    if is_non_game_or_dlc_entry(&name, Some(app_id), &install_dir_name, "placeholder_game.exe") {
+        return None;
+    }
+
     let size_on_disk = state
         .get_str("SizeOnDisk")
         .and_then(|s| s.trim().parse::<u64>().ok())
@@ -285,15 +310,238 @@ fn is_ignored_helper_exe_name(file_name_lower: &str) -> bool {
         "unins",
         "unitycrashhandler",
         "vcredist",
+        "vc_redist",
         "dxsetup",
+        "dxwebsetup",
         "crashreport",
+        "crashhandler",
+        "crashpad_handler",
+        "crs-handler",
         "ue4prereq",
         "ueprereq",
         "dotnetfx",
+        "easyanticheat",
+        "battleye",
+        "steamerrorreporter",
+        "steamservice",
+        "wallpaper32",
+        "wallpaper64",
+        "wallpaperservice",
+        "webwallpaper",
+        "applicationwallpaperinject",
     ];
     BLOCKED_PREFIXES
         .iter()
         .any(|p| file_name_lower.starts_with(p))
+}
+
+/// Strictly classifies whether an entry is a DLC pack, add-on, soundtrack, tool, redistributable,
+/// or non-game directory so library scanning and cleanup keep `My Games` 100% playable games.
+pub fn is_non_game_or_dlc_entry<P1: AsRef<Path>, P2: AsRef<Path>>(
+    title: &str,
+    app_id: Option<u32>,
+    install_dir: P1,
+    exe_path: P2,
+) -> bool {
+    const BLOCKED_STEAM_APP_IDS: &[u32] = &[
+        228980,  // Steamworks Common Redistributables
+        1070560, // Steam Linux Runtime
+        1391110, // Steam Linux Runtime - Soldier
+        1628350, // Steam Linux Runtime - Sniper
+        1493710, // Proton Experimental
+        1826330, // Steam Linux Runtime
+        2180100, // Proton Hotfix
+        2348590, // Proton 8.0
+        2805730, // Proton 9.0
+        431960,  // Wallpaper Engine utility/helper
+        250820,  // SteamVR runtime
+    ];
+
+    if let Some(aid) = app_id {
+        if BLOCKED_STEAM_APP_IDS.contains(&aid) {
+            return true;
+        }
+    }
+
+    let title_trimmed = title.trim();
+    if title_trimmed.is_empty() {
+        return true;
+    }
+    let title_lower = title_trimmed.to_ascii_lowercase();
+
+    const BLOCKED_TITLE_SUBSTRINGS: &[&str] = &[
+        // Call of Duty / Black Ops 6 & BO7 / Modern Warfare packs
+        "content pack",
+        "multiplayer pack",
+        "campaign pack",
+        "zombies pack",
+        "co-op pack",
+        "coop pack",
+        "special ops pack",
+        "spec ops pack",
+        "survival pack",
+        "warzone",
+        "hd texture pack",
+        "high resolution texture",
+        "texture pack",
+        "shader pack",
+        "beta pack",
+        "shared content",
+        // General non-games, media & Steamworks helpers
+        "soundtrack",
+        "artbook",
+        "art book",
+        "digital art",
+        "digital comic",
+        "dedicated server",
+        "mod tools",
+        "authoring tools",
+        "creation kit",
+        "level editor",
+        "redistributable",
+        "common redistributables",
+        "steamworks common",
+        "directx",
+        "physx",
+        "vcredist",
+        "vc_redist",
+        "steam linux runtime",
+        "wallpaper engine",
+        "easyanticheat",
+        "battleye",
+        "crash reporter",
+        "crash handler",
+        "benchmark tool",
+        // Add-on / DLC / Season Pass bundles
+        "season pass",
+        "expansion pass",
+        "expansion pack",
+        "dlc pack",
+        "starter pack",
+        "supporter pack",
+        "founder's pack",
+        "founders pack",
+        "upgrade pack",
+        "vault edition upgrade",
+        "blackcell",
+        "weapon pack",
+        "skin pack",
+        "costume pack",
+        "character pack",
+        "music pack",
+        "voice pack",
+        "language pack",
+        "audio pack",
+        "bonus content",
+        "digital deluxe content",
+        "digital extras",
+    ];
+
+    if BLOCKED_TITLE_SUBSTRINGS
+        .iter()
+        .any(|needle| title_lower.contains(needle))
+    {
+        return true;
+    }
+
+    // Check word-boundary tokens so "OST", "SDK", "DLC", "Proton", "Redist" are blocked
+    // without false-positiving on real games like "Ghost of Tsushima", "Lost Ark", or "Frostpunk".
+    let words: Vec<&str> = title_lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.iter().any(|&w| {
+        matches!(
+            w,
+            "ost" | "sdk" | "dlc" | "redist" | "proton" | "uninstaller" | "uninstall"
+        )
+    }) {
+        return true;
+    }
+
+    // Call of Duty / Black Ops / Modern Warfare sub-packs that use "Pack" or "Add-On"
+    let is_cod_family = title_lower.contains("call of duty")
+        || title_lower.contains("black ops")
+        || title_lower.contains("modern warfare")
+        || words.iter().any(|&w| matches!(w, "bo6" | "bo7" | "mw2" | "mw3" | "mwiii" | "cod"));
+    if is_cod_family
+        && (words.contains(&"pack")
+            || words.contains(&"addon")
+            || title_lower.contains("add-on")
+            || words.contains(&"beta")
+            || words.contains(&"shader")
+            || words.contains(&"texture"))
+    {
+        return true;
+    }
+
+    let dir_path = install_dir.as_ref();
+    let exe_ref = exe_path.as_ref();
+    let dir_lower = dir_path
+        .to_string_lossy()
+        .trim()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    let exe_lower = exe_ref
+        .to_string_lossy()
+        .trim()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+
+    if dir_lower.contains("\\_commonredist")
+        || dir_lower.contains("\\steamworks shared")
+        || dir_lower.contains("\\steam linux runtime")
+        || dir_lower.contains("\\wallpaper_engine")
+        || dir_lower.contains("\\wallpaper engine")
+    {
+        return true;
+    }
+
+    if !exe_lower.is_empty() {
+        let exe_file_lower = Path::new(&exe_lower)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        if is_ignored_helper_exe_name(exe_file_lower)
+            || crate::cmd_library::PENALIZED_HELPER_EXES
+                .iter()
+                .any(|bad| exe_file_lower.starts_with(bad) || exe_file_lower.contains(bad))
+            || matches!(
+                exe_file_lower,
+                "steam.exe"
+                    | "epicgameslauncher.exe"
+                    | "galaxyclient.exe"
+                    | "upc.exe"
+                    | "uplay.exe"
+                    | "eadesktop.exe"
+                    | "origin.exe"
+                    | "battle.net.exe"
+                    | "agent.exe"
+                    | "ui32.exe"
+            )
+        {
+            return true;
+        }
+    }
+
+    // If no executable path is supplied, or the install directory exists on disk,
+    // verify the directory actually contains a playable game executable.
+    if exe_lower.is_empty() {
+        if dir_path.is_dir() {
+            if detect_primary_exe_excluding_redist(dir_path, title_trimmed).is_none() {
+                return true;
+            }
+        } else {
+            return true;
+        }
+    } else if dir_path.is_dir()
+        && !exe_ref.is_file()
+        && detect_primary_exe_excluding_redist(dir_path, title_trimmed).is_none()
+    {
+        return true;
+    }
+
+    false
 }
 
 fn detect_primary_exe_excluding_redist(folder: &Path, title: &str) -> Option<PathBuf> {
@@ -322,7 +570,12 @@ fn detect_primary_exe_excluding_redist(folder: &Path, title: &str) -> Option<Pat
                 .unwrap_or(false)
             {
                 let fname = entry.file_name().to_string_lossy().to_lowercase();
-                if is_ignored_helper_exe_name(&fname) || fname.contains("setup") {
+                if is_ignored_helper_exe_name(&fname)
+                    || fname.contains("setup")
+                    || crate::cmd_library::PENALIZED_HELPER_EXES
+                        .iter()
+                        .any(|bad| fname.starts_with(bad) || fname.contains(bad))
+                {
                     continue;
                 }
                 fallback = Some(p.to_path_buf());
@@ -334,24 +587,28 @@ fn detect_primary_exe_excluding_redist(folder: &Path, title: &str) -> Option<Pat
 }
 
 fn scan_steam_libraries() -> Vec<DiscoveredImportCandidate> {
-    const IGNORED_STEAM_RUNTIME_IDS: &[u32] = &[228980, 1070560, 1391110, 1628350, 1493710, 1826330];
-
-    let Some(raw_steam_path) =
-        duke_core::win32_ffi::reg_read_string(false, "Software\\Valve\\Steam", "SteamPath")
-    else {
+    let steam_roots = find_steam_root_dirs();
+    if steam_roots.is_empty() {
         return Vec::new();
-    };
+    }
 
-    let main_steam = PathBuf::from(raw_steam_path.replace('/', "\\"));
-    let mut lib_roots = vec![main_steam.clone()];
-    let vdf_path = main_steam.join("steamapps").join("libraryfolders.vdf");
-    if let Ok(vdf_text) = fs::read_to_string(&vdf_path) {
-        for p in extract_steam_library_paths_from_vdf(&vdf_text) {
-            if !lib_roots
-                .iter()
-                .any(|x| x.to_string_lossy().eq_ignore_ascii_case(&p.to_string_lossy()))
-            {
-                lib_roots.push(p);
+    let mut lib_roots: Vec<PathBuf> = Vec::new();
+    for main_steam in steam_roots {
+        if !lib_roots
+            .iter()
+            .any(|x| x.to_string_lossy().eq_ignore_ascii_case(&main_steam.to_string_lossy()))
+        {
+            lib_roots.push(main_steam.clone());
+        }
+        let vdf_path = main_steam.join("steamapps").join("libraryfolders.vdf");
+        if let Ok(vdf_text) = fs::read_to_string(&vdf_path) {
+            for p in extract_steam_library_paths_from_vdf(&vdf_text) {
+                if !lib_roots
+                    .iter()
+                    .any(|x| x.to_string_lossy().eq_ignore_ascii_case(&p.to_string_lossy()))
+                {
+                    lib_roots.push(p);
+                }
             }
         }
     }
@@ -373,13 +630,6 @@ fn scan_steam_libraries() -> Vec<DiscoveredImportCandidate> {
             let Some(acf) = parse_steam_appmanifest_acf(&acf_text) else {
                 continue;
             };
-            if IGNORED_STEAM_RUNTIME_IDS.contains(&acf.app_id)
-                || acf.name.to_lowercase().contains("proton")
-                || acf.name.to_lowercase().contains("steamworks common")
-                || acf.name.to_lowercase().contains("steam linux runtime")
-            {
-                continue;
-            }
             let install_dir = steamapps.join("common").join(&acf.install_dir_name);
             if !install_dir.is_dir() {
                 continue;
@@ -388,6 +638,9 @@ fn scan_steam_libraries() -> Vec<DiscoveredImportCandidate> {
             else {
                 continue;
             };
+            if is_non_game_or_dlc_entry(&acf.name, Some(acf.app_id), &install_dir, &exe_path) {
+                continue;
+            }
 
             let size_bytes = if acf.size_on_disk > 0 {
                 acf.size_on_disk
@@ -482,6 +735,9 @@ fn scan_epic_libraries() -> Vec<DiscoveredImportCandidate> {
         } else {
             continue;
         };
+        if is_non_game_or_dlc_entry(&title, None, &install_dir, &exe_path) {
+            continue;
+        }
         let size_bytes = if size_hint > 0 {
             size_hint
         } else {
@@ -548,8 +804,11 @@ fn scan_gog_libraries() -> Vec<DiscoveredImportCandidate> {
             let Some(exe_path) = exe_opt else {
                 continue;
             };
-            let size_bytes = crate::calculate_dir_size_sync(&install_dir);
             let title = game_name.trim().to_string();
+            if is_non_game_or_dlc_entry(&title, None, &install_dir, &exe_path) {
+                continue;
+            }
+            let size_bytes = crate::calculate_dir_size_sync(&install_dir);
             let gog_secs = gog_by_key
                 .get(&format!("gog_{}", sub.trim().to_ascii_lowercase()))
                 .or_else(|| gog_by_title.get(&normalize_title_playtime_key(&title)))
@@ -673,6 +932,9 @@ fn scan_xbox_libraries() -> Vec<DiscoveredImportCandidate> {
             let Some(exe_path) = parse_xbox_microsoftgame_config_exe(&game_dir, &title) else {
                 continue;
             };
+            if is_non_game_or_dlc_entry(&title, None, &game_dir, &exe_path) {
+                continue;
+            }
             let size_bytes = crate::calculate_dir_size_sync(&game_dir);
             out.push(DiscoveredImportCandidate {
                 title,
@@ -686,6 +948,319 @@ fn scan_xbox_libraries() -> Vec<DiscoveredImportCandidate> {
                 imported_playtime_secs: 0,
                 last_played_ts: None,
             });
+        }
+    }
+    out
+}
+
+fn scan_ubisoft_libraries() -> Vec<DiscoveredImportCandidate> {
+    let mut out = Vec::new();
+    let mut seen_dirs = std::collections::HashSet::new();
+
+    for reg_base in [
+        "SOFTWARE\\WOW6432Node\\Ubisoft\\Launcher\\Installs",
+        "SOFTWARE\\Ubisoft\\Launcher\\Installs",
+    ] {
+        for sub in duke_core::win32_ffi::reg_enum_subkeys(true, reg_base) {
+            let full_key = format!("{}\\{}", reg_base, sub);
+            let Some(raw_dir) = duke_core::win32_ffi::reg_read_string(true, &full_key, "InstallDir")
+            else {
+                continue;
+            };
+            let install_dir = PathBuf::from(raw_dir.trim().trim_matches('"').replace('/', "\\"));
+            if !install_dir.is_dir() {
+                continue;
+            }
+            let dir_key = normalize_win_path_key(&install_dir.to_string_lossy());
+            if dir_key.is_empty() || !seen_dirs.insert(dir_key) {
+                continue;
+            }
+            let uplay_uninst = format!(
+                "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Uplay Install {}",
+                sub.trim()
+            );
+            let raw_title = duke_core::win32_ffi::reg_read_string(true, &uplay_uninst, "DisplayName")
+                .or_else(|| {
+                    install_dir
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .map(crate::clean_game_title)
+                })
+                .unwrap_or_default();
+            let title = raw_title.trim().to_string();
+            if title.is_empty() {
+                continue;
+            }
+            let Some(exe_path) = detect_primary_exe_excluding_redist(&install_dir, &title) else {
+                continue;
+            };
+            if is_non_game_or_dlc_entry(&title, None, &install_dir, &exe_path) {
+                continue;
+            }
+            let size_bytes = crate::calculate_dir_size_sync(&install_dir);
+            out.push(DiscoveredImportCandidate {
+                title,
+                exe_path,
+                install_dir,
+                size_bytes,
+                steam_app_id: None,
+                source: "Ubisoft",
+                acquisition_source: "ubisoft",
+                platform: "Ubisoft Connect",
+                imported_playtime_secs: 0,
+                last_played_ts: None,
+            });
+        }
+    }
+    out
+}
+
+fn scan_ea_libraries() -> Vec<DiscoveredImportCandidate> {
+    let mut out = Vec::new();
+    let mut seen_dirs = std::collections::HashSet::new();
+
+    for reg_base in ["SOFTWARE\\WOW6432Node\\EA Games", "SOFTWARE\\EA Games"] {
+        for sub in duke_core::win32_ffi::reg_enum_subkeys(true, reg_base) {
+            let full_key = format!("{}\\{}", reg_base, sub);
+            let Some(raw_dir) = duke_core::win32_ffi::reg_read_string(true, &full_key, "Install Dir")
+            else {
+                continue;
+            };
+            let install_dir = PathBuf::from(raw_dir.trim().trim_matches('"').replace('/', "\\"));
+            if !install_dir.is_dir() {
+                continue;
+            }
+            let dir_key = normalize_win_path_key(&install_dir.to_string_lossy());
+            if dir_key.is_empty() || !seen_dirs.insert(dir_key) {
+                continue;
+            }
+            let title = duke_core::win32_ffi::reg_read_string(true, &full_key, "DisplayName")
+                .unwrap_or_else(|| sub.clone())
+                .trim()
+                .to_string();
+            if title.is_empty() {
+                continue;
+            }
+            let Some(exe_path) = detect_primary_exe_excluding_redist(&install_dir, &title) else {
+                continue;
+            };
+            if is_non_game_or_dlc_entry(&title, None, &install_dir, &exe_path) {
+                continue;
+            }
+            let size_bytes = crate::calculate_dir_size_sync(&install_dir);
+            out.push(DiscoveredImportCandidate {
+                title,
+                exe_path,
+                install_dir,
+                size_bytes,
+                steam_app_id: None,
+                source: "EA",
+                acquisition_source: "ea",
+                platform: "EA App",
+                imported_playtime_secs: 0,
+                last_played_ts: None,
+            });
+        }
+    }
+
+    for env_key in ["ProgramFiles", "ProgramFiles(x86)"] {
+        let Ok(base) = std::env::var(env_key) else {
+            continue;
+        };
+        for folder_name in ["EA Games", "Origin Games"] {
+            let root = PathBuf::from(&base).join(folder_name);
+            let Ok(rd) = fs::read_dir(&root) else {
+                continue;
+            };
+            for entry in rd.flatten() {
+                let install_dir = entry.path();
+                if !install_dir.is_dir() {
+                    continue;
+                }
+                let dir_key = normalize_win_path_key(&install_dir.to_string_lossy());
+                if dir_key.is_empty() || !seen_dirs.insert(dir_key) {
+                    continue;
+                }
+                let raw_name = entry.file_name().to_string_lossy().to_string();
+                let title = crate::clean_game_title(&raw_name);
+                let Some(exe_path) = detect_primary_exe_excluding_redist(&install_dir, &title) else {
+                    continue;
+                };
+                if is_non_game_or_dlc_entry(&title, None, &install_dir, &exe_path) {
+                    continue;
+                }
+                let size_bytes = crate::calculate_dir_size_sync(&install_dir);
+                out.push(DiscoveredImportCandidate {
+                    title,
+                    exe_path,
+                    install_dir,
+                    size_bytes,
+                    steam_app_id: None,
+                    source: "EA",
+                    acquisition_source: "ea",
+                    platform: "EA App",
+                    imported_playtime_secs: 0,
+                    last_played_ts: None,
+                });
+            }
+        }
+    }
+
+    out
+}
+
+fn scan_battlenet_libraries() -> Vec<DiscoveredImportCandidate> {
+    let mut out = Vec::new();
+    let mut seen_dirs = std::collections::HashSet::new();
+
+    for reg_base in [
+        "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+    ] {
+        for sub in duke_core::win32_ffi::reg_enum_subkeys(true, reg_base) {
+            let full_key = format!("{}\\{}", reg_base, sub);
+            let Some(publisher) = duke_core::win32_ffi::reg_read_string(true, &full_key, "Publisher")
+            else {
+                continue;
+            };
+            let pub_lower = publisher.trim().to_ascii_lowercase();
+            if !(pub_lower.contains("blizzard entertainment") || pub_lower.contains("activision")) {
+                continue;
+            }
+            let Some(display_name) =
+                duke_core::win32_ffi::reg_read_string(true, &full_key, "DisplayName")
+            else {
+                continue;
+            };
+            let title = display_name.trim().to_string();
+            if title.is_empty() || title.eq_ignore_ascii_case("battle.net") {
+                continue;
+            }
+            let Some(raw_loc) =
+                duke_core::win32_ffi::reg_read_string(true, &full_key, "InstallLocation")
+            else {
+                continue;
+            };
+            let install_dir = PathBuf::from(raw_loc.trim().trim_matches('"').replace('/', "\\"));
+            if !install_dir.is_dir() {
+                continue;
+            }
+            let dir_key = normalize_win_path_key(&install_dir.to_string_lossy());
+            if dir_key.is_empty() || !seen_dirs.insert(dir_key) {
+                continue;
+            }
+            let Some(exe_path) = detect_primary_exe_excluding_redist(&install_dir, &title) else {
+                continue;
+            };
+            if is_non_game_or_dlc_entry(&title, None, &install_dir, &exe_path) {
+                continue;
+            }
+            let size_bytes = crate::calculate_dir_size_sync(&install_dir);
+            out.push(DiscoveredImportCandidate {
+                title,
+                exe_path,
+                install_dir,
+                size_bytes,
+                steam_app_id: None,
+                source: "Battle.net",
+                acquisition_source: "battlenet",
+                platform: "Battle.net",
+                imported_playtime_secs: 0,
+                last_played_ts: None,
+            });
+        }
+    }
+    out
+}
+
+fn scan_retroarch_libraries() -> Vec<DiscoveredImportCandidate> {
+    let mut out = Vec::new();
+    let mut seen_paths = std::collections::HashSet::new();
+
+    for env_key in ["APPDATA", "LOCALAPPDATA"] {
+        let Ok(base) = std::env::var(env_key) else {
+            continue;
+        };
+        let ra_root = PathBuf::from(base).join("RetroArch");
+        let playlists_dir = ra_root.join("playlists");
+        let Ok(rd) = fs::read_dir(&playlists_dir) else {
+            continue;
+        };
+        for entry in rd.flatten().take(32) {
+            let p = entry.path();
+            if !p
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.eq_ignore_ascii_case("lpl"))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let Ok(raw) = fs::read_to_string(&p) else {
+                continue;
+            };
+            let Ok(val) = serde_json::from_str::<Value>(raw.trim_start_matches('\u{feff}')) else {
+                continue;
+            };
+            let Some(items) = val.get("items").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for item in items.iter().take(128) {
+                let raw_path = item
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .split('#')
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if raw_path.is_empty() {
+                    continue;
+                }
+                let rom_path = PathBuf::from(raw_path.replace('/', "\\"));
+                if !rom_path.is_file() {
+                    continue;
+                }
+                let path_key = normalize_win_path_key(&rom_path.to_string_lossy());
+                if path_key.is_empty() || !seen_paths.insert(path_key) {
+                    continue;
+                }
+                let label = item
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string)
+                    .or_else(|| {
+                        rom_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(crate::clean_game_title)
+                    })
+                    .unwrap_or_default();
+                if label.is_empty()
+                    || is_non_game_or_dlc_entry(&label, None, "", "retroarch_rom.exe")
+                {
+                    continue;
+                }
+                let parent_dir = rom_path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| ra_root.clone());
+                let size_bytes = fs::metadata(&rom_path).map(|m| m.len()).unwrap_or(0);
+                out.push(DiscoveredImportCandidate {
+                    title: label,
+                    exe_path: rom_path,
+                    install_dir: parent_dir,
+                    size_bytes,
+                    steam_app_id: None,
+                    source: "RetroArch",
+                    acquisition_source: "retroarch",
+                    platform: "RetroArch",
+                    imported_playtime_secs: 0,
+                    last_played_ts: None,
+                });
+            }
         }
     }
     out
@@ -711,6 +1286,11 @@ fn merge_discovered_games_into_library(
     for cand in candidates {
         let exe_str = cand.exe_path.to_string_lossy().to_string();
         let dir_str = cand.install_dir.to_string_lossy().to_string();
+        if cand.source != "RetroArch"
+            && is_non_game_or_dlc_entry(&cand.title, cand.steam_app_id, &dir_str, &exe_str)
+        {
+            continue;
+        }
         let exe_key = normalize_win_path_key(&exe_str);
         let dir_key = normalize_win_path_key(&dir_str);
 
@@ -842,6 +1422,10 @@ pub(crate) async fn import_existing_libraries_core() -> Result<ImportLibraryResu
         discovered.extend(scan_epic_libraries());
         discovered.extend(scan_gog_libraries());
         discovered.extend(scan_xbox_libraries());
+        discovered.extend(scan_ubisoft_libraries());
+        discovered.extend(scan_ea_libraries());
+        discovered.extend(scan_battlenet_libraries());
+        discovered.extend(scan_retroarch_libraries());
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1382,13 +1966,121 @@ pub(crate) async fn import_existing_libraries(
 ) -> Result<ImportLibraryResult, String> {
     use tauri::Emitter;
     let res = import_existing_libraries_core().await?;
+    let app_for_settings = app.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        let mut settings = crate::load_settings_from_disk(&app_for_settings);
+        if !settings.auto_initial_scan_done {
+            settings.auto_initial_scan_done = true;
+            let _ = crate::save_settings_to_disk(&app_for_settings, &settings);
+        }
+    })
+    .await;
     let _ = app.emit("library-updated", &res.games);
+    crate::spawn_background_missing_covers_resolver(app.clone());
     Ok(res)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filters_dlc_packs_soundtracks_and_redistributables_while_allowing_real_games() {
+        // Real games must pass (returns false)
+        assert!(!is_non_game_or_dlc_entry(
+            "ELDEN RING",
+            Some(1245620),
+            "D:\\Games\\ELDEN RING",
+            "D:\\Games\\ELDEN RING\\Game\\eldenring.exe"
+        ));
+        assert!(!is_non_game_or_dlc_entry(
+            "Ghost of Tsushima DIRECTOR'S CUT",
+            Some(2215430),
+            "D:\\Games\\Ghost of Tsushima",
+            "D:\\Games\\Ghost of Tsushima\\GhostOfTsushima.exe"
+        ));
+        assert!(!is_non_game_or_dlc_entry(
+            "Call of Duty: Black Ops 6",
+            Some(2933620),
+            "D:\\Games\\Call of Duty",
+            "D:\\Games\\Call of Duty\\cod.exe"
+        ));
+        assert!(!is_non_game_or_dlc_entry(
+            "Frostpunk 2",
+            Some(1601580),
+            "D:\\Games\\Frostpunk 2",
+            "D:\\Games\\Frostpunk 2\\Frostpunk2.exe"
+        ));
+
+        // Call of Duty / BO6 / BO7 / Modern Warfare packs must be blocked (returns true)
+        for blocked_cod in [
+            "Call of Duty: Black Ops 7 - Content Pack 1",
+            "Call of Duty: Black Ops 6 - Multiplayer Pack",
+            "Call of Duty: Modern Warfare III - Campaign Pack",
+            "Black Ops 6 Zombies Pack",
+            "Call of Duty: Warzone",
+            "Call of Duty HD Texture Pack",
+            "Black Ops 7 Shader Pack",
+            "Call of Duty: Black Ops 7 Beta Pack",
+        ] {
+            assert!(
+                is_non_game_or_dlc_entry(
+                    blocked_cod,
+                    None,
+                    "D:\\Games\\Call of Duty",
+                    "D:\\Games\\Call of Duty\\cod.exe"
+                ),
+                "Expected '{}' to be blocked as DLC/pack",
+                blocked_cod
+            );
+        }
+
+        // General non-games, soundtracks, SDKs, redistributables & helpers must be blocked
+        for (title, aid, exe) in [
+            ("Cyberpunk 2077 Original Soundtrack", None, "D:\\Games\\CP\\ost.exe"),
+            ("Hollow Knight - Official OST", None, "D:\\Games\\HK\\hk.exe"),
+            ("ELDEN RING Digital Artbook", None, "D:\\Games\\ER\\artbook.exe"),
+            ("Palworld Dedicated Server", None, "D:\\Games\\Pal\\PalServer.exe"),
+            ("Source SDK Base 2013", None, "D:\\Games\\SDK\\hl2.exe"),
+            ("Call of Duty: Black Ops III - Mod Tools", None, "D:\\Games\\BO3\\mod.exe"),
+            ("Left 4 Dead 2 Authoring Tools", None, "D:\\Games\\L4D2\\tools.exe"),
+            ("Steamworks Common Redistributables", Some(228980), "D:\\Steam\\vcredist_x64.exe"),
+            ("DirectX Redistributable", None, "D:\\Steam\\dxsetup.exe"),
+            ("NVIDIA PhysX System Software", None, "D:\\Steam\\physx.exe"),
+            ("Proton Experimental", Some(1493710), "D:\\Steam\\proton.exe"),
+            ("Steam Linux Runtime 3.0 (sniper)", Some(1628350), "D:\\Steam\\runtime.exe"),
+            ("Wallpaper Engine", Some(431960), "D:\\Steam\\wallpaper64.exe"),
+        ] {
+            assert!(
+                is_non_game_or_dlc_entry(title, aid, "D:\\Games\\Test", exe),
+                "Expected '{}' to be blocked as non-game",
+                title
+            );
+        }
+
+        // Steam .acf manifests with type = DLC / Tool / Config / Music must be rejected
+        let dlc_acf = r#"
+"AppState"
+{
+    "appid"         "3199999"
+    "name"          "Some Expansion"
+    "installdir"    "Some Expansion"
+    "type"          "DLC"
+}
+"#;
+        assert!(parse_steam_appmanifest_acf(dlc_acf).is_none());
+
+        // Real directory on disk with zero playable .exe files must be rejected
+        let empty_dir = std::env::temp_dir().join(format!("duke_empty_dlc_{}", std::process::id()));
+        let _ = fs::create_dir_all(&empty_dir);
+        assert!(is_non_game_or_dlc_entry(
+            "Valid Looking Title",
+            None,
+            &empty_dir,
+            ""
+        ));
+        let _ = fs::remove_dir_all(&empty_dir);
+    }
 
     #[test]
     fn parses_steam_libraryfolders_vdf_correctly() {

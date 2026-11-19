@@ -682,7 +682,18 @@ fn case_discord_ipc_desktop_chord_and_save_watcher(root: &Path) -> Result<String
 }
 
 fn case_redist_cleaner_cas_reclaim(root: &Path) -> Result<String, String> {
-    let game_dir = root.join("redist_game");
+    let external_root = if crate::uninstaller::is_protected_user_or_system_path(root) {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("duke_stress_redist_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).map_err(|e| e.to_string())?;
+        Some(p)
+    } else {
+        None
+    };
+    let effective_root = external_root.as_deref().unwrap_or(root);
+    let game_dir = effective_root.join("redist_game");
     let redist_dir = game_dir.join("_CommonRedist").join("vcredist");
     fs::create_dir_all(&redist_dir).map_err(|e| e.to_string())?;
     let exe_path = game_dir.join("GameMain.exe");
@@ -693,27 +704,33 @@ fn case_redist_cleaner_cas_reclaim(root: &Path) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
 
     let mut lib = vec![make_chaos_game("redist_1", "Bloat Game", &game_dir, &exe_path)];
-    let scan = crate::redist_cleaner::scan_redist_bloat_for_library(&lib, Some("redist_1"));
-    if scan.games_with_bloat != 1 || scan.total_reclaimable_bytes < 6144 {
-        return Err(format!(
-            "Redist scan missed expected bloat: games={}, bytes={}",
-            scan.games_with_bloat, scan.total_reclaimable_bytes
-        ));
-    }
+    let res = (|| -> Result<String, String> {
+        let scan = crate::redist_cleaner::scan_redist_bloat_for_library(&lib, Some("redist_1"));
+        if scan.games_with_bloat != 1 || scan.total_reclaimable_bytes < 6144 {
+            return Err(format!(
+                "Redist scan missed expected bloat: games={}, bytes={}",
+                scan.games_with_bloat, scan.total_reclaimable_bytes
+            ));
+        }
 
-    let clean = crate::redist_cleaner::clean_redist_bloat_with_cas(&mut lib, Some("redist_1"))?;
-    if !clean.errors.is_empty() {
-        return Err(format!("Redist clean errors: {:?}", clean.errors));
-    }
-    if clean.bytes_reclaimed < 6144 || clean.snapshot_ids.is_empty() || !exe_path.is_file() || redist_dir.exists() {
-        return Err("Redist clean did not safely reclaim bloat while preserving executable + .duke-cas snapshot.".to_string());
-    }
+        let clean = crate::redist_cleaner::clean_redist_bloat_with_cas(&mut lib, Some("redist_1"))?;
+        if !clean.errors.is_empty() {
+            return Err(format!("Redist clean errors: {:?}", clean.errors));
+        }
+        if clean.bytes_reclaimed < 6144 || clean.snapshot_ids.is_empty() || !exe_path.is_file() || redist_dir.exists() {
+            return Err("Redist clean did not safely reclaim bloat while preserving executable + .duke-cas snapshot.".to_string());
+        }
 
-    Ok(format!(
-        "Scanned & safely reclaimed {} ({} snapshot(s)) while keeping executable intact.",
-        clean.bytes_reclaimed_formatted,
-        clean.snapshot_ids.len()
-    ))
+        Ok(format!(
+            "Scanned & safely reclaimed {} ({} snapshot(s)) while keeping executable intact.",
+            clean.bytes_reclaimed_formatted,
+            clean.snapshot_ids.len()
+        ))
+    })();
+    if let Some(ext) = external_root {
+        let _ = fs::remove_dir_all(&ext);
+    }
+    res
 }
 
 fn case_minimize_settings_and_updater_sanity(root: &Path) -> Result<String, String> {
@@ -726,7 +743,7 @@ fn case_minimize_settings_and_updater_sanity(root: &Path) -> Result<String, Stri
     }
 
     let sample_path = root.join("updater_sample.bin");
-    fs::write(&sample_path, b"duke-v2.3.1-binary-payload").map_err(|e| e.to_string())?;
+    fs::write(&sample_path, b"duke-v2.3.2-binary-payload").map_err(|e| e.to_string())?;
     let mismatch = crate::updater::verify_file_sha256_streaming(
         &sample_path,
         "0000000000000000000000000000000000000000000000000000000000000000",
@@ -734,10 +751,10 @@ fn case_minimize_settings_and_updater_sanity(root: &Path) -> Result<String, Stri
     if mismatch.is_ok() {
         return Err("Updater SHA-256 verification accepted a mismatched digest.".to_string());
     }
-    if !crate::updater::is_newer_version("2.3.0", "v2.3.1")
-        || crate::updater::is_newer_version("2.3.1", "v2.3.1")
+    if !crate::updater::is_newer_version("2.3.1", "v2.3.2")
+        || crate::updater::is_newer_version("2.3.2", "v2.3.2")
     {
-        return Err("Updater SemVer comparison failed v2.3.1 check.".to_string());
+        return Err("Updater SemVer comparison failed v2.3.2 check.".to_string());
     }
 
     Ok("Opt-in tray defaults (false/false), auto-check updates (true), SemVer, and SHA-256 rejection verified.".to_string())
@@ -864,8 +881,8 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
         .map_err(|e| format!("Failed reading tauri.conf.json: {e}"))?;
 
     // 1. Version & Window Safety Checks
-    if !index_html.contains("2.3.1") || !tauri_conf.contains("\"2.3.1\"") {
-        return Err("Expected v2.3.1 marker missing in index.html or tauri.conf.json.".to_string());
+    if !index_html.contains("2.3.2") || !tauri_conf.contains("\"2.3.2\"") {
+        return Err("Expected v2.3.2 marker missing in index.html or tauri.conf.json.".to_string());
     }
 
     let default_sites = crate::sites::default_search_sites();
@@ -1020,10 +1037,49 @@ pub fn verify_frontend_views_themes_and_ipc() -> Result<String, String> {
     }
 
     Ok(format!(
-        "Verified v2.3.1: 6 views, 10 modals, 10 themes, VirtualCardGrid, {} SVG symbols, {} DOM IDs checked, {} IPC commands registered.",
+        "Verified v2.3.2: 6 views, 10 modals, 10 themes, VirtualCardGrid, {} SVG symbols, {} DOM IDs checked, {} IPC commands registered.",
         symbol_ids.len(),
         html_ids.len(),
         invoke_cmds.len()
+    ))
+}
+
+fn case_filesystem_safety_protected_paths() -> Result<String, String> {
+    let user_root = PathBuf::from("C:\\").join("Users").join("Player");
+    let public_desktop = PathBuf::from("C:\\").join("Users").join("Public").join("Desktop");
+    let must_reject = vec![
+        PathBuf::from("C:\\"),
+        PathBuf::from("D:\\"),
+        user_root.clone(),
+        user_root.join("Desktop"),
+        user_root.join("Desktop").join("Game.lnk"),
+        public_desktop,
+        user_root.join("Downloads"),
+        user_root.join("Documents"),
+        user_root.join("AppData").join("Roaming"),
+        user_root.join("AppData").join("Local").join("ModrinthApp"),
+        PathBuf::from("C:\\Program Files (x86)\\Steam\\steamapps\\common"),
+        PathBuf::from("C:\\Program Files\\Epic Games"),
+        PathBuf::from("D:\\XboxGames"),
+        PathBuf::from("D:\\Emulators\\RetroArch"),
+    ];
+    for p in &must_reject {
+        if !crate::uninstaller::is_protected_user_or_system_path(p) {
+            return Err(format!(
+                "is_protected_user_or_system_path failed to reject protected path '{}'",
+                p.display()
+            ));
+        }
+        if crate::uninstaller::clean_uninstall_in_dirs(p, &[], None).is_ok() {
+            return Err(format!(
+                "clean_uninstall_in_dirs unexpectedly allowed protected path '{}'",
+                p.display()
+            ));
+        }
+    }
+    Ok(format!(
+        "Protected-path guard rejected all {} critical drive/user/launcher roots cleanly.",
+        must_reject.len()
     ))
 }
 
@@ -1104,6 +1160,10 @@ pub fn run_chaos_stress_harness_sync(check_ui_contract: bool) -> StressHarnessRe
         run_case("steam_mini_profile_and_app_system_features", || {
             case_steam_mini_profile_and_app_system(&temp_root)
         }),
+        run_case(
+            "filesystem_safety_protected_path_guards",
+            case_filesystem_safety_protected_paths,
+        ),
     ];
 
     if check_ui_contract {
@@ -1176,6 +1236,6 @@ mod tests {
             );
         }
         assert_eq!(report.failed_cases, 0);
-        assert_eq!(report.passed_cases, 18);
+        assert_eq!(report.passed_cases, 19);
     }
 }

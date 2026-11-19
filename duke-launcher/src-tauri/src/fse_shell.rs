@@ -14,7 +14,7 @@ use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 use crate::{atomic_write_string, get_app_data_file_standalone};
 
@@ -371,7 +371,7 @@ pub fn apply_fse_boot_sequence_if_enabled(app: &AppHandle) {
                 let _ = save_state_disk(&st);
             }
             let status = build_status_from_state(&st);
-            let _ = app_c.emit("fse-shell-updated", &status);
+            crate::emit_if_alive(&app_c, "fse-shell-updated", &status);
         })
         .ok();
 }
@@ -416,7 +416,7 @@ pub async fn set_fse_gaming_home(
         settings.couch_mode = true;
         let _ = crate::save_settings_to_disk(&app, &settings);
         let couch = crate::couch_mode::current_couch_status(true);
-        let _ = app.emit("couch-mode-toggled", &couch);
+        crate::emit_if_alive(&app, "couch-mode-toggled", &couch);
     } else {
         let resume_report = resume_bloat_processes_internal(&mut st);
         st.status_summary = format!("Desktop mode restored · {}", resume_report.message);
@@ -424,7 +424,7 @@ pub async fn set_fse_gaming_home(
 
     save_state_disk(&st)?;
     let status = build_status_from_state(&st);
-    let _ = app.emit("fse-shell-updated", &status);
+    crate::emit_if_alive(&app, "fse-shell-updated", &status);
     Ok(status)
 }
 
@@ -435,7 +435,7 @@ pub async fn suspend_windows_bloat_now(app: AppHandle) -> Result<FseBloatActionR
     st.last_applied_ts = now_unix_secs();
     st.status_summary = report.message.clone();
     save_state_disk(&st)?;
-    let _ = app.emit("fse-shell-updated", &build_status_from_state(&st));
+    crate::emit_if_alive(&app, "fse-shell-updated", &build_status_from_state(&st));
     Ok(report)
 }
 
@@ -446,7 +446,7 @@ pub async fn resume_windows_bloat_now(app: AppHandle) -> Result<FseBloatActionRe
     st.last_applied_ts = now_unix_secs();
     st.status_summary = report.message.clone();
     save_state_disk(&st)?;
-    let _ = app.emit("fse-shell-updated", &build_status_from_state(&st));
+    crate::emit_if_alive(&app, "fse-shell-updated", &build_status_from_state(&st));
     Ok(report)
 }
 

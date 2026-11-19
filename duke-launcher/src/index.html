@@ -73,6 +73,8 @@
     <symbol id="icon-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
     <symbol id="icon-wifi-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h.01"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/><path d="M5 12.859a10 10 0 0 1 5.17-2.69"/><path d="M19 12.859a10 10 0 0 0-2.007-1.523"/><path d="M2 8.82a15 15 0 0 1 4.177-2.643"/><path d="M22 8.82a15 15 0 0 0-11.288-3.764"/><path d="m2 2 20 20"/></symbol>
     <symbol id="icon-shield-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/></symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></symbol>
+    <symbol id="icon-check-square" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></symbol>
   </svg>
 
   <div class="window-shell">
@@ -84,7 +86,7 @@
         </button>
         <img src="assets/dukeflaglogo.png" alt="Duke Launcher" class="titlebar-emblem" />
         <span class="titlebar-title">Duke Launcher</span>
-        <span class="titlebar-version mono-num" id="app-version-pill">v2.3.1</span>
+        <span class="titlebar-version mono-num" id="app-version-pill">v2.3.2</span>
       </div>
 
       <div class="titlebar-center">
@@ -465,9 +467,17 @@
               <svg class="icon" aria-hidden="true"><use href="#icon-clock"/></svg>
               <span>Sync Playtime</span>
             </button>
-            <button type="button" class="btn btn-secondary btn-sm" id="btn-import-libraries" title="Scan Steam, Epic, GOG, and Xbox Game Pass libraries">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-import-libraries" title="Scan Steam, Epic, GOG, Xbox, Ubisoft, EA, Battle.net &amp; RetroArch libraries">
               <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
               <span>Import Libraries</span>
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-purge-non-games" title="Remove DLC packs, soundtracks, redistributables, and non-game tools from My Games">
+              <svg class="icon" aria-hidden="true"><use href="#icon-shield-check"/></svg>
+              <span>Clean Non-Games / DLCs</span>
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-toggle-select-mode" title="Toggle multi-select mode (Ctrl+Click, Shift+Click, Ctrl+A)">
+              <svg class="icon" aria-hidden="true"><use href="#icon-check-square"/></svg>
+              <span>Select</span>
             </button>
             <label for="sort-select" class="sort-label">Sort</label>
             <select id="sort-select" class="select-control">
@@ -532,7 +542,7 @@
                     <svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg>
                   </div>
                   <h3>Add a Game Folder or .exe</h3>
-                  <p>Drag any game from your Desktop here to clean up clutter.</p>
+                  <p>Drop a game folder or executable here to add it to your library.</p>
                   <div class="empty-card-actions">
                     <button type="button" class="btn btn-primary btn-sm" id="btn-empty-add-folder">
                       <svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg>
@@ -547,6 +557,39 @@
               </div>
             </div>
             <div class="library-grid" id="library-grid"></div>
+
+            <!-- Floating Multi-Select Bulk Action Bar -->
+            <div class="library-multiselect-bar hidden" id="library-multiselect-bar" role="region" aria-label="Selected Games Bulk Actions">
+              <div class="multiselect-bar-left">
+                <span class="multiselect-count-pill mono-num" id="multiselect-count-label">0 selected</span>
+                <button type="button" class="btn btn-secondary btn-xs" id="btn-multiselect-all" title="Select all visible games (Ctrl+A)">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-check-square"/></svg>
+                  <span>Select All</span>
+                </button>
+                <button type="button" class="btn btn-secondary btn-xs" id="btn-multiselect-clear" title="Clear selection (Esc)">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg>
+                  <span>Clear</span>
+                </button>
+              </div>
+              <div class="multiselect-bar-actions">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-multiselect-covers" title="Fetch high-res box art for selected games">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg>
+                  <span>Fetch Covers</span>
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-multiselect-backup" title="Create save backup archives (.zip) for selected games">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-archive"/></svg>
+                  <span>Backup Saves</span>
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-multiselect-fav" title="Toggle Favorite status on selected games">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-pin"/></svg>
+                  <span>Toggle Favorite</span>
+                </button>
+                <button type="button" class="btn btn-danger btn-sm" id="btn-multiselect-delete" title="Remove selected games from Launcher (files stay on disk by default)">
+                  <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
+                  <span>Remove Selected</span>
+                </button>
+              </div>
+            </div>
           </section>
 
           <!-- SINGLE GAME STEAM-STYLE DETAIL VIEW -->
@@ -696,7 +739,7 @@
                   <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
                   <span>Remove</span>
                 </button>
-                <button type="button" class="btn btn-danger-ghost btn-sm" id="btn-detail-clean-uninstall" title="Deep Clean Uninstall + optional <5 MB Zstd Save Backup + AppData &amp; Registry Cleanup">
+                <button type="button" class="btn btn-danger-ghost btn-sm" id="btn-detail-clean-uninstall" title="Safe Dedicated-Folder Uninstall + optional <5 MB Zstd Save Backup">
                   <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
                   <span>Clean Uninstall</span>
                 </button>
@@ -2175,26 +2218,11 @@
                 </label>
               </div>
 
-              <!-- 6. Clean Up Desktop -->
-              <div class="panel-card">
-                <div class="panel-head">
-                  <div>
-                    <h3>6. Clean Up Desktop</h3>
-                    <p class="panel-sub">Finds game shortcuts on your Desktop, adds them to Duke Launcher, and moves clutter into a backup folder.</p>
-                  </div>
-                  <button type="button" class="btn btn-primary btn-sm" id="btn-clean-desktop-shortcuts">
-                    <svg class="icon" aria-hidden="true"><use href="#icon-sparkles"/></svg>
-                    <span>Clean Up Desktop</span>
-                  </button>
-                </div>
-                <div id="desktop-cleanup-summary" class="detail-autofix-summary hidden" role="status"></div>
-              </div>
-
-              <!-- 7. Window, Startup & System Integration -->
+              <!-- 6. Window, Startup & System Integration -->
               <div class="panel-card" id="settings-tray-card">
                 <div class="panel-head">
                   <div>
-                    <h3>7. Window, Startup &amp; System Integration</h3>
+                    <h3>6. Window, Startup &amp; System Integration</h3>
                     <p class="panel-sub">Configure Windows startup behavior, system tray minimize/close rules, Desktop &amp; Start Menu shortcuts, and redacted bug-report bundles.</p>
                   </div>
                 </div>
@@ -2281,7 +2309,7 @@
                 <div class="update-meta-grid">
                   <div class="update-meta-tile">
                     <span class="detail-metric-label">Current Version</span>
-                    <strong class="detail-metric-val mono-num" id="settings-update-current-version">v2.3.0</strong>
+                    <strong class="detail-metric-val mono-num" id="settings-update-current-version">v2.3.2</strong>
                   </div>
                   <div class="update-meta-tile">
                     <span class="detail-metric-label">Latest Release</span>
@@ -3639,7 +3667,7 @@
     </div>
   </div>
 
-  <!-- MODAL: DEEP CLEAN GAME UNINSTALL & ORPHAN APPDATA SWEEPER -->
+  <!-- MODAL: SAFE DEDICATED-FOLDER GAME UNINSTALL -->
   <div id="clean-uninstall-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="clean-uninstall-title">
     <div class="modal-card modal-card-narrow">
       <div class="modal-head">
@@ -3649,7 +3677,7 @@
         </button>
       </div>
       <div class="modal-body">
-        <p class="panel-sub" id="uninstall-modal-summary">Inspecting game directory, saves &amp; orphaned AppData traces...</p>
+        <p class="panel-sub" id="uninstall-modal-summary">Inspecting dedicated game folder, saves &amp; HKCU registry traces...</p>
         <div id="uninstall-modal-paths" class="kv-rows mono-num"></div>
         <label class="setting-toggle-row" for="chk-uninstall-keep-saves">
           <div class="setting-toggle-copy">
@@ -3657,13 +3685,6 @@
             <div class="setting-toggle-desc">Archives discovered saves into a compact &lt;5 MB Zstd bundle in Duke_Save_Backups before deleting.</div>
           </div>
           <input type="checkbox" id="chk-uninstall-keep-saves" class="setting-checkbox" checked />
-        </label>
-        <label class="setting-toggle-row" for="chk-uninstall-orphans">
-          <div class="setting-toggle-copy">
-            <div class="setting-toggle-title">Sweep Orphaned AppData &amp; Registry Keys</div>
-            <div class="setting-toggle-desc">Removes leftover LocalAppData/My Games folders, dead HKCU Uninstall keys, UserGpuPreferences &amp; firewall locks.</div>
-          </div>
-          <input type="checkbox" id="chk-uninstall-orphans" class="setting-checkbox" checked />
         </label>
       </div>
       <div class="modal-foot">
@@ -4066,6 +4087,46 @@
         <button type="button" class="btn btn-secondary btn-sm" id="btn-vkb-space">Space</button>
         <button type="button" class="btn btn-secondary btn-sm" id="btn-vkb-backspace">Backspace</button>
         <button type="button" class="btn btn-primary btn-sm" id="btn-vkb-done">Done &amp; Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Batch Delete / Uninstall Confirmation Modal -->
+  <div id="batch-delete-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="batch-delete-modal-title">
+    <div class="modal-card batch-delete-modal-card">
+      <div class="modal-head">
+        <div class="modal-title-wrap">
+          <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
+          <h3 id="batch-delete-modal-title">Delete Selected Games</h3>
+        </div>
+        <button type="button" class="icon-btn" id="btn-close-batch-delete-modal" aria-label="Close">
+          <svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p class="panel-sub" id="batch-delete-modal-summary">Choose how to handle the selected games:</p>
+        <div class="batch-delete-preview-list mono-num" id="batch-delete-preview-list"></div>
+        <div class="batch-delete-options-grid">
+          <div class="batch-delete-option-card">
+            <h4>Remove from Launcher</h4>
+            <p>Unlinks selected titles from My Games immediately while leaving all game files and saves untouched on disk.</p>
+            <button type="button" class="btn btn-primary btn-sm" id="btn-batch-remove-only">
+              <svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg>
+              <span>Remove from Launcher</span>
+            </button>
+          </div>
+          <div class="batch-delete-option-card batch-delete-option-danger">
+            <h4>Uninstall &amp; Delete Files</h4>
+            <p>Automatically backs up saves into a compact &lt;5 MB Zstd archive, then removes only validated dedicated single-game folders (protected or shared folders are left untouched).</p>
+            <button type="button" class="btn btn-danger btn-sm" id="btn-batch-uninstall-files">
+              <svg class="icon" aria-hidden="true"><use href="#icon-trash-2"/></svg>
+              <span>Uninstall &amp; Delete Files</span>
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-batch-delete-cancel">Cancel</button>
       </div>
     </div>
   </div>

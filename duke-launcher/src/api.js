@@ -178,7 +178,13 @@ export async function updateLauncherSettings(patch = {}) {
     launchOnStartup:
       typeof patch.launchOnStartup === "boolean" ? patch.launchOnStartup : null,
     startMinimizedToTray:
-      typeof patch.startMinimizedToTray === "boolean" ? patch.startMinimizedToTray : null
+      typeof patch.startMinimizedToTray === "boolean" ? patch.startMinimizedToTray : null,
+    autoInitialScanDone:
+      typeof patch.autoInitialScanDone === "boolean" ? patch.autoInitialScanDone : null,
+    librarySort:
+      typeof patch.librarySort === "string" ? patch.librarySort : null,
+    libraryFilter:
+      typeof patch.libraryFilter === "string" ? patch.libraryFilter : null
   });
 }
 
@@ -394,6 +400,36 @@ export async function restoreGameSave(gameId, backupPath) {
 
 export async function importExistingLibraries() {
   return invokeCommand("import_existing_libraries");
+}
+
+export async function purgeNonGameEntries() {
+  return invokeCommand("purge_non_game_entries");
+}
+
+export async function batchRemoveGames(gameIds = [], deleteFiles = false) {
+  return invokeCommand("batch_remove_games", {
+    gameIds: Array.isArray(gameIds) ? gameIds : [],
+    deleteFiles: Boolean(deleteFiles)
+  });
+}
+
+export async function batchFetchCovers(gameIds = []) {
+  return invokeCommand("batch_fetch_covers", {
+    gameIds: Array.isArray(gameIds) ? gameIds : []
+  });
+}
+
+export async function batchBackupSaves(gameIds = []) {
+  return invokeCommand("batch_backup_saves", {
+    gameIds: Array.isArray(gameIds) ? gameIds : []
+  });
+}
+
+export async function batchToggleFavorite(gameIds = [], favorite = null) {
+  return invokeCommand("batch_toggle_favorite", {
+    gameIds: Array.isArray(gameIds) ? gameIds : [],
+    favorite: typeof favorite === "boolean" ? favorite : null
+  });
 }
 
 export async function searchSteamGridDbArtwork(queryOrAppId) {
@@ -1951,11 +1987,11 @@ export async function previewCleanUninstall(gameId) {
   return invokeCommand("preview_clean_uninstall", { gameId: String(gameId || "") });
 }
 
-export async function executeCleanUninstall(gameId, keepSavesZstd = true, removeOrphans = true) {
+export async function executeCleanUninstall(gameId, keepSavesZstd = true, exeOnlyFallback = false) {
   return invokeCommand("execute_clean_uninstall", {
     gameId: String(gameId || ""),
     keepSavesZstd: Boolean(keepSavesZstd),
-    removeOrphans: Boolean(removeOrphans)
+    exeOnlyFallback: Boolean(exeOnlyFallback)
   });
 }
 

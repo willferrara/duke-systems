@@ -473,6 +473,20 @@ pub struct LauncherSettings {
     pub window_y: Option<i32>,
     #[serde(default, alias = "windowMaximized", alias = "window_maximized")]
     pub window_maximized: bool,
+    #[serde(default, alias = "autoInitialScanDone", alias = "auto_initial_scan_done")]
+    pub auto_initial_scan_done: bool,
+    #[serde(default = "default_library_sort", alias = "librarySort", alias = "library_sort")]
+    pub library_sort: String,
+    #[serde(default = "default_library_filter", alias = "libraryFilter", alias = "library_filter")]
+    pub library_filter: String,
+}
+
+pub(crate) fn default_library_sort() -> String {
+    "recent".to_string()
+}
+
+pub(crate) fn default_library_filter() -> String {
+    "all".to_string()
 }
 
 pub(crate) fn default_disk_pressure_gb() -> f64 {
@@ -626,6 +640,9 @@ impl Default for LauncherSettings {
             window_x: None,
             window_y: None,
             window_maximized: false,
+            auto_initial_scan_done: false,
+            library_sort: default_library_sort(),
+            library_filter: default_library_filter(),
         }
     }
 }
@@ -820,6 +837,9 @@ pub(crate) async fn update_launcher_settings(
     auto_check_updates: Option<bool>,
     launch_on_startup: Option<bool>,
     start_minimized_to_tray: Option<bool>,
+    auto_initial_scan_done: Option<bool>,
+    library_sort: Option<String>,
+    library_filter: Option<String>,
 ) -> Result<LauncherSettings, String> {
     let app_for_save = app.clone();
     let autostart_change = start_minimized_with_windows;
@@ -1036,6 +1056,24 @@ pub(crate) async fn update_launcher_settings(
         }
         if let Some(auto_chk) = auto_check_updates {
             current.auto_check_updates = auto_chk;
+        }
+        if let Some(scan_done) = auto_initial_scan_done {
+            current.auto_initial_scan_done = scan_done;
+        }
+        if let Some(sort_val) = library_sort {
+            let clean = sort_val.trim().to_ascii_lowercase();
+            if matches!(
+                clean.as_str(),
+                "recent" | "alpha" | "size" | "playtime" | "price"
+            ) {
+                current.library_sort = clean;
+            }
+        }
+        if let Some(filter_val) = library_filter {
+            let clean = filter_val.trim().to_ascii_lowercase();
+            if !clean.is_empty() && clean.len() <= 32 {
+                current.library_filter = clean;
+            }
         }
         let mut startup_dirty = false;
         if let Some(launch_startup) = launch_on_startup {
@@ -3477,7 +3515,10 @@ impl DukeProfilePreserveGuard {
         let backup = game_dir.join(".duke-profile-preserve-tmp");
         let mut moved = false;
         if profile.is_dir() {
-            if backup.exists() {
+            if backup.exists()
+                && !crate::uninstaller::is_protected_user_or_system_path(game_dir)
+                && !crate::uninstaller::is_protected_user_or_system_path(&backup)
+            {
                 let _ = fs::remove_dir_all(&backup);
             }
             fs::rename(&profile, &backup)
@@ -3496,7 +3537,10 @@ impl Drop for DukeProfilePreserveGuard {
     fn drop(&mut self) {
         if self.moved && self.backup_dir.is_dir() {
             let profile = self.game_dir.join(".duke-profile");
-            if profile.exists() {
+            if profile.exists()
+                && !crate::uninstaller::is_protected_user_or_system_path(&self.game_dir)
+                && !crate::uninstaller::is_protected_user_or_system_path(&profile)
+            {
                 let _ = fs::remove_dir_all(&profile);
             }
             let _ = fs::rename(&self.backup_dir, &profile);
@@ -3717,11 +3761,19 @@ pub(crate) async fn apply_game_update(
             method_used = format!("Archive Overlay (.{ext})");
         }
     } else {
-        let _ = fs::remove_dir_all(&tmp_dir);
+        if !crate::uninstaller::is_protected_user_or_system_path(&game_dir)
+            && !crate::uninstaller::is_protected_user_or_system_path(&tmp_dir)
+        {
+            let _ = fs::remove_dir_all(&tmp_dir);
+        }
         return Err("Update feed specifies neither a FastCDC deltaUrl nor an archiveUrl.".to_string());
     }
 
-    let _ = fs::remove_dir_all(&tmp_dir);
+    if !crate::uninstaller::is_protected_user_or_system_path(&game_dir)
+        && !crate::uninstaller::is_protected_user_or_system_path(&tmp_dir)
+    {
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
 
     let dir_for_size = game_dir.clone();
     let new_size = tokio::task::spawn_blocking(move || calculate_dir_size_sync(&dir_for_size))
@@ -5430,11 +5482,22 @@ pub(crate) mod tests {
         create_test_lnk(&browser_lnk, &browser_exe, "", &game_dir);
 
         let resolved = resolve_lnk_shortcut(&game_lnk).expect("IShellLinkW should resolve .lnk");
-        assert!(resolved.target_exe.eq_ignore_ascii_case(&game_exe.to_string_lossy()));
-        assert_eq!(resolved.arguments.as_deref(), Some("-novid -windowed"));
+        let canon_resolved = fs::canonicalize(&resolved.target_exe)
+            .unwrap_or_else(|_| PathBuf::from(&resolved.target_exe));
+        let canon_expected = fs::canonicalize(&game_exe).unwrap_or_else(|_| game_exe.clone());
         assert_eq!(
-            resolved.working_dir.as_deref(),
-            Some(game_dir.to_string_lossy().as_ref())
+            canon_resolved.to_string_lossy().to_ascii_lowercase(),
+            canon_expected.to_string_lossy().to_ascii_lowercase()
+        );
+        assert_eq!(resolved.arguments.as_deref(), Some("-novid -windowed"));
+        let canon_workdir = resolved
+            .working_dir
+            .as_deref()
+            .map(|w| fs::canonicalize(w).unwrap_or_else(|_| PathBuf::from(w)));
+        let canon_game_dir = fs::canonicalize(&game_dir).unwrap_or_else(|_| game_dir.clone());
+        assert_eq!(
+            canon_workdir.map(|p| p.to_string_lossy().to_ascii_lowercase()),
+            Some(canon_game_dir.to_string_lossy().to_ascii_lowercase())
         );
 
         let (scanned, skipped_non_game, candidates) =
@@ -5444,12 +5507,37 @@ pub(crate) mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].title, "Space Quest");
 
-        let moved = move_file_with_unique_name(&candidates[0].lnk_path, &backup_dir).unwrap();
-        assert!(moved.is_file());
-        assert!(!game_lnk.exists());
-        assert!(browser_lnk.exists());
+        // Protected-path guard must strictly refuse moving or deleting Desktop shortcuts.
+        let moved_res = move_file_with_unique_name(&candidates[0].lnk_path, &backup_dir);
+        assert!(
+            moved_res.is_err(),
+            "Desktop shortcut move/delete must be refused by is_protected_user_or_system_path"
+        );
+        assert!(game_lnk.exists(), "Desktop .lnk must remain untouched");
+        assert!(browser_lnk.exists(), "Non-game Desktop .lnk must remain untouched");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_protected_path_guard_blocks_desktop_appdata_and_launcher_roots() {
+        let user_root = PathBuf::from("C:\\").join("Users").join("Player");
+        for p in [
+            PathBuf::from("C:\\"),
+            PathBuf::from("D:\\"),
+            user_root.join("Desktop"),
+            user_root.join("Downloads"),
+            user_root.join("Documents"),
+            user_root.join("AppData").join("Roaming"),
+            user_root.join("AppData").join("Local").join("ModrinthApp"),
+            PathBuf::from("C:\\Program Files (x86)\\Steam\\steamapps\\common"),
+        ] {
+            assert!(
+                crate::uninstaller::is_protected_user_or_system_path(&p),
+                "Expected protected path to be rejected: {}",
+                p.display()
+            );
+        }
     }
 
     #[test]

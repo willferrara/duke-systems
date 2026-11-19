@@ -135,12 +135,44 @@ export class VirtualCardGrid {
 
   patchMatched(predicate) {
     if (!this.isGridVisible() || this._emptyMessageActive) return false;
+    this._dataVersion += 1;
     let patched = 0;
     for (const [idx, cardEl] of this._mounted.entries()) {
       const item = this.getItem(idx);
       if (!item || (predicate && !predicate(item, cardEl, idx))) continue;
       this.updateCard(cardEl, item, idx, false);
       cardEl._vgItem = item;
+      cardEl._vgVersion = this._dataVersion;
+      patched += 1;
+    }
+    return patched > 0;
+  }
+
+  patchCardCover(gameId, liveCoverSrc, rawCoverPath = null) {
+    if (!gameId || !liveCoverSrc) return false;
+    this._dataVersion += 1;
+    let patched = 0;
+    const idStr = String(gameId);
+    for (const [idx, cardEl] of this._mounted.entries()) {
+      const item = this.getItem(idx) || cardEl._vgItem;
+      const cardGid = String(cardEl.dataset?.gameId || item?.id || item?.appId || "");
+      if (cardGid !== idStr && `retro_${item?.appId || ""}` !== idStr) continue;
+      if (item && rawCoverPath) {
+        item.coverUrl = rawCoverPath;
+        item._coverBustRaw = rawCoverPath;
+        item._coverBustUrl = liveCoverSrc;
+      }
+      const imgEl = cardEl._vgRefs?.imgEl || cardEl.querySelector("img.game-card-img, img");
+      const mediaEl = cardEl._vgRefs?.mediaEl || cardEl.querySelector(".game-card-media");
+      if (mediaEl) {
+        mediaEl.querySelector(".cover-fallback-card")?.remove();
+      }
+      cardEl._vgProcKey = "";
+      if (imgEl) {
+        imgEl.style.display = "";
+        imgEl.dataset.coverSrc = liveCoverSrc;
+        imgEl.src = liveCoverSrc;
+      }
       cardEl._vgVersion = this._dataVersion;
       patched += 1;
     }

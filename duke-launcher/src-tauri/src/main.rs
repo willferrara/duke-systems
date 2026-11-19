@@ -91,6 +91,7 @@ pub(crate) use cmd_library::{
     load_library_standalone, normalize_game_entry, resolve_data_root_dir,
     resolve_data_root_dir_standalone, resolve_game_root_dir, resolve_portable_data_dir,
     save_library_standalone, save_library_to_disk, smart_find_game_cover,
+    spawn_background_missing_covers_resolver, spawn_initial_library_auto_scan_if_needed,
     spawn_startup_turbo_price_resolution, CatalogCacheFile, CatalogGameEntry, GameEntry,
 };
 #[allow(unused_imports)]
@@ -285,6 +286,18 @@ fn main() {
 
             // Resolve missing retail prices for `turbo_downloader` games non-blockingly (`catalog.dkcat` -> DoH).
             spawn_startup_turbo_price_resolution(app.handle().clone());
+
+            // Automatic first-boot library discovery across Steam, Xbox, Epic, GOG, Ubisoft, EA, Battle.net & RetroArch
+            spawn_initial_library_auto_scan_if_needed(app.handle().clone());
+
+            // Automatically enqueue all games missing local cover files 1.5s after boot
+            let cover_boot_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                if !is_shutting_down() {
+                    spawn_background_missing_covers_resolver(cover_boot_app);
+                }
+            });
 
             // Start XInput Guide button (`0x0400`) + global `Alt+G` hotkey listener for quick overlay HUD.
             spawn_overlay_trigger_watcher(app.handle().clone());
@@ -629,6 +642,11 @@ fn main() {
             cmd_library::get_steam_mini_profile,
             cmd_library::set_steam_profile_override,
             cmd_library::save_steam_id_override,
+            cmd_library::purge_non_game_entries,
+            cmd_library::batch_remove_games,
+            cmd_library::batch_fetch_covers,
+            cmd_library::batch_backup_saves,
+            cmd_library::batch_toggle_favorite,
             cmd_system::get_app_system_status,
             cmd_system::configure_startup_and_tray,
             cmd_system::create_app_shortcuts_and_register_protocol,

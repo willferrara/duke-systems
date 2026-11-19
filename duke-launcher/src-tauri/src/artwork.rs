@@ -445,6 +445,8 @@ pub(crate) async fn apply_custom_artwork(
             &app,
             "cover-updated",
             serde_json::json!({
+                "id": &updated_entry.id,
+                "coverPath": &updated_entry.cover_url,
                 "gameId": &updated_entry.id,
                 "coverUrl": &updated_entry.cover_url,
             }),
@@ -1721,7 +1723,9 @@ pub(crate) async fn resolve_catalog_cover(
                 &app,
                 "cover-updated",
                 serde_json::json!({
-                    "gameId": req.cache_id,
+                    "id": &req.cache_id,
+                    "coverPath": &cover_path_str,
+                    "gameId": &req.cache_id,
                     "coverUrl": &cover_path_str,
                 }),
             );
@@ -1785,6 +1789,219 @@ pub(crate) async fn search_web_covers_for_game(
 
     duke_core::win32_ffi::trim_current_working_set();
     Ok(out.into_iter().take(18).collect())
+}
+
+static IN_FLIGHT_COVER_IDS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+fn in_flight_cover_set() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    IN_FLIGHT_COVER_IDS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+pub(crate) fn has_local_cover_file(entry: &crate::GameEntry, _covers_dir: &Path) -> bool {
+    let trimmed = entry.cover_url.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("data:")
+        || trimmed.starts_with("cover-cache://")
+    {
+        return false;
+    }
+    let p = Path::new(trimmed);
+    p.is_file() && std::fs::metadata(p).map(|m| m.len() >= 512).unwrap_or(false)
+}
+
+/// Spawns a non-blocking 4-worker concurrent background cover resolver over the pooled `net_engine`
+/// HTTP/2 client, emitting `"cover-updated"` (`{ id, coverPath }`) immediately as each individual
+/// game's cover finishes downloading.
+pub(crate) fn spawn_background_cover_worker_pool(
+    app: AppHandle,
+    filter_ids: Option<Vec<String>>,
+) {
+    tauri::async_runtime::spawn(async move {
+        if crate::is_shutting_down() {
+            return;
+        }
+        let Ok(covers_dir) = crate::get_covers_dir(&app) else {
+            return;
+        };
+        let Ok(icons_dir) = crate::sidebar_icons::get_sidebar_icons_dir(&app) else {
+            return;
+        };
+        let app_load = app.clone();
+        let covers_check = covers_dir.clone();
+        let filter_set: Option<std::collections::HashSet<String>> =
+            filter_ids.map(|v| v.into_iter().collect());
+        let force_refetch = filter_set.is_some();
+
+        let (candidates, api_key) = match tokio::task::spawn_blocking(move || {
+            let lib = crate::load_library_from_disk(&app_load).unwrap_or_default();
+            let key = crate::load_settings_from_disk(&app_load)
+                .steamgriddb_api_key
+                .unwrap_or_default();
+            let mut to_resolve = Vec::new();
+            let mut guard = in_flight_cover_set()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            for entry in lib {
+                if let Some(ref fset) = filter_set {
+                    if !fset.contains(&entry.id) {
+                        continue;
+                    }
+                } else if has_local_cover_file(&entry, &covers_check) {
+                    continue;
+                }
+                if guard.insert(entry.id.clone()) {
+                    to_resolve.push(entry);
+                }
+            }
+            (to_resolve, key)
+        })
+        .await
+        {
+            Ok(pair) => pair,
+            Err(_) => return,
+        };
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+        let mut join_set = tokio::task::JoinSet::new();
+
+        for entry_c in candidates {
+            let covers_c = covers_dir.clone();
+            let icons_c = icons_dir.clone();
+            let sem_c = sem.clone();
+            let key_c = api_key.clone();
+
+            join_set.spawn(async move {
+                let gid = entry_c.id.clone();
+                let _permit = sem_c.acquire_owned().await.ok();
+                if crate::is_shutting_down() {
+                    return (gid, None);
+                }
+                if force_refetch {
+                    clear_cached_cover_for_id(&covers_c, &gid);
+                }
+                let (inferred_pid, plat_hint) = infer_game_platform_hint(
+                    &entry_c.title,
+                    &entry_c.exe_path,
+                    &entry_c.genre,
+                    &entry_c.source,
+                );
+                let eff_pid = (entry_c.platform_id > 0)
+                    .then_some(entry_c.platform_id)
+                    .or(inferred_pid);
+                let steam_aid = entry_c
+                    .app_id
+                    .or_else(|| entry_c.steam_app_id.and_then(|v| u32::try_from(v).ok()))
+                    .or_else(|| {
+                        let p = Path::new(&entry_c.install_dir);
+                        p.exists()
+                            .then(|| crate::cmd_library::detect_steam_appid_in_folder(p))
+                            .flatten()
+                            .and_then(|v| u32::try_from(v).ok())
+                    });
+
+                let req = CoverResolveRequest {
+                    cache_id: gid.clone(),
+                    title: clean_cover_query(&entry_c.title),
+                    exe_path: (!entry_c.exe_path.trim().is_empty())
+                        .then(|| entry_c.exe_path.clone()),
+                    platform_id: eff_pid,
+                    platform_hint: plat_hint,
+                    steam_app_id: steam_aid,
+                    existing_cover_url: (!entry_c.cover_url.trim().is_empty())
+                        .then(|| entry_c.cover_url.trim().to_string()),
+                    steamgriddb_api_key: key_c,
+                    sidebar_icon_id: Some(gid.clone()),
+                };
+
+                let outcome = resolve_and_cache_cover_in_dirs(&req, &covers_c, &icons_c).await;
+                if let Some(out) = outcome {
+                    return (gid, Some(out.cover_path.to_string_lossy().to_string()));
+                }
+                let src = crate::sidebar_icons::SidebarIconSource::from(&entry_c);
+                let _ = crate::sidebar_icons::resolve_sidebar_icon_in_dirs(&src, &icons_c, &covers_c);
+                (gid, None)
+            });
+        }
+
+        let mut any_resolved = false;
+        while let Some(res) = join_set.join_next().await {
+            let Ok((gid, cover_opt)) = res else {
+                continue;
+            };
+            {
+                let mut guard = in_flight_cover_set()
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                guard.remove(&gid);
+            }
+            let Some(cover_path) = cover_opt else {
+                continue;
+            };
+            if crate::is_shutting_down() {
+                break;
+            }
+            any_resolved = true;
+
+            let app_save = app.clone();
+            let gid_save = gid.clone();
+            let cover_save = cover_path.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Ok(mut lib) = crate::load_library_from_disk(&app_save) {
+                    if let Some(entry) = lib.iter_mut().find(|g| g.id == gid_save) {
+                        if entry.cover_url != cover_save {
+                            entry.cover_url = cover_save.clone();
+                            let wal_ok = crate::resolve_data_root_dir(&app_save)
+                                .and_then(|d| {
+                                    crate::lib_store::append_cover_wal(
+                                        &d,
+                                        &gid_save,
+                                        &cover_save,
+                                        entry.hero_url.as_deref(),
+                                        entry.icon_path.as_deref(),
+                                    )
+                                })
+                                .is_ok();
+                            if !wal_ok {
+                                let _ = crate::save_library_to_disk(&app_save, &lib);
+                            }
+                        }
+                    }
+                }
+            })
+            .await;
+
+            crate::emit_if_alive(
+                &app,
+                "cover-updated",
+                serde_json::json!({
+                    "id": &gid,
+                    "coverPath": &cover_path,
+                    "gameId": &gid,
+                    "coverUrl": &cover_path,
+                }),
+            );
+        }
+
+        if any_resolved && !crate::is_shutting_down() {
+            if let Ok(Ok(lib)) = tokio::task::spawn_blocking({
+                let app_c = app.clone();
+                move || crate::load_library_from_disk(&app_c)
+            })
+            .await
+            {
+                crate::emit_if_alive(&app, "library-updated", &lib);
+            }
+            crate::emit_if_alive(&app, "sidebar-icons-updated", ());
+            duke_core::win32_ffi::trim_current_working_set();
+        }
+    });
 }
 
 #[cfg(test)]

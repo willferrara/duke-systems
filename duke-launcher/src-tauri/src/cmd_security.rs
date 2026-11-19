@@ -4413,6 +4413,9 @@ pub(crate) async fn delete_flagged_file(path: String) -> Result<(), String> {
     }
     run_blocking_timeout(15, "delete_flagged_file", move || {
         let target = PathBuf::from(&clean);
+        if let Some(reason) = crate::uninstaller::protected_path_refusal_reason(&target) {
+            return Err(format!("Refused to delete protected path: {reason}"));
+        }
         if target.exists() && target.is_file() {
             fs::remove_file(&target).map_err(|e| format!("Failed to delete file: {}", e))?;
         }

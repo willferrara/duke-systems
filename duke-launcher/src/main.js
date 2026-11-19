@@ -47,6 +47,11 @@ import {
   healGameRuntimeDlls,
   hideOverlayWindow,
   importExistingLibraries,
+  purgeNonGameEntries,
+  batchRemoveGames,
+  batchFetchCovers,
+  batchBackupSaves,
+  batchToggleFavorite,
   importSourceFile,
   importSourceUrl,
   ingestDroppedPaths,
@@ -96,7 +101,6 @@ import {
   restoreGameSave,
   restoreGameSnapshot,
   runSubsystemBenchmark,
-  scanAndCleanDesktopShortcuts,
   scanRomFolder,
   searchImportedSources,
   searchSteamGridDbArtwork,
@@ -532,6 +536,9 @@ const state = {
     return THEME_PRESETS.some((t) => t.id === saved) ? saved : "dark";
   })(),
   libraryFiltered: [],
+  selectedGameIds: new Set(),
+  selectModeActive: false,
+  lastSelectedGameId: null,
   discordRpcEnabled: false,
   realtimeSaveWatcherEnabled: true,
   desktopChordEnabled: true,
@@ -585,6 +592,61 @@ function resolveMediaUrl(rawUrl) {
     return convertFileSrc(s);
   }
   return s;
+}
+
+function buildLiveCoverSrc(rawCoverPath) {
+  const s = String(rawCoverPath || "").trim();
+  if (!s) return "";
+  if (/^(data:|blob:)/i.test(s)) return s;
+  const base =
+    /^[A-Za-z]:[\\/]/.test(s) || s.startsWith("\\\\")
+      ? convertFileSrc(s)
+      : resolveMediaUrl(s);
+  if (!base) return "";
+  const sep = base.includes("?") ? "&" : "?";
+  return `${base}${sep}v=${Date.now()}`;
+}
+
+function applyLiveCoverUpdate(gameId, coverPath) {
+  const gid = String(gameId || "").trim();
+  const rawPath = String(coverPath || "").trim();
+  if (!gid || !rawPath) return;
+  const liveSrc = buildLiveCoverSrc(rawPath);
+  if (!liveSrc) return;
+
+  for (const list of [state.library, state.libraryFiltered, state.pendingLibraryPayload]) {
+    if (!Array.isArray(list)) continue;
+    for (const g of list) {
+      if (g && String(g.id) === gid) {
+        g.coverUrl = rawPath;
+        g._coverBustRaw = rawPath;
+        g._coverBustUrl = liveSrc;
+      }
+    }
+  }
+
+  if (libraryVirtualGrid) {
+    libraryVirtualGrid.patchCardCover(gid, liveSrc, rawPath);
+  }
+  if (catalogVirtualGrid) {
+    catalogVirtualGrid.patchCardCover(gid, liveSrc, rawPath);
+  }
+
+  const grid = el("library-grid");
+  if (grid) {
+    grid.querySelectorAll(".game-card").forEach((cardEl) => {
+      if (cardEl.dataset.gameId === gid) {
+        cardEl.querySelector(".cover-fallback-card")?.remove();
+        cardEl._vgProcKey = "";
+        const imgEl = cardEl.querySelector("img.game-card-img, img");
+        if (imgEl) {
+          imgEl.style.display = "";
+          imgEl.dataset.coverSrc = liveSrc;
+          imgEl.src = liveSrc;
+        }
+      }
+    });
+  }
 }
 
 const CATALOG_COVER_QUEUE = [];
@@ -1081,6 +1143,10 @@ function closeTopmostUiLayer() {
     closeEmulatorInstallModal();
     return true;
   }
+  if (isVisible("batch-delete-modal")) {
+    closeBatchDeleteModal();
+    return true;
+  }
   if (isVisible("clean-uninstall-modal")) {
     closeCleanUninstallModal();
     return true;
@@ -1126,6 +1192,10 @@ function closeTopmostUiLayer() {
     state.catalog.genresDrawerOpen = false;
     return true;
   }
+  if (state.selectedGameIds.size > 0 || state.selectModeActive) {
+    clearMultiSelectSelection();
+    return true;
+  }
   if (state.selectedDetailId) {
     modalGen++;
     state.modalGen = modalGen;
@@ -1144,6 +1214,9 @@ function switchTab(tab, keepDetail = false) {
   if (!keepDetail) {
     state.selectedDetailId = null;
     abortScopedRequests("detail");
+  }
+  if (tab !== "library" || state.selectedDetailId) {
+    clearMultiSelectSelection(false);
   }
   if (tab !== "catalog") {
     abortScopedRequests("catalog");
@@ -1510,7 +1583,9 @@ function createLibraryCardElement() {
     <div class="game-card-media">
       <img alt="" class="game-card-img" loading="lazy" decoding="async" style="display:none" />
       <div class="game-card-badges">
-        <span></span>
+        <button type="button" class="card-select-btn" data-action="select" title="Select Game (Ctrl+Click or Shift+Click)" aria-label="Select Game">
+          ${svgIcon("icon-check")}
+        </button>
         <button type="button" class="card-fav-btn" data-action="fav" title="Toggle Favorite">
           ${svgIcon("icon-pin")}
         </button>
@@ -1574,6 +1649,7 @@ function createLibraryCardElement() {
   card._vgRefs = {
     mediaEl,
     imgEl,
+    selectBtn: card.querySelector('.card-select-btn[data-action="select"]'),
     favBtn: card.querySelector('.card-fav-btn[data-action="fav"]'),
     actionBtns: Array.from(card.querySelectorAll("[data-game-id], [data-action]")),
     titleEl: card.querySelector(".game-card-title"),
@@ -1595,6 +1671,11 @@ function updateLibraryCardElement(cardEl, game) {
   cardEl.dataset.gameId = gid;
   for (const btn of refs.actionBtns) {
     btn.dataset.gameId = gid;
+  }
+  const isSelected = state.selectedGameIds.has(gid);
+  cardEl.classList.toggle("is-selected", isSelected);
+  if (refs.selectBtn) {
+    refs.selectBtn.setAttribute("aria-pressed", isSelected ? "true" : "false");
   }
   refs.favBtn?.classList.toggle("is-fav", Boolean(game.isFavorite));
 
@@ -1637,7 +1718,10 @@ function updateLibraryCardElement(cardEl, game) {
     }
   }
 
-  const cover = resolveMediaUrl(game.coverUrl) || resolveMediaUrl(game.coverDataUrl);
+  const cover =
+    (game._coverBustUrl && game._coverBustRaw === game.coverUrl
+      ? game._coverBustUrl
+      : resolveMediaUrl(game.coverUrl)) || resolveMediaUrl(game.coverDataUrl);
   if (cover) {
     refs.mediaEl.querySelector(".cover-fallback-card")?.remove();
     cardEl._vgProcKey = "";
@@ -1686,6 +1770,241 @@ function ensureLibraryVirtualGrid() {
   return libraryVirtualGrid;
 }
 
+function pruneStaleMultiSelectIds() {
+  if (state.selectedGameIds.size === 0) return;
+  const validIds = new Set(state.library.map((g) => String(g.id)));
+  for (const gid of Array.from(state.selectedGameIds)) {
+    if (!validIds.has(gid)) {
+      state.selectedGameIds.delete(gid);
+    }
+  }
+  if (state.lastSelectedGameId && !validIds.has(String(state.lastSelectedGameId))) {
+    state.lastSelectedGameId = null;
+  }
+}
+
+function syncMultiSelectUi(refreshCards = true) {
+  pruneStaleMultiSelectIds();
+  const count = state.selectedGameIds.size;
+  const active = Boolean(state.selectModeActive || count > 0);
+  const grid = el("library-grid");
+  if (grid) {
+    grid.classList.toggle("select-mode-active", active);
+  }
+  const selectBtn = el("btn-toggle-select-mode");
+  if (selectBtn) {
+    selectBtn.classList.toggle("active", active);
+  }
+  const bar = el("library-multiselect-bar");
+  const showBar = state.activeTab === "library" && !state.selectedDetailId && count > 0;
+  if (bar) {
+    bar.classList.toggle("hidden", !showBar);
+  }
+  const countLabel = el("multiselect-count-label");
+  if (countLabel) {
+    countLabel.textContent = `${count} selected`;
+  }
+  if (refreshCards && libraryVirtualGrid) {
+    libraryVirtualGrid.invalidateVisible();
+  }
+}
+
+function handleGameCardSelectClick(gameId, shiftKey = false) {
+  const gid = String(gameId || "").trim();
+  if (!gid) return;
+  const list = Array.isArray(state.libraryFiltered) && state.libraryFiltered.length > 0
+    ? state.libraryFiltered
+    : state.library;
+
+  if (shiftKey && state.lastSelectedGameId && state.lastSelectedGameId !== gid) {
+    const startIdx = list.findIndex((g) => String(g.id) === String(state.lastSelectedGameId));
+    const endIdx = list.findIndex((g) => String(g.id) === gid);
+    if (startIdx >= 0 && endIdx >= 0) {
+      const lo = Math.min(startIdx, endIdx);
+      const hi = Math.max(startIdx, endIdx);
+      for (let i = lo; i <= hi; i++) {
+        if (list[i]?.id) {
+          state.selectedGameIds.add(String(list[i].id));
+        }
+      }
+      state.lastSelectedGameId = gid;
+      syncMultiSelectUi(true);
+      return;
+    }
+  }
+
+  if (state.selectedGameIds.has(gid)) {
+    state.selectedGameIds.delete(gid);
+  } else {
+    state.selectedGameIds.add(gid);
+  }
+  state.lastSelectedGameId = gid;
+  syncMultiSelectUi(true);
+}
+
+function selectAllVisibleGames() {
+  const list = Array.isArray(state.libraryFiltered) && state.libraryFiltered.length > 0
+    ? state.libraryFiltered
+    : getFilteredSortedGames();
+  for (const g of list) {
+    if (g?.id) {
+      state.selectedGameIds.add(String(g.id));
+    }
+  }
+  if (list.length > 0) {
+    state.lastSelectedGameId = String(list[list.length - 1].id);
+  }
+  syncMultiSelectUi(true);
+}
+
+function clearMultiSelectSelection(refreshCards = true) {
+  state.selectedGameIds.clear();
+  state.selectModeActive = false;
+  state.lastSelectedGameId = null;
+  closeBatchDeleteModal();
+  syncMultiSelectUi(refreshCards);
+}
+
+function openBatchDeleteModal() {
+  pruneStaleMultiSelectIds();
+  const ids = Array.from(state.selectedGameIds);
+  if (ids.length === 0) return;
+  const modal = el("batch-delete-modal");
+  const summary = el("batch-delete-modal-summary");
+  const listEl = el("batch-delete-preview-list");
+  if (summary) {
+    summary.textContent = `Choose how to handle ${ids.length} selected ${ids.length === 1 ? "game" : "games"}:`;
+  }
+  if (listEl) {
+    const selectedGames = ids
+      .map((id) => state.library.find((g) => String(g.id) === id))
+      .filter(Boolean);
+    listEl.innerHTML = selectedGames
+      .map(
+        (g) =>
+          `<div>${escapeHtml(g.title || "Game")} <span style="opacity:0.65">(${escapeHtml(
+            g.sizeFormatted || formatBytesJs(g.sizeBytes)
+          )})</span></div>`
+      )
+      .join("");
+  }
+  modal?.classList.remove("hidden");
+}
+
+function closeBatchDeleteModal() {
+  modalGen++;
+  state.modalGen = modalGen;
+  el("batch-delete-modal")?.classList.add("hidden");
+}
+
+async function executeBatchDeleteFlow(deleteFiles = false) {
+  const ids = Array.from(state.selectedGameIds);
+  if (ids.length === 0) {
+    closeBatchDeleteModal();
+    return;
+  }
+  closeBatchDeleteModal();
+  showToast(
+    deleteFiles
+      ? `Uninstalling ${ids.length} ${ids.length === 1 ? "game" : "games"} & archiving Zstd saves...`
+      : `Removing ${ids.length} ${ids.length === 1 ? "game" : "games"} from Launcher...`,
+    "info",
+    2800
+  );
+  try {
+    const res = await batchRemoveGames(ids, Boolean(deleteFiles));
+    if (window.__dukeUnloading) return;
+    if (Array.isArray(res?.games)) {
+      state.library = res.games;
+    } else {
+      state.library = await invokeCommand("get_local_library");
+    }
+    clearMultiSelectSelection(false);
+    invalidateSidebarIcons(ids);
+    renderSidebarGameList();
+    renderLibraryGrid();
+    updateSidebarTelemetry();
+    const removed = Number(res?.removedCount || ids.length);
+    const saved = Number(res?.saveBackupsCreated || 0);
+    showToast(
+      deleteFiles
+        ? `Uninstalled ${removed} ${removed === 1 ? "game" : "games"}${saved > 0 ? ` (${saved} Zstd save backup${saved === 1 ? "" : "s"} created)` : ""}.`
+        : `Removed ${removed} ${removed === 1 ? "game" : "games"} from My Games.`,
+      "success",
+      3600
+    );
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+function getSelectedGameIdList() {
+  pruneStaleMultiSelectIds();
+  return Array.from(state.selectedGameIds);
+}
+
+async function runBatchFetchCoversFlow() {
+  const ids = getSelectedGameIdList();
+  if (ids.length === 0) return;
+  try {
+    const queued = Number(await batchFetchCovers(ids)) || 0;
+    showToast(
+      `Fetching covers for ${queued} ${queued === 1 ? "game" : "games"} in the background...`,
+      "info",
+      2800
+    );
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+async function runBatchBackupSavesFlow() {
+  const ids = getSelectedGameIdList();
+  if (ids.length === 0) return;
+  showToast(`Backing up saves for ${ids.length} ${ids.length === 1 ? "game" : "games"}...`, "info", 2400);
+  try {
+    const res = await batchBackupSaves(ids);
+    const ok = Number(res?.backedUpCount || 0);
+    const skipped = Number(res?.skippedCount || 0);
+    showToast(
+      `Backed up ${ok} ${ok === 1 ? "game" : "games"}${skipped > 0 ? ` (${skipped} skipped — no save paths found)` : ""}.`,
+      ok > 0 ? "success" : "info",
+      3600
+    );
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+async function runBatchToggleFavoriteFlow() {
+  const ids = getSelectedGameIdList();
+  if (ids.length === 0) return;
+  try {
+    const lib = await batchToggleFavorite(ids, null);
+    if (Array.isArray(lib)) {
+      state.library = lib;
+    }
+    renderSidebarGameList();
+    renderLibraryGrid();
+    showToast(`Updated Favorite status on ${ids.length} ${ids.length === 1 ? "game" : "games"}.`, "success", 2400);
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+function isTypingInEditableField() {
+  const active = document.activeElement;
+  return Boolean(
+    active &&
+      typeof active.closest === "function" &&
+      active.closest("input, textarea, select, [contenteditable], [contenteditable='true']")
+  );
+}
+
+function isAnyModalOpen() {
+  return Boolean(document.querySelector(".modal-backdrop:not(.hidden)"));
+}
+
 function renderLibraryGrid() {
   const grid = el("library-grid");
   const empty = el("library-empty");
@@ -1694,6 +2013,7 @@ function renderLibraryGrid() {
   const games = getFilteredSortedGames();
   state.libraryFiltered = games;
   empty.classList.toggle("hidden", state.library.length > 0);
+  syncMultiSelectUi(false);
   const vgrid = ensureLibraryVirtualGrid();
 
   if (games.length === 0 && state.library.length > 0) {
@@ -7213,6 +7533,37 @@ async function runImportLibrariesFlow() {
   }
 }
 
+async function runPurgeNonGamesFlow() {
+  try {
+    const res = await purgeNonGameEntries();
+    if (Array.isArray(res?.games)) {
+      state.library = res.games;
+    } else {
+      state.library = await invokeCommand("get_local_library");
+    }
+    const removedCount = Number(res?.removedCount || 0);
+    if (removedCount > 0) {
+      invalidateSidebarIcons();
+      renderSidebarGameList();
+      renderLibraryGrid();
+      updateSidebarTelemetry();
+      const preview = Array.isArray(res?.removedTitles)
+        ? res.removedTitles.slice(0, 3).join(", ")
+        : "";
+      const suffix = removedCount > 3 ? ` +${removedCount - 3} more` : "";
+      showToast(
+        `Cleaned ${removedCount} DLC / non-game ${removedCount === 1 ? "entry" : "entries"}${preview ? ` (${preview}${suffix})` : ""}.`,
+        "success",
+        3800
+      );
+    } else {
+      showToast("Library is clean — no DLCs or non-game entries found.", "info", 2600);
+    }
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
 async function addLocalGameFlow() {
   try {
     const exePath = await pickExecutableFile();
@@ -9367,39 +9718,6 @@ function wireEvents() {
     }
   });
 
-  el("btn-clean-desktop-shortcuts")?.addEventListener("click", async () => {
-    const btn = el("btn-clean-desktop-shortcuts");
-    const summaryEl = el("desktop-cleanup-summary");
-    if (btn) btn.disabled = true;
-    showToast("Scanning Desktop shortcuts for games...", "info", 2400);
-    try {
-      const rep = await scanAndCleanDesktopShortcuts();
-      if (Array.isArray(rep?.library)) {
-        state.library = rep.library;
-        invalidateSidebarIcons();
-        renderSidebarGameList();
-        renderLibraryGrid();
-        updateSidebarTelemetry();
-      }
-      const imported = Number(rep?.importedCount || 0);
-      const moved = Number(rep?.movedToBackup || 0);
-      const skipped = Number(rep?.skippedNonGame || 0);
-      const msg =
-        moved > 0
-          ? `Added ${imported} game(s) and moved ${moved} Desktop shortcut(s) to "${rep.backupDir}" (${skipped} non-game shortcuts left untouched).`
-          : `Checked ${Number(rep?.scannedShortcuts || 0)} Desktop shortcut(s): no game shortcuts needed moving.`;
-      if (summaryEl) {
-        summaryEl.textContent = msg;
-        summaryEl.classList.remove("hidden", "warn");
-      }
-      showToast(msg, imported > 0 ? "success" : "info", 4200);
-    } catch (err) {
-      showToast(String(err), "error");
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-  });
-
   // --- Advanced Engine Settings Listeners ---
   el("setting-cpu-priority-mode")?.addEventListener("change", async (e) => {
     const cpuPriorityMode = String(e.target.value || "auto");
@@ -9979,6 +10297,7 @@ async function runModDropperInstall(game, sourceInput) {
 }
 
 let pendingCleanUninstallGameId = null;
+let pendingCleanUninstallAllowed = false;
 
 function closeCleanUninstallModal() {
   modalGen++;
@@ -9986,30 +10305,45 @@ function closeCleanUninstallModal() {
   abortScopedRequests("clean-uninstall");
   el("clean-uninstall-modal")?.classList.add("hidden");
   pendingCleanUninstallGameId = null;
+  pendingCleanUninstallAllowed = false;
 }
 
 async function openCleanUninstallModalForGame(game) {
   if (!game) return;
+  const myGen = ++modalGen;
+  state.modalGen = modalGen;
   pendingCleanUninstallGameId = game.id;
+  pendingCleanUninstallAllowed = false;
   el("clean-uninstall-modal")?.classList.remove("hidden");
+  const confirmBtn = el("btn-confirm-clean-uninstall");
+  const confirmLabel = confirmBtn?.querySelector("span");
+  if (confirmBtn) confirmBtn.disabled = true;
+  if (confirmLabel) confirmLabel.textContent = "Inspecting...";
   if (el("uninstall-modal-summary")) {
-    el("uninstall-modal-summary").textContent = "Inspecting install folder, .duke-profile sandbox, saves & HKCU registry traces...";
+    el("uninstall-modal-summary").textContent = "Inspecting dedicated game folder, saves & HKCU registry traces...";
   }
   if (el("uninstall-modal-paths")) {
     el("uninstall-modal-paths").innerHTML = "";
   }
   try {
     const preview = await previewCleanUninstall(game.id);
-    if (pendingCleanUninstallGameId !== game.id) return;
+    if (window.__dukeUnloading || modalGen !== myGen || pendingCleanUninstallGameId !== game.id) return;
+    pendingCleanUninstallAllowed = Boolean(preview?.folderDeletionAllowed);
+    if (confirmBtn) confirmBtn.disabled = false;
+    if (confirmLabel) {
+      confirmLabel.textContent = pendingCleanUninstallAllowed
+        ? "Clean Uninstall Now"
+        : "Remove from Launcher";
+    }
     if (el("uninstall-modal-summary")) {
-      el("uninstall-modal-summary").textContent = preview?.summary || `Ready to cleanly uninstall ${game.title}.`;
+      el("uninstall-modal-summary").textContent = preview?.summary || `Ready to uninstall ${game.title}.`;
     }
     if (el("uninstall-modal-paths")) {
       const rows = [
         ["Install Dir", `${preview.installDir || "--"} (${formatBytesJs(preview.installDirBytes || 0)})`],
+        ["Folder Safety", pendingCleanUninstallAllowed ? "Dedicated game folder verified" : "Protected / shared folder (files kept on disk)"],
         ["Sandbox Profile", preview.sandboxProfileDir || "None"],
         ["Discovered Saves", `${(preview.savePaths || []).length} path(s) (${formatBytesJs(preview.saveBytes || 0)})`],
-        ["Orphan AppData", `${(preview.orphanAppdataDirs || []).length} leftover dir(s)`],
         ["HKCU Uninstall / GPU", `${(preview.hkcuUninstallKeys || []).length} key(s) + ${(preview.gpuPrefKeys || []).length} GPU pref`]
       ];
       el("uninstall-modal-paths").innerHTML = rows
@@ -10019,6 +10353,9 @@ async function openCleanUninstallModalForGame(game) {
         .join("");
     }
   } catch (err) {
+    if (window.__dukeUnloading || modalGen !== myGen) return;
+    if (confirmBtn) confirmBtn.disabled = false;
+    if (confirmLabel) confirmLabel.textContent = "Remove from Launcher";
     if (el("uninstall-modal-summary")) {
       el("uninstall-modal-summary").textContent = String(err || "Unable to preview uninstall.");
     }
@@ -10685,13 +11022,23 @@ async function openCleanUninstallModalForGame(game) {
     const game = state.library.find((g) => g.id === gameId);
     if (!game) return;
 
+    const action = btn?.dataset.action || "";
+    const modifierSelect = e.ctrlKey || e.metaKey || e.shiftKey;
+    const selectionActive = state.selectedGameIds.size > 0 || state.selectModeActive;
+    if (action === "select" || (!btn && (modifierSelect || selectionActive))) {
+      e.preventDefault();
+      e.stopPropagation();
+      window.getSelection?.()?.removeAllRanges?.();
+      handleGameCardSelectClick(gameId, Boolean(e.shiftKey));
+      return;
+    }
+
     if (!btn) {
       openGameDetailView(gameId);
       return;
     }
 
     e.stopPropagation();
-    const action = btn.dataset.action;
     if (action === "play") {
       await launchGameById(game);
     } else if (action === "fix") {
@@ -10767,6 +11114,40 @@ async function openCleanUninstallModalForGame(game) {
   });
   el("btn-import-libraries")?.addEventListener("click", runImportLibrariesFlow);
   el("btn-empty-import-libraries")?.addEventListener("click", runImportLibrariesFlow);
+  el("btn-purge-non-games")?.addEventListener("click", runPurgeNonGamesFlow);
+
+  // Multi-select toolbar toggle, floating bulk action bar & batch removal modal
+  el("btn-toggle-select-mode")?.addEventListener("click", () => {
+    if (state.selectModeActive || state.selectedGameIds.size > 0) {
+      clearMultiSelectSelection(true);
+    } else {
+      state.selectModeActive = true;
+      syncMultiSelectUi(true);
+    }
+  });
+  el("btn-multiselect-all")?.addEventListener("click", selectAllVisibleGames);
+  el("btn-multiselect-clear")?.addEventListener("click", () => clearMultiSelectSelection(true));
+  el("btn-multiselect-covers")?.addEventListener("click", runBatchFetchCoversFlow);
+  el("btn-multiselect-backup")?.addEventListener("click", runBatchBackupSavesFlow);
+  el("btn-multiselect-fav")?.addEventListener("click", runBatchToggleFavoriteFlow);
+  el("btn-multiselect-delete")?.addEventListener("click", openBatchDeleteModal);
+  el("btn-batch-remove-only")?.addEventListener("click", () => executeBatchDeleteFlow(false));
+  el("btn-batch-uninstall-files")?.addEventListener("click", () => executeBatchDeleteFlow(true));
+  el("btn-batch-delete-cancel")?.addEventListener("click", closeBatchDeleteModal);
+  el("btn-close-batch-delete-modal")?.addEventListener("click", closeBatchDeleteModal);
+  el("batch-delete-modal")?.addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeBatchDeleteModal();
+  });
+
+  // Ctrl+A selects all visible My Games cards (outside text inputs and modals)
+  document.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+    if (String(e.key || "").toLowerCase() !== "a") return;
+    if (state.activeTab !== "library" || state.selectedDetailId) return;
+    if (isTypingInEditableField() || isAnyModalOpen()) return;
+    e.preventDefault();
+    selectAllVisibleGames();
+  });
   el("titlebar-suspend-pill")?.addEventListener("click", (e) => {
     const gid = e.currentTarget?.dataset?.gameId || null;
     toggleGameSuspendFlow(gid, null);
@@ -12409,12 +12790,19 @@ async function openCleanUninstallModalForGame(game) {
   el("btn-confirm-clean-uninstall")?.addEventListener("click", async () => {
     const gameId = pendingCleanUninstallGameId;
     if (!gameId) return;
+    const allowFolderDelete = Boolean(pendingCleanUninstallAllowed);
     const keepSaves = Boolean(el("chk-uninstall-keep-saves")?.checked ?? true);
-    const removeOrphans = Boolean(el("chk-uninstall-orphans")?.checked ?? true);
     const btn = el("btn-confirm-clean-uninstall");
     try {
       if (btn) btn.disabled = true;
-      const rep = await executeCleanUninstall(gameId, keepSaves, removeOrphans);
+      let toastMsg = "Removed game from Launcher (files kept on disk).";
+      if (allowFolderDelete) {
+        const rep = await executeCleanUninstall(gameId, keepSaves, false);
+        toastMsg = rep?.summary || "Game cleanly uninstalled.";
+      } else {
+        await invokeCommand("remove_local_game", { id: gameId });
+      }
+      if (window.__dukeUnloading) return;
       closeCleanUninstallModal();
       state.library = await invokeCommand("get_local_library");
       delete state.sidebarIcons[gameId];
@@ -12424,9 +12812,9 @@ async function openCleanUninstallModalForGame(game) {
       renderSidebarGameList();
       renderLibraryGrid();
       updateSidebarTelemetry();
-      showToast(rep?.summary || "Game cleanly uninstalled.", "success", 4600);
+      showToast(toastMsg, "success", 4600);
     } catch (err) {
-      showToast(String(err), "error");
+      if (!window.__dukeUnloading) showToast(String(err), "error");
     } finally {
       if (btn) btn.disabled = false;
     }
@@ -14390,15 +14778,27 @@ async function init() {
       scheduleLibraryCoalescedFlush();
     }),
     listenEvent("cover-updated", (payload) => {
-      const gid = payload?.gameId;
-      const coverUrl = payload?.coverUrl;
-      if (!gid || !coverUrl) return;
-      const targetList = Array.isArray(state.pendingLibraryPayload) ? state.pendingLibraryPayload : state.library;
-      const match = targetList.find((g) => g.id === gid);
-      if (match && match.coverUrl !== coverUrl) {
-        match.coverUrl = coverUrl;
-        state.pendingChangedGameIds.add(gid);
-        scheduleLibraryCoalescedFlush();
+      const gid = payload?.id || payload?.gameId;
+      const coverPath = payload?.coverPath || payload?.coverUrl;
+      if (!gid || !coverPath) return;
+      applyLiveCoverUpdate(gid, coverPath);
+      invalidateSidebarIcons([String(gid)]);
+    }),
+    listenEvent("initial-library-scan-complete", (payload) => {
+      const added = Number(payload?.added || 0);
+      if (added > 0) {
+        if (Array.isArray(payload?.games)) {
+          state.library = payload.games;
+        }
+        invalidateSidebarIcons();
+        renderSidebarGameList();
+        renderLibraryGrid();
+        updateSidebarTelemetry();
+        showToast(
+          `Auto-discovered ${added} installed PC ${added === 1 ? "game" : "games"} on your system.`,
+          "success",
+          3600
+        );
       }
     }),
     listenEvent("playtime-synced", (payload) => {
